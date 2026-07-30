@@ -1,0 +1,9 @@
+{
+  "listen": ":8080",
+  "media_root": "/var/lib/display-server/media",
+  "admin_token": "change-me",
+  "image_duration_s": 10,
+  "devices": [
+    { "id": "dev-001", "secret": "请替换为随机长字符串", "name": "客户A-大堂屏" }
+  ]
+}

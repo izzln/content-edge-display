@@ -1,0 +1,15 @@
+# 服务端 systemd 单元（运营方本地服务器）
+# 安装: cp display-server.service /etc/systemd/system/ && systemctl enable --now display-server
+[Unit]
+Description=Content Edge Display Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/display-server -config /etc/display-server/server.json
+Restart=always
+RestartSec=5
+User=display
+StateDirectory=display-server
+
+[Install]
+WantedBy=multi-user.target
