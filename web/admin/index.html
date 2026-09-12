@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>显示屏管理后台</title>
+<style>
+  :root { --line:#ddd; --muted:#888; --accent:#1a6ee0; --bad:#d33; --ok:#2a2; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#f5f6f8; color:#222; }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:10px 20px; display:flex; gap:16px; align-items:center; }
+  header h1 { font-size:16px; margin:0 16px 0 0; }
+  header button.tab { border:none; background:none; padding:6px 10px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; }
+  header button.tab.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  header .right { margin-left:auto; color:var(--muted); font-size:12px; }
+  main { padding:20px; max-width:1100px; margin:0 auto; }
+  table { width:100%; border-collapse:collapse; background:#fff; }
+  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:#fafafa; font-weight:600; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .on { background:var(--ok); } .off { background:var(--bad); }
+  .muted { color:var(--muted); font-size:12px; }
+  button { padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--bad); border-color:var(--bad); }
+  button + button { margin-left:6px; }
+  #overlay { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; align-items:flex-start; justify-content:center; padding:40px 16px; overflow:auto; }
+  #overlay.show { display:flex; }
+  #modal { background:#fff; border-radius:8px; padding:20px; width:100%; max-width:640px; }
+  #modal h2 { margin:0 0 14px; font-size:16px; }
+  #modal .row { display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
+  #modal input[type=text], #modal select, #modal textarea { padding:6px 8px; border:1px solid var(--line); border-radius:4px; font:inherit; }
+  #modal textarea { width:100%; min-height:220px; font-family:ui-monospace,monospace; font-size:12px; }
+  #modal img.preview { max-width:100%; border:1px solid var(--line); margin-top:8px; }
+  #modal .actions { margin-top:16px; text-align:right; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:#fff; padding:8px 16px; border-radius:6px; opacity:0; transition:opacity .3s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  .badge { display:inline-block; background:#eef; border-radius:4px; padding:1px 6px; font-size:12px; margin:1px 2px; }
+  .testing { color:#c60; font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>显示屏管理后台</h1>
+  <button class="tab active" data-tab="devices">设备</button>
+  <button class="tab" data-tab="templates">模板</button>
+  <span class="right">操作生效延迟 ≈ 设备轮询间隔 <button onclick="setToken()">设置Token</button></span>
+</header>
+<main>
+  <div id="tab-devices"><table id="devTable"></table></div>
+  <div id="tab-templates" style="display:none">
+    <p><button class="primary" onclick="newSplitTemplate()">新建左右分屏模板</button>
+       <button onclick="editTemplateJSON()">新建/编辑(JSON)</button></p>
+    <table id="tplTable"></table>
+  </div>
+</main>
+<div id="overlay"><div id="modal"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const token = () => localStorage.getItem("admin_token") || "";
+function setToken() {
+  const t = prompt("管理 Token（服务端 server.json 的 admin_token）", token());
+  if (t !== null) { localStorage.setItem("admin_token", t.trim()); refresh(); }
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts,
+    headers: { "X-Admin-Token": token(), ...(opts.headers || {}) } });
+  if (r.status === 401) { toast("Token 无效，请重新设置"); throw new Error("unauthorized"); }
+  if (!r.ok) { const t = await r.text(); toast(t); throw new Error(t); }
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("json") ? r.json() : r.text();
+}
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3000);
+}
+function modal(html) { $("#modal").innerHTML = html; $("#overlay").classList.add("show"); }
+function closeModal() { $("#overlay").classList.remove("show"); }
+$("#overlay").addEventListener("click", e => { if (e.target.id === "overlay") closeModal(); });
+
+document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
+  document.querySelectorAll("header .tab").forEach(x => x.classList.toggle("active", x === b));
+  $("#tab-devices").style.display = b.dataset.tab === "devices" ? "" : "none";
+  $("#tab-templates").style.display = b.dataset.tab === "templates" ? "" : "none";
+});
+
+let devices = [], templates = [];
+
+function fmtTime(s) { return s ? new Date(s).toLocaleString() : "-"; }
+
+async function refresh() {
+  try {
+    [devices, templates] = await Promise.all([api("/api/v1/admin/devices"), api("/api/v1/admin/templates")]);
+  } catch { return; }
+  renderDevices(); renderTemplates();
+}
+
+function renderDevices() {
+  const rows = devices.map(d => {
+    const st = d.online
+      ? '<span class="dot on"></span>在线'
+      : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
+    const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<span class="badge">${esc(k)}=${esc(v)}</span>`).join("") || '<span class="muted">-</span>';
+    const mode = d.test_until
+      ? `<span class="testing">测试中 → ${esc(new Date(d.test_until).toLocaleTimeString())}</span>`
+      : (d.display.mode === "template" ? `模板: ${esc(d.display.template_id)}` : "目录轮播");
+    const hb = d.heartbeat ? `<div class="muted">播放: ${esc((d.heartbeat.playing || "").split("/").pop())}<br>版本: ${esc(d.heartbeat.version)}</div>` : "";
+    return `<tr>
+      <td>${st}</td>
+      <td><b>${esc(d.name)}</b><div class="muted">${esc(d.id)}</div></td>
+      <td>${attrs}</td>
+      <td>${mode}${hb}</td>
+      <td>
+        <button onclick="testDialog('${esc(d.id)}')">测试</button>
+        <button onclick="attrsDialog('${esc(d.id)}')">属性</button>
+        <button onclick="displayDialog('${esc(d.id)}')">显示配置</button>
+      </td></tr>`;
+  }).join("");
+  $("#devTable").innerHTML = `<tr><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows}`;
+}
+
+// ---- 测试屏 ----
+function testDialog(id) {
+  modal(`<h2>测试屏 — ${esc(id)}</h2>
+    <p>设备显示屏将全屏显示"测试"卡片（含设备名/属性），用于现场定位。生效与恢复各需等待一个轮询周期。</p>
+    <div class="row">
+      <button class="primary" onclick="doTest('${esc(id)}',60)">1 分钟</button>
+      <button class="primary" onclick="doTest('${esc(id)}',300)">5 分钟</button>
+      <button class="primary" onclick="doTest('${esc(id)}',900)">15 分钟</button>
+      <button class="danger" onclick="doTest('${esc(id)}',0)">取消测试</button>
+    </div>
+    <div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+}
+async function doTest(id, secs) {
+  await api(`/api/v1/admin/devices/${id}/test`, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ duration_s: secs }) });
+  toast(secs > 0 ? "已下发测试屏" : "已取消测试"); closeModal(); refresh();
+}
+
+// ---- 属性 ----
+function attrsDialog(id) {
+  const d = devices.find(x => x.id === id);
+  const rows = Object.entries(d.attrs || {}).map(([k, v]) =>
+    `<div class="row attr-row"><input type="text" class="k" value="${esc(k)}" placeholder="key">
+     <input type="text" class="v" value="${esc(v)}" placeholder="value">
+     <button onclick="this.parentNode.remove()">删</button></div>`).join("");
+  modal(`<h2>设备属性 — ${esc(id)}</h2><div id="attrRows">${rows}</div>
+    <p><button onclick="addAttrRow()">+ 添加属性</button> <span class="muted">如 room=302</span></p>
+    <div class="actions"><button onclick="closeModal()">取消</button>
+    <button class="primary" onclick="saveAttrs('${esc(id)}')">保存</button></div>`);
+}
+function addAttrRow() {
+  const div = document.createElement("div");
+  div.className = "row attr-row";
+  div.innerHTML = `<input type="text" class="k" placeholder="key"><input type="text" class="v" placeholder="value"><button onclick="this.parentNode.remove()">删</button>`;
+  $("#attrRows").appendChild(div);
+}
+async function saveAttrs(id) {
+  const attrs = {};
+  for (const row of document.querySelectorAll(".attr-row")) {
+    const k = row.querySelector(".k").value.trim();
+    if (k) attrs[k] = row.querySelector(".v").value;
+  }
+  await api(`/api/v1/admin/devices/${id}/attributes`, { method: "PUT",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(attrs) });
+  toast("属性已保存"); closeModal(); refresh();
+}
+
+// ---- 显示配置 ----
+async function displayDialog(id) {
+  const d = devices.find(x => x.id === id);
+  const uploads = await api("/api/v1/admin/uploads");
+  const tplOpts = templates.map(t =>
+    `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)} (${esc(t.id)})</option>`).join("");
+  modal(`<h2>显示配置 — ${esc(id)}</h2>
+    <div class="row"><label><input type="radio" name="mode" value="playlist" ${d.display.mode !== "template" ? "checked" : ""}> 目录轮播（media 目录放文件）</label></div>
+    <div class="row"><label><input type="radio" name="mode" value="template" ${d.display.mode === "template" ? "checked" : ""}> 模板</label>
+      <select id="tplSel">${tplOpts || '<option value="">（无模板，请先创建）</option>'}</select></div>
+    <div id="bindArea"></div>
+    <div class="row"><input type="file" id="upFile" accept=".png,.jpg,.jpeg"><button onclick="doUpload()">上传图片</button></div>
+    <div class="row"><button onclick="previewTpl('${esc(id)}')">预览</button></div>
+    <div id="previewBox"></div>
+    <div class="actions"><button onclick="closeModal()">取消</button>
+    <button class="primary" onclick="saveDisplay('${esc(id)}')">保存</button></div>`);
+  window._uploads = uploads; window._bindings = { ...(d.display.bindings || {}) };
+  $("#tplSel").onchange = renderBindings; renderBindings();
+}
+function renderBindings() {
+  const tpl = templates.find(t => t.id === $("#tplSel").value);
+  const area = $("#bindArea");
+  if (!tpl) { area.innerHTML = ""; return; }
+  area.innerHTML = tpl.regions.filter(r => r.type === "image").map(r => {
+    const opts = window._uploads.map(u =>
+      `<option value="${esc(u)}" ${window._bindings[r.id] === u ? "selected" : ""}>${esc(u)}</option>`).join("");
+    return `<div class="row">图片区域 <b>${esc(r.id)}</b>:
+      <select onchange="window._bindings['${esc(r.id)}']=this.value" data-region="${esc(r.id)}">
+      <option value="">（未绑定）</option>${opts}</select></div>`;
+  }).join("") || '<p class="muted">该模板没有图片区域</p>';
+}
+async function doUpload() {
+  const f = $("#upFile").files[0];
+  if (!f) { toast("请先选择文件"); return; }
+  const fd = new FormData(); fd.append("file", f);
+  const r = await api("/api/v1/admin/uploads", { method: "POST", body: fd });
+  window._uploads.push(r.name); toast("已上传 " + r.name); renderBindings();
+}
+async function previewTpl(devID) {
+  const tplID = $("#tplSel").value;
+  if (!tplID) { toast("请先选择模板"); return; }
+  // 预览用已保存的配置渲染；未保存的绑定变更请先保存再预览
+  const url = `/api/v1/admin/templates/${tplID}/preview?device=${devID}&_=${Date.now()}`;
+  const r = await fetch(url, { headers: { "X-Admin-Token": token() } });
+  if (!r.ok) { toast(await r.text()); return; }
+  const blob = await r.blob();
+  $("#previewBox").innerHTML = `<img class="preview" src="${URL.createObjectURL(blob)}">`;
+}
+async function saveDisplay(id) {
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const body = { mode };
+  if (mode === "template") {
+    body.template_id = $("#tplSel").value;
+    if (!body.template_id) { toast("请选择模板"); return; }
+    body.bindings = {};
+    for (const [k, v] of Object.entries(window._bindings)) if (v) body.bindings[k] = v;
+  }
+  await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  toast("显示配置已保存"); closeModal(); refresh();
+}
+
+// ---- 模板 ----
+function renderTemplates() {
+  const rows = templates.map(t => `<tr>
+    <td><b>${esc(t.name)}</b><div class="muted">${esc(t.id)} · ${t.w}×${t.h}</div></td>
+    <td>${t.regions.map(r => `<span class="badge">${esc(r.id)}:${esc(r.type)}${r.type !== "image" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
+    <td>
+      <button onclick="previewTemplate('${esc(t.id)}')">预览</button>
+      <button onclick="editTemplateJSON('${esc(t.id)}')">编辑</button>
+      <button class="danger" onclick="deleteTemplate('${esc(t.id)}')">删除</button>
+    </td></tr>`).join("");
+  $("#tplTable").innerHTML = `<tr><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
+}
+function newSplitTemplate() {
+  modal(`<h2>新建左右分屏模板</h2>
+    <div class="row">模板 ID <input type="text" id="f_id" placeholder="split-room"></div>
+    <div class="row">名称 <input type="text" id="f_name" placeholder="房间号分屏"></div>
+    <div class="row">左侧显示属性 key <input type="text" id="f_key" value="room"></div>
+    <div class="row">左侧字号 <input type="text" id="f_size" value="160">
+      文字色 <input type="text" id="f_color" value="#FFFFFF"> 底色 <input type="text" id="f_bg" value="#1E3A8A"></div>
+    <p class="muted">右半屏为图片区域，具体图片在各设备"显示配置"里指定。</p>
+    <div class="actions"><button onclick="closeModal()">取消</button>
+    <button class="primary" onclick="createSplit()">创建</button></div>`);
+}
+async function createSplit() {
+  const tpl = {
+    id: $("#f_id").value.trim(), name: $("#f_name").value.trim(),
+    w: 1440, h: 900, background: "#000000",
+    regions: [
+      { id: "left", x: 0, y: 0, w: 720, h: 900, type: "attribute", key: $("#f_key").value.trim(),
+        font_size: parseInt($("#f_size").value) || 160, color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), align: "center" },
+      { id: "right", x: 720, y: 0, w: 720, h: 900, type: "image" },
+    ],
+  };
+  await api("/api/v1/admin/templates", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(tpl) });
+  toast("模板已创建"); closeModal(); refresh();
+}
+function editTemplateJSON(id) {
+  const t = templates.find(x => x.id === id);
+  const sample = t || { id: "my-template", name: "示例", w: 1440, h: 900, background: "#000000",
+    regions: [{ id: "r1", x: 0, y: 0, w: 1440, h: 900, type: "text", key: "示例文字", font_size: 96, color: "#FFFFFF", align: "center" }] };
+  modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2>
+    <textarea id="tplJSON">${esc(JSON.stringify(sample, null, 2))}</textarea>
+    <div class="actions"><button onclick="closeModal()">取消</button>
+    <button class="primary" onclick="saveTemplateJSON()">保存</button></div>`);
+}
+async function saveTemplateJSON() {
+  let tpl;
+  try { tpl = JSON.parse($("#tplJSON").value); } catch (e) { toast("JSON 语法错误: " + e.message); return; }
+  await api("/api/v1/admin/templates", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(tpl) });
+  toast("模板已保存"); closeModal(); refresh();
+}
+async function previewTemplate(id) {
+  const r = await fetch(`/api/v1/admin/templates/${id}/preview?_=${Date.now()}`, { headers: { "X-Admin-Token": token() } });
+  if (!r.ok) { toast(await r.text()); return; }
+  const blob = await r.blob();
+  modal(`<h2>预览 — ${esc(id)}</h2><img class="preview" src="${URL.createObjectURL(blob)}">
+    <div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+}
+async function deleteTemplate(id) {
+  if (!confirm(`确认删除模板 ${id}？`)) return;
+  await api(`/api/v1/admin/templates/${id}`, { method: "DELETE" });
+  toast("已删除"); refresh();
+}
+
+refresh();
+setInterval(refresh, 10000);
+if (!token()) setToken();
+</script>
+</body>
+</html>

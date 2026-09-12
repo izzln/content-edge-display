@@ -3,7 +3,7 @@
   "device_id": "dev-001",
   "secret": "与服务端配置一致的随机长字符串",
   "cache_dir": "/var/lib/display-agent",
-  "poll_interval_s": 30,
+  "poll_interval_s": 10,
   "heartbeat_interval_s": 60,
   "player": "mpv",
   "image_duration_s": 10,
