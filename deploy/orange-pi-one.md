@@ -78,5 +78,7 @@ systemctl enable --now display-agent
 
 - 图片展示时长为全局统一值（`image_duration_s`），暂不支持逐条目时长；
 - 清单更新时 mpv `loadlist replace` 立即切换列表（"播完当前项再切"留待优化）；
+- 管理后台的测试屏/模板/属性变更经设备轮询生效，延迟 ≈ `poll_interval_s`
+  （局域网建议设 5~10s，304 轮询开销可忽略）；
 - SoC 硬件看门狗（`/dev/watchdog`）、只读根文件系统、OTA 在 M4 实现；
   当前已有 systemd 软看门狗（进程假死 90s 内自动重启）+ mpv 进程自动拉起。

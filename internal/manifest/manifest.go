@@ -94,6 +94,16 @@ func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
 	return sum, nil
 }
 
+// VersionOf 由条目列表 (name, sha256) 计算清单版本号：内容不变则版本稳定，
+// 与清单的生成方式（目录扫描/模板渲染/测试卡）无关。
+func VersionOf(items []Item) string {
+	h := sha256.New()
+	for _, it := range items {
+		fmt.Fprintf(h, "%s|%s\n", it.Name, it.SHA256)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
 // BuildFromDir 扫描 dir 下的媒体文件（按文件名排序）构建清单。
 // 目录不存在视为空清单。隐藏文件、下载临时文件与不支持的类型会被跳过。
 func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*Manifest, error) {
@@ -131,14 +141,7 @@ func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*M
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 
-	// 版本号: 文件名/大小/修改时间列表的摘要，目录内容不变则版本稳定。
-	vh := sha256.New()
-	for _, f := range files {
-		fmt.Fprintf(vh, "%s|%d|%d\n", f.name, f.size, f.mtime)
-	}
-	version := hex.EncodeToString(vh.Sum(nil))[:12]
-
-	m := &Manifest{Version: version, Items: []Item{}, Commands: []string{}}
+	m := &Manifest{Items: []Item{}, Commands: []string{}}
 	for i, f := range files {
 		sum, err := cache.FileSHA256(filepath.Join(dir, f.name), f.size, f.mtime)
 		if err != nil {
@@ -158,5 +161,6 @@ func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*M
 		}
 		m.Items = append(m.Items, item)
 	}
+	m.Version = VersionOf(m.Items)
 	return m, nil
 }

@@ -23,13 +23,18 @@ func newTestServer(t *testing.T) (*Server, string) {
 	cfg := &Config{
 		Listen:         ":0",
 		MediaRoot:      mediaRoot,
+		DataDir:        t.TempDir(),
 		ImageDurationS: 10,
 		Devices: []DeviceConfig{
 			{ID: testDeviceID, Secret: testSecret, Name: "客户A"},
 			{ID: "dev-002", Secret: "other-secret", Name: "客户B"},
 		},
 	}
-	return New(cfg), mediaRoot
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, mediaRoot
 }
 
 func signedRequest(method, path string, body *strings.Reader) *http.Request {

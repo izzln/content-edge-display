@@ -1,6 +1,8 @@
 {
   "listen": ":8080",
   "media_root": "/var/lib/display-server/media",
+  "data_dir": "/var/lib/display-server",
+  "font_path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
   "admin_token": "change-me",
   "image_duration_s": 10,
   "devices": [

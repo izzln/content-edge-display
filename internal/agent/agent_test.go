@@ -43,10 +43,14 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 	mediaRoot := t.TempDir()
 	srvCfg := &server.Config{
 		MediaRoot:      mediaRoot,
+		DataDir:        t.TempDir(),
 		ImageDurationS: 10,
 		Devices:        []server.DeviceConfig{{ID: testDeviceID, Secret: testSecret, Name: "客户A"}},
 	}
-	srv := server.New(srvCfg)
+	srv, err := server.New(srvCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rr := &rangeRecorder{Handler: srv.Handler()}
 	ts := httptest.NewServer(rr)
 	t.Cleanup(ts.Close)
