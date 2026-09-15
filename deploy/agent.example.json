@@ -1,8 +1,8 @@
 {
   "server_url": "http://192.168.1.10:8080",
-  "device_id": "dev-001",
-  "secret": "与服务端配置一致的随机长字符串",
+  "enroll_token": "与服务端 server.json 的 enroll_token 一致",
   "cache_dir": "/var/lib/display-agent",
+  "install_dir": "/usr/local/lib/display-agent",
   "poll_interval_s": 10,
   "heartbeat_interval_s": 60,
   "player": "mpv",

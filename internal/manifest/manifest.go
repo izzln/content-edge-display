@@ -26,11 +26,20 @@ type Item struct {
 	Order    int    `json:"order"`
 }
 
+// Command 是随清单下发的运维指令。
+type Command struct {
+	Type    string `json:"type"` // "update"
+	Version string `json:"version,omitempty"`
+	URL     string `json:"url,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+}
+
 // Manifest 是设备的播放清单。
 type Manifest struct {
-	Version  string   `json:"version"`
-	Items    []Item   `json:"items"`
-	Commands []string `json:"commands"`
+	Version  string    `json:"version"`
+	Items    []Item    `json:"items"`
+	Commands []Command `json:"commands"`
 }
 
 var imageExts = map[string]bool{
@@ -97,9 +106,17 @@ func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
 // VersionOf 由条目列表 (name, sha256) 计算清单版本号：内容不变则版本稳定，
 // 与清单的生成方式（目录扫描/模板渲染/测试卡）无关。
 func VersionOf(items []Item) string {
+	return VersionWith(items, nil)
+}
+
+// VersionWith 在条目之外把指令一并纳入版本号，保证指令出现/消失都会触发设备刷新。
+func VersionWith(items []Item, cmds []Command) string {
 	h := sha256.New()
 	for _, it := range items {
 		fmt.Fprintf(h, "%s|%s\n", it.Name, it.SHA256)
+	}
+	for _, c := range cmds {
+		fmt.Fprintf(h, "cmd|%s|%s|%s\n", c.Type, c.Version, c.SHA256)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
@@ -141,7 +158,7 @@ func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*M
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 
-	m := &Manifest{Items: []Item{}, Commands: []string{}}
+	m := &Manifest{Items: []Item{}, Commands: []Command{}}
 	for i, f := range files {
 		sum, err := cache.FileSHA256(filepath.Join(dir, f.name), f.size, f.mtime)
 		if err != nil {

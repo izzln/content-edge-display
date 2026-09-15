@@ -9,11 +9,16 @@ import (
 )
 
 // Config 是设备代理配置（JSON 文件）。
+//
+// 批量部署时 device_id/secret 留空：编号取自主机名或 SoC 序列号，密钥首启随机生成，
+// 两者持久化在 cache_dir/identity.json，并用 enroll_token 向服务端自注册。
 type Config struct {
 	ServerURL          string   `json:"server_url"`
-	DeviceID           string   `json:"device_id"`
-	Secret             string   `json:"secret"`
+	DeviceID           string   `json:"device_id,omitempty"`
+	Secret             string   `json:"secret,omitempty"`
+	EnrollToken        string   `json:"enroll_token,omitempty"`
 	CacheDir           string   `json:"cache_dir"`
+	InstallDir         string   `json:"install_dir"` // OTA 安装布局根目录；空=禁用 OTA
 	PollIntervalS      int      `json:"poll_interval_s"`
 	HeartbeatIntervalS int      `json:"heartbeat_interval_s"`
 	Player             string   `json:"player"` // "mpv" | "null"
@@ -39,8 +44,11 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) fillDefaults() error {
-	if c.ServerURL == "" || c.DeviceID == "" || c.Secret == "" {
-		return errors.New("config: server_url/device_id/secret are required")
+	if c.ServerURL == "" {
+		return errors.New("config: server_url is required")
+	}
+	if c.EnrollToken == "" && (c.DeviceID == "" || c.Secret == "") {
+		return errors.New("config: 需要 enroll_token（自注册）或显式 device_id + secret")
 	}
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
 	if c.CacheDir == "" {

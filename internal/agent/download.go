@@ -13,15 +13,21 @@ import (
 	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
-// download 将条目下载到 dst：经 .part 临时文件断点续传，完成后校验 sha256 再改名。
+// download 将清单条目下载到 dst。
 func (a *Agent) download(ctx context.Context, item manifest.Item, dst string) error {
+	return a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst)
+}
+
+// downloadFile 经 .part 临时文件断点续传下载 urlPath 到 dst，完成后校验 sha256 再改名。
+// 媒体、渲染图、固件共用此路径。
+func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size int64, dst string) error {
 	part := dst + ".part"
 
 	var offset int64
 	if fi, err := os.Stat(part); err == nil {
 		offset = fi.Size()
 	}
-	if offset > item.Size {
+	if offset > size {
 		// 残留的 .part 比目标还大，只能重来。
 		if err := os.Remove(part); err != nil {
 			return err
@@ -31,7 +37,7 @@ func (a *Agent) download(ctx context.Context, item manifest.Item, dst string) er
 
 	// manifest 中的 URL 是转义后的相对路径；签名须基于解码后的 path，
 	// newRequest 内部已按 req.URL.Path（解码形式）签名，这里直接透传。
-	u, err := url.Parse(item.URL)
+	u, err := url.Parse(urlPath)
 	if err != nil {
 		return err
 	}
@@ -68,14 +74,14 @@ func (a *Agent) download(ctx context.Context, item manifest.Item, dst string) er
 		return err
 	}
 
-	// 完整性校验：不符则删除，等下次轮询重下。
+	// 完整性校验：不符则删除，等下次重下。
 	sum, err := fileSHA256(part)
 	if err != nil {
 		return err
 	}
-	if sum != item.SHA256 {
+	if sum != wantSHA {
 		os.Remove(part)
-		return fmt.Errorf("sha256 mismatch: got %s want %s", sum, item.SHA256)
+		return fmt.Errorf("sha256 mismatch: got %s want %s", sum, wantSHA)
 	}
 	return os.Rename(part, dst)
 }

@@ -50,8 +50,13 @@ func do(t *testing.T, h http.Handler, r *http.Request, wantCode int) *httptest.R
 
 // deviceManifest 以设备身份拉取 manifest。
 func deviceManifest(t *testing.T, h http.Handler) manifest.Manifest {
+	return deviceManifestAt(t, h, time.Now())
+}
+
+// deviceManifestAt 以指定时刻签名拉取 manifest（配合注入的 s.now）。
+func deviceManifestAt(t *testing.T, h http.Handler, now time.Time) manifest.Manifest {
 	t.Helper()
-	w := do(t, h, signedRequest("GET", "/api/v1/device/manifest", nil), http.StatusOK)
+	w := do(t, h, signedRequestAt(now, "GET", "/api/v1/device/manifest", nil), http.StatusOK)
 	var m manifest.Manifest
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)

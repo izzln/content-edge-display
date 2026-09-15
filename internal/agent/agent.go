@@ -1,10 +1,11 @@
-// Package agent 实现设备端播放代理：轮询清单、下载校验、原子切换、心跳上报。
+// Package agent 实现设备端播放代理：身份注册、轮询清单、下载校验、原子切换、心跳上报、程序更新。
 package agent
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,8 +20,8 @@ import (
 	"github.com/izzln/content-edge-display/internal/sign"
 )
 
-// PlayerVersion 随心跳上报，便于运营方掌握端侧版本。
-const PlayerVersion = "0.1.0"
+// Version 是代理程序版本，构建时经 -ldflags -X 注入；随心跳上报并用于 OTA 判断。
+var Version = "dev"
 
 // maxPollBackoff 是轮询失败指数退避的上限。
 const maxPollBackoff = 5 * time.Minute
@@ -29,17 +30,25 @@ type Agent struct {
 	cfg       *Config
 	player    player.Player
 	http      *http.Client
+	identity  Identity
+	hw        HardwareInfo
 	version   string // 当前已应用的 manifest 版本
 	startedAt time.Time
 	failures  int
+
+	updateFailedAt map[string]time.Time
+	verified       bool // 本次运行是否已确认过版本（首个成功心跳后）
 }
 
+// New 创建代理；identity 为空时在 Run 中解析。
 func New(cfg *Config, p player.Player) *Agent {
 	return &Agent{
-		cfg:       cfg,
-		player:    p,
-		http:      &http.Client{Timeout: 10 * time.Minute}, // 覆盖大文件下载
-		startedAt: time.Now(),
+		cfg:            cfg,
+		player:         p,
+		http:           &http.Client{Timeout: 10 * time.Minute}, // 覆盖大文件下载
+		identity:       Identity{DeviceID: cfg.DeviceID, Secret: cfg.Secret},
+		startedAt:      time.Now(),
+		updateFailedAt: map[string]time.Time{},
 	}
 }
 
@@ -49,21 +58,35 @@ func (a *Agent) currentPath() string { return filepath.Join(a.cfg.CacheDir, "cur
 // Version 返回当前已应用的 manifest 版本（测试用）。
 func (a *Agent) Version() string { return a.version }
 
-// Run 是代理主循环：启动播放器 → 恢复本地缓存 → 轮询 + 心跳，直到 ctx 取消。
+// DeviceID 返回解析后的设备编号。
+func (a *Agent) DeviceID() string { return a.identity.DeviceID }
+
+// Run 是代理主循环：身份 → 注册 → 启动播放器 → 恢复本地缓存 → 轮询 + 心跳，直到 ctx 取消。
+// 返回 ErrRestartForUpdate 表示应退出进程以切换到新版本。
 func (a *Agent) Run(ctx context.Context) error {
 	if err := os.MkdirAll(a.mediaDir(), 0o755); err != nil {
 		return err
 	}
+	if err := a.ResolveIdentity(); err != nil {
+		return err
+	}
+	log.Printf("agent: device_id=%s version=%s host=%s serial=%s", a.identity.DeviceID, Version, a.hw.Hostname, a.hw.HWSerial)
+
 	if err := a.player.Start(ctx); err != nil {
 		return err
 	}
-
-	// 断网兜底：先恢复播放本地已缓存内容，再开始追服务器。
+	// 断网兜底：先恢复播放本地已缓存内容，再联网。
 	if err := a.LoadCurrent(); err != nil {
 		log.Printf("agent: no local playlist to restore (%v)", err)
 	}
-
 	sdNotify("READY=1")
+
+	// 自注册（幂等）：成功前不进入正常轮询，但已在播放缓存内容且持续喂狗。
+	if a.cfg.EnrollToken != "" {
+		if err := a.registerLoop(ctx); err != nil {
+			return err
+		}
+	}
 
 	pollTimer := time.NewTimer(0)
 	hbTimer := time.NewTimer(0)
@@ -77,10 +100,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-pollTimer.C:
 			sdNotify("WATCHDOG=1")
 			changed, err := a.PollOnce(ctx)
-			if err != nil {
+			switch {
+			case errors.Is(err, ErrRestartForUpdate):
+				return err
+			case err != nil:
 				a.failures++
 				log.Printf("agent: poll failed (attempt %d): %v", a.failures, err)
-			} else {
+			default:
 				a.failures = 0
 				if changed {
 					log.Printf("agent: applied manifest version %s", a.version)
@@ -94,6 +120,77 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			hbTimer.Reset(time.Duration(a.cfg.HeartbeatIntervalS) * time.Second)
 		}
+	}
+}
+
+// ResolveIdentity 采集硬件信息并确定设备编号/密钥（可单独调用，便于测试）。
+func (a *Agent) ResolveIdentity() error {
+	a.hw = collectHardwareInfo()
+	id, err := loadOrCreateIdentity(a.cfg, a.hw)
+	if err != nil {
+		return fmt.Errorf("identity: %w", err)
+	}
+	a.identity = id
+	return nil
+}
+
+// registerLoop 向服务端自注册，失败指数退避重试直到成功或 ctx 取消。
+func (a *Agent) registerLoop(ctx context.Context) error {
+	delay := 5 * time.Second
+	for {
+		err := a.Register(ctx)
+		if err == nil {
+			return nil
+		}
+		log.Printf("agent: register failed: %v (retry in %s)", err, delay)
+		sdNotify("WATCHDOG=1")
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(delay):
+		}
+		if delay < maxPollBackoff {
+			delay *= 2
+		}
+	}
+}
+
+// Register 发送一次注册请求（幂等）。
+func (a *Agent) Register(ctx context.Context) error {
+	body, err := json.Marshal(map[string]string{
+		"device_id":     a.identity.DeviceID,
+		"secret":        a.identity.Secret,
+		"enroll_token":  a.cfg.EnrollToken,
+		"hostname":      a.hw.Hostname,
+		"hw_serial":     a.hw.HWSerial,
+		"mac":           a.hw.MAC,
+		"ip":            localIP(a.cfg.ServerURL),
+		"agent_version": Version,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.ServerURL+"/api/v1/device/register", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		if resp.StatusCode == http.StatusCreated {
+			log.Printf("agent: registered as new device %s", a.identity.DeviceID)
+		}
+		return nil
+	case http.StatusConflict:
+		return fmt.Errorf("device id %s 已被其他密钥注册，请管理员在后台删除该设备后重试", a.identity.DeviceID)
+	default:
+		return fmt.Errorf("register: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
 }
 
@@ -116,13 +213,14 @@ func (a *Agent) newRequest(ctx context.Context, method, urlPath string, body io.
 		return nil, err
 	}
 	ts := sign.Now()
-	req.Header.Set(sign.HeaderDeviceID, a.cfg.DeviceID)
+	req.Header.Set(sign.HeaderDeviceID, a.identity.DeviceID)
 	req.Header.Set(sign.HeaderTimestamp, ts)
-	req.Header.Set(sign.HeaderSign, sign.Sign(a.cfg.Secret, ts, method, req.URL.Path))
+	req.Header.Set(sign.HeaderSign, sign.Sign(a.identity.Secret, ts, method, req.URL.Path))
 	return req, nil
 }
 
 // PollOnce 拉取一次 manifest；有更新则同步并应用，返回是否发生了变更。
+// 清单附带的指令在内容同步完成后执行；更新指令会返回 ErrRestartForUpdate。
 func (a *Agent) PollOnce(ctx context.Context) (bool, error) {
 	req, err := a.newRequest(ctx, http.MethodGet, "/api/v1/device/manifest", nil)
 	if err != nil {
@@ -154,6 +252,9 @@ func (a *Agent) PollOnce(ctx context.Context) (bool, error) {
 	}
 	if err := a.syncManifest(ctx, &m); err != nil {
 		return false, err
+	}
+	if err := a.handleCommands(ctx, m.Commands); err != nil {
+		return true, err
 	}
 	return true, nil
 }
@@ -257,14 +358,15 @@ func trimSuffix(s, suffix string) (string, bool) {
 	return s, false
 }
 
-// Heartbeat 上报一次心跳。
+// Heartbeat 上报一次心跳；本次运行首个成功心跳会确认当前版本（清除 pending-verify）。
 func (a *Agent) Heartbeat(ctx context.Context) error {
 	hb := map[string]any{
 		"version":      a.version,
 		"uptime":       uptimeSeconds(a.startedAt),
 		"disk_free_mb": diskFreeMB(a.cfg.CacheDir),
 		"playing":      a.player.NowPlaying(),
-		"player_ver":   PlayerVersion,
+		"player_ver":   Version,
+		"ip":           localIP(a.cfg.ServerURL),
 	}
 	body, err := json.Marshal(hb)
 	if err != nil {
@@ -283,6 +385,10 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("heartbeat: unexpected status %s", resp.Status)
+	}
+	if !a.verified {
+		a.verified = true
+		a.commitUpdate()
 	}
 	return nil
 }

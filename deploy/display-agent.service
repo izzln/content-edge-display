@@ -1,5 +1,5 @@
 # 设备端播放代理 systemd 单元（Orange Pi One / Armbian）
-# 安装: cp display-agent.service /etc/systemd/system/ && systemctl enable --now display-agent
+# 由 install-agent.sh 安装；OTA 布局见 deploy/golden-image.md
 [Unit]
 Description=Content Edge Display Agent
 After=network-online.target
@@ -7,11 +7,15 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/display-agent -config /etc/display-agent/agent.json
-# 软看门狗: 代理主循环每 30~60s 发 WATCHDOG=1, 超过 90s 未喂狗则视为假死重启
+# 更新回滚检查：新版本连续 3 次启动未确认则把 current 指回 previous
+ExecStartPre=/usr/local/lib/display-agent/rollback-check.sh /usr/local/lib/display-agent
+ExecStart=/usr/local/lib/display-agent/current -config /etc/display-agent/agent.json
+# 软看门狗: 代理主循环每 10~60s 发 WATCHDOG=1, 超过 90s 未喂狗则视为假死重启
 WatchdogSec=90
 Restart=always
 RestartSec=5
+# 更新时代理主动退出(码 0)，也要重启；连续崩溃不触发 start limit（由 rollback-check 兜底）
+StartLimitIntervalSec=0
 RuntimeDirectory=display-agent
 StateDirectory=display-agent
 # mpv 需要访问 DRM/GPU 设备; root 运行最简单(M1), M4 阶段再收紧为专用用户

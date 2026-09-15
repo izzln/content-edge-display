@@ -1,5 +1,8 @@
 # Orange Pi One 部署手册（Armbian + display-agent）
 
+> **批量部署请看 [`golden-image.md`](golden-image.md)**：母镜像制作、设备自动编号与注册、程序 OTA、安全加固。
+> 本文是单台手工部署/调试步骤。
+
 目标硬件：Orange Pi One（全志 H3，1GB，百兆网，HDMI）
 显示屏：LCD 1440×900（HDMI 驱动板）
 
@@ -43,23 +46,15 @@ H3 的视频硬解（Cedrus/v4l2）视 Armbian 内核版本而定；`--hwdec=aut
 
 ## 4. 部署 display-agent
 
-在开发机上交叉编译并拷贝：
+推荐直接用安装脚本（建立 OTA 布局、写配置、装 systemd 单元、固定分辨率）：
 
 ```sh
 make agent-arm
-scp bin/display-agent-armv7 root@<设备IP>:/usr/local/bin/display-agent
+scp bin/display-agent-armv7 deploy/install-agent.sh deploy/display-agent.service deploy/rollback-check.sh root@<设备IP>:/root/
+ssh root@<设备IP> 'cd /root && SERVER_URL=http://<服务器>:8080 ENROLL_TOKEN=<enroll_token> ./install-agent.sh && systemctl start display-agent'
 ```
 
-设备上：
-
-```sh
-mkdir -p /etc/display-agent
-# 参照 deploy/agent.example.json 写 /etc/display-agent/agent.json
-# device_id/secret 需与服务端 server.json 中该设备一致
-cp display-agent.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now display-agent
-```
+设备会自动注册（编号 = 主机名或 `opi-<序列号后8位>`），出现在管理后台后改名即可。
 
 ## 5. 验机清单（每台设备交付前）
 
