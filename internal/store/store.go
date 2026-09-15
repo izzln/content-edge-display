@@ -45,12 +45,61 @@ type DisplayConfig struct {
 	Bindings   map[string]string `json:"bindings,omitempty"` // region_id -> 上传图片文件名
 }
 
+// Device 是自注册设备（静态配置的设备在 server.json 中，不在此处）。
+type Device struct {
+	ID           string    `json:"id"`
+	Secret       string    `json:"secret"`
+	Name         string    `json:"name"`
+	RegisteredAt time.Time `json:"registered_at"`
+	Hostname     string    `json:"hostname,omitempty"`
+	HWSerial     string    `json:"hw_serial,omitempty"`
+	MAC          string    `json:"mac,omitempty"`
+	IP           string    `json:"ip,omitempty"`
+	AgentVersion string    `json:"agent_version,omitempty"`
+}
+
+// Firmware 是已上传的设备端程序版本。
+type Firmware struct {
+	Version    string    `json:"version"`
+	File       string    `json:"file"`
+	SHA256     string    `json:"sha256"`
+	Size       int64     `json:"size"`
+	Notes      string    `json:"notes,omitempty"`
+	UploadedAt time.Time `json:"uploaded_at"`
+}
+
+// UpdateTarget 是下发给某台设备的更新目标。
+type UpdateTarget struct {
+	Version   string    `json:"version"`
+	NotBefore time.Time `json:"not_before,omitempty"` // 零值=立即
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// GlobalConfig 是全局显示设置。
+type GlobalConfig struct {
+	TemplateID string `json:"template_id,omitempty"` // 全局默认模板
+}
+
+// Schedule 是一条时段计划：命中时用该模板替代全局默认模板。
+type Schedule struct {
+	ID         string `json:"id"`
+	TemplateID string `json:"template_id"`
+	Days       []int  `json:"days"`  // 0=周日 … 6=周六；空=每天
+	Start      string `json:"start"` // "HH:MM"
+	End        string `json:"end"`   // "HH:MM"；Start > End 表示跨午夜
+}
+
 // State 是全部可变状态；字段直接序列化到 state.json。
 type State struct {
 	DeviceAttrs map[string]map[string]string `json:"device_attrs"`
 	Templates   map[string]Template          `json:"templates"`
 	Displays    map[string]DisplayConfig     `json:"displays"`
 	TestUntil   map[string]time.Time         `json:"test_until"`
+	Devices     map[string]Device            `json:"devices"`
+	Firmware    map[string]Firmware          `json:"firmware"`
+	Updates     map[string]UpdateTarget      `json:"updates"`
+	Global      GlobalConfig                 `json:"global"`
+	Schedules   []Schedule                   `json:"schedules"`
 }
 
 func (s *State) init() {
@@ -65,6 +114,18 @@ func (s *State) init() {
 	}
 	if s.TestUntil == nil {
 		s.TestUntil = map[string]time.Time{}
+	}
+	if s.Devices == nil {
+		s.Devices = map[string]Device{}
+	}
+	if s.Firmware == nil {
+		s.Firmware = map[string]Firmware{}
+	}
+	if s.Updates == nil {
+		s.Updates = map[string]UpdateTarget{}
+	}
+	if s.Schedules == nil {
+		s.Schedules = []Schedule{}
 	}
 }
 
@@ -168,6 +229,123 @@ func (st *Store) TestUntil(deviceID string) time.Time {
 	var t time.Time
 	st.View(func(s *State) { t = s.TestUntil[deviceID] })
 	return t
+}
+
+// Device 返回自注册设备。
+func (st *Store) Device(id string) (Device, bool) {
+	var d Device
+	var ok bool
+	st.View(func(s *State) { d, ok = s.Devices[id] })
+	return d, ok
+}
+
+// Global 返回全局显示设置。
+func (st *Store) Global() GlobalConfig {
+	var g GlobalConfig
+	st.View(func(s *State) { g = s.Global })
+	return g
+}
+
+// Schedules 返回时段计划副本。
+func (st *Store) Schedules() []Schedule {
+	var out []Schedule
+	st.View(func(s *State) { out = append(out, s.Schedules...) })
+	return out
+}
+
+// Update 返回设备的更新目标。
+func (st *Store) UpdateTarget(deviceID string) (UpdateTarget, bool) {
+	var u UpdateTarget
+	var ok bool
+	st.View(func(s *State) { u, ok = s.Updates[deviceID] })
+	return u, ok
+}
+
+// FirmwareByVersion 返回固件元数据。
+func (st *Store) FirmwareByVersion(version string) (Firmware, bool) {
+	var f Firmware
+	var ok bool
+	st.View(func(s *State) { f, ok = s.Firmware[version] })
+	return f, ok
+}
+
+// ---- 时段计划 ----
+
+var timePattern = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
+
+func minutesOfDay(hhmm string) int {
+	var h, m int
+	fmt.Sscanf(hhmm, "%d:%d", &h, &m)
+	return h*60 + m
+}
+
+// ValidateSchedules 校验时段计划列表并填充默认值。
+func ValidateSchedules(list []Schedule, getTemplate func(string) (Template, bool)) error {
+	seen := map[string]bool{}
+	for i := range list {
+		sc := &list[i]
+		if sc.ID == "" {
+			sc.ID = fmt.Sprintf("s%d", i+1)
+		}
+		if !idPattern.MatchString(sc.ID) {
+			return fmt.Errorf("schedule %d: id 非法", i)
+		}
+		if seen[sc.ID] {
+			return fmt.Errorf("schedule %q: id 重复", sc.ID)
+		}
+		seen[sc.ID] = true
+		if _, ok := getTemplate(sc.TemplateID); !ok {
+			return fmt.Errorf("schedule %q: 模板 %q 不存在", sc.ID, sc.TemplateID)
+		}
+		if !timePattern.MatchString(sc.Start) || !timePattern.MatchString(sc.End) {
+			return fmt.Errorf("schedule %q: 时间格式须为 HH:MM", sc.ID)
+		}
+		if sc.Start == sc.End {
+			return fmt.Errorf("schedule %q: 开始与结束时间不能相同", sc.ID)
+		}
+		for _, d := range sc.Days {
+			if d < 0 || d > 6 {
+				return fmt.Errorf("schedule %q: 星期须为 0~6", sc.ID)
+			}
+		}
+		if sc.Days == nil {
+			sc.Days = []int{}
+		}
+	}
+	return nil
+}
+
+// ActiveSchedule 返回 now 时刻命中的第一条计划。
+// 跨午夜时段（Start > End）的午夜后部分按起始日的星期匹配。
+func ActiveSchedule(list []Schedule, now time.Time) (Schedule, bool) {
+	m := now.Hour()*60 + now.Minute()
+	today := int(now.Weekday())
+	yesterday := int(now.AddDate(0, 0, -1).Weekday())
+	for _, sc := range list {
+		s, e := minutesOfDay(sc.Start), minutesOfDay(sc.End)
+		var hit bool
+		var day int
+		switch {
+		case s < e:
+			hit, day = m >= s && m < e, today
+		case m >= s: // 跨午夜，午夜前部分
+			hit, day = true, today
+		case m < e: // 跨午夜，午夜后部分
+			hit, day = true, yesterday
+		}
+		if !hit {
+			continue
+		}
+		if len(sc.Days) == 0 {
+			return sc, true
+		}
+		for _, d := range sc.Days {
+			if d == day {
+				return sc, true
+			}
+		}
+	}
+	return Schedule{}, false
 }
 
 // ---- 校验 ----

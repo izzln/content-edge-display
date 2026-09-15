@@ -67,7 +67,10 @@ func TestConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = st.Update(func(s *State) error { s.DeviceAttrs["d"] = map[string]string{"n": "1"}; return nil }) }()
+		go func() {
+			defer wg.Done()
+			_ = st.Update(func(s *State) error { s.DeviceAttrs["d"] = map[string]string{"n": "1"}; return nil })
+		}()
 		go func() { defer wg.Done(); _ = st.Attrs("d") }()
 	}
 	wg.Wait()
@@ -97,9 +100,9 @@ func TestValidateTemplate(t *testing.T) {
 		func(x *Template) { x.Background = "red" },
 		func(x *Template) { x.Regions = nil },
 		func(x *Template) { x.Regions[0].Type = "video" },
-		func(x *Template) { x.Regions[0].Key = "" },                      // attribute 必须有 key
-		func(x *Template) { x.Regions[1].ID = "left" },                   // 重复 id
-		func(x *Template) { x.Regions[0].W = 2000 },                      // 越界
+		func(x *Template) { x.Regions[0].Key = "" },    // attribute 必须有 key
+		func(x *Template) { x.Regions[1].ID = "left" }, // 重复 id
+		func(x *Template) { x.Regions[0].W = 2000 },    // 越界
 		func(x *Template) { x.Regions[0].X = -1 },
 		func(x *Template) { x.Regions[0].Align = "top" },
 		func(x *Template) { x.Regions[0].Color = "#12345" },

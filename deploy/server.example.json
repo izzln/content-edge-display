@@ -4,8 +4,8 @@
   "data_dir": "/var/lib/display-server",
   "font_path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
   "admin_token": "change-me",
+  "enroll_token": "change-me-too",
+  "timezone": "Asia/Shanghai",
   "image_duration_s": 10,
-  "devices": [
-    { "id": "dev-001", "secret": "请替换为随机长字符串", "name": "客户A-大堂屏" }
-  ]
+  "devices": []
 }

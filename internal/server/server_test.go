@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/izzln/content-edge-display/internal/sign"
 )
@@ -38,13 +40,18 @@ func newTestServer(t *testing.T) (*Server, string) {
 }
 
 func signedRequest(method, path string, body *strings.Reader) *http.Request {
+	return signedRequestAt(time.Now(), method, path, body)
+}
+
+// signedRequestAt 以指定时刻签名（配合注入的 s.now 使用，避免落出时间窗）。
+func signedRequestAt(now time.Time, method, path string, body *strings.Reader) *http.Request {
 	var r *http.Request
 	if body == nil {
 		r = httptest.NewRequest(method, path, nil)
 	} else {
 		r = httptest.NewRequest(method, path, body)
 	}
-	ts := sign.Now()
+	ts := strconv.FormatInt(now.Unix(), 10)
 	r.Header.Set(sign.HeaderDeviceID, testDeviceID)
 	r.Header.Set(sign.HeaderTimestamp, ts)
 	r.Header.Set(sign.HeaderSign, sign.Sign(testSecret, ts, method, r.URL.Path))
