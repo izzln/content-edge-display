@@ -39,13 +39,13 @@ type DeviceConfig struct {
 type Config struct {
 	Listen         string         `json:"listen"`
 	MediaRoot      string         `json:"media_root"`
-	DataDir        string         `json:"data_dir"`     // state.json / uploads / rendered / firmware
-	FontPath       string         `json:"font_path"`    // 模板渲染字体（生产需 CJK 字体）
+	DataDir        string         `json:"data_dir"`  // state.json / uploads / rendered / firmware
+	FontPath       string         `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
 	AdminToken     string         `json:"admin_token"`
 	EnrollToken    string         `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
 	Timezone       string         `json:"timezone"`     // 时段计划时区，默认系统时区
 	ImageDurationS int            `json:"image_duration_s"`
-	Devices        []DeviceConfig `json:"devices"`      // 静态配置设备（可选，自注册设备在 state.json）
+	Devices        []DeviceConfig `json:"devices"` // 静态配置设备（可选，自注册设备在 state.json）
 }
 
 // LoadConfig 读取配置文件并填充默认值。
