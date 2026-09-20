@@ -1,0 +1,91 @@
+name: CI
+
+# 每次 push / PR 跑测试并产出成品包（Actions 页面可直接下载）；
+# 推送 v* 标签时额外发布 Release，把两个包挂成附件。
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod   # 跟随 go.mod 的 go 指令，升级时无需改这里
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未格式化，请运行 gofmt -w：" && echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+      - run: go test ./...
+
+  package:
+    name: 打成品包
+    # 打了标签时由 release job 负责出包，这里就不重复构建了
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 版本号取自 git describe，需要完整历史与标签
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: make package
+
+      - id: meta
+        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+
+      - name: 上传成品包
+        uses: actions/upload-artifact@v4
+        with:
+          name: display-packages-${{ steps.meta.outputs.version }}
+          path: bin/*.tar.gz
+          retention-days: 90
+          if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 仅此 job 需要写权限（创建 Release）
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 版本号用标签名，保证二进制内置版本与 Release 名、包名三者一致——
+      # 管理后台"程序更新"页填的版本号必须与二进制内置版本相同，OTA 才能正确判断是否已升级。
+      - run: make package VERSION=${{ github.ref_name }}
+
+      - name: 创建 Release 并附上成品包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" bin/*.tar.gz \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

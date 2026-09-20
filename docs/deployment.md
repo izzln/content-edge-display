@@ -13,10 +13,12 @@
 设备装好后很难再物理接触，所以**除首次烧录外的一切变更都必须能远程完成**——这是整套
 自注册 + OTA 设计的出发点。
 
-## 1. 构建成品包
+## 1. 取得成品包
 
-部署用的一切都由 `make package` 产出，**每个角色一个自包含压缩包**，拷过去解开即可安装，
-不需要从源码树里手工挑文件：
+部署用的一切都在**每个角色一个自包含压缩包**里，拷过去解开即可安装，不需要从源码树里手工挑文件。
+两种取得方式，任选其一：
+
+### 1.1 本地构建
 
 ```sh
 make package
@@ -24,8 +26,27 @@ make package
 # → bin/display-server-<版本>-<架构>.tar.gz  服务端（二进制 + systemd 单元 + 配置样例）
 ```
 
-两个包里都带 `INSTALL.md`，现场不用带着仓库也能装。
 （`make build` / `make agent-arm` 仍然只产出裸二进制，OTA 上传用的就是 `bin/display-agent-armv7`。）
+
+### 1.2 从 GitHub 下载（本机没有 Go 环境时）
+
+仓库配了 GitHub Actions（`.github/workflows/ci.yml`）：
+
+- **每次 push**：跑 gofmt/vet/测试，并把两个成品包作为 Actions 构建产物上传，
+  在仓库 Actions 页面对应那次运行的 Artifacts 里下载（保留 90 天）；
+- **推送 `v*` 标签**：自动创建 Release，把两个包作为附件挂上去。
+
+```sh
+git tag v1.2.0 && git push origin v1.2.0     # 随后在 Releases 页面下载
+```
+
+标签构建会把标签名同时用作**包名**与**二进制内置版本**，两者必定一致——
+管理后台"程序更新"页填的版本号必须与二进制内置版本相同，OTA 才能正确判断设备是否已升到目标版本。
+
+> 服务端包按 Actions 运行器的架构（amd64）构建。若你的服务器是 ARM，请在本地用
+> `GOOS=linux GOARCH=arm64 make package-server` 自行构建。
+
+两个包里都带 `INSTALL.md`，现场不用带着仓库也能装。
 
 ## 2. 服务端部署（运营方本地服务器）
 

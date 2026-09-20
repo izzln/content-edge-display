@@ -43,6 +43,7 @@ bin/                  构建产物与成品包（gitignore，非源码）
 make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖
 # → bin/display-agent-<版本>-armv7.tar.gz    设备端一包（含二进制、安装/加固脚本、systemd 单元、INSTALL.md）
 # → bin/display-server-<版本>-<架构>.tar.gz  服务端一包
+# 本机没有 Go 环境时，可直接从 GitHub Actions 构建产物或 Release 下载这两个包，见 docs/deployment.md 1.2
 
 # 1. 服务端：拷过去解开，按包内 INSTALL.md 安装
 #    必改 server.json 的 admin_token（后台口令）与 enroll_token（设备注册口令）；
@@ -57,8 +58,11 @@ make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖
 
 无显示环境下把 agent 配置成 `"player": "null"` 即可验证整条分发链路。
 
-## 测试
+## 测试与 CI
 
 ```sh
 make test             # go vet + go test ./...
 ```
+
+`.github/workflows/ci.yml`：每次 push 跑 gofmt/vet/测试并上传成品包；推送 `v*` 标签自动发布
+Release 并附上两个包（包名与二进制内置版本一致，可直接用于后台 OTA 下发）。
