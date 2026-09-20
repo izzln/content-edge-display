@@ -64,6 +64,24 @@ func deviceManifestAt(t *testing.T, h http.Handler, now time.Time) manifest.Mani
 	return m
 }
 
+// 列表接口在数据为空时必须返回 []，不能是 null：管理后台拿到 null 会在渲染时
+// 抛 TypeError，整页按钮失效（曾因 schedules 返回 null 导致“上传图片按钮无效”）。
+func TestAdminListEndpointsReturnEmptyArrayNotNull(t *testing.T) {
+	_, h := newAdminTestServer(t)
+	for _, ep := range []string{"schedules", "templates", "firmware", "uploads", "devices"} {
+		w := do(t, h, adminReq("GET", "/api/v1/admin/"+ep, nil), http.StatusOK)
+		body := strings.TrimSpace(w.Body.String())
+		if body == "null" {
+			t.Errorf("%s: 返回 null，应为 []", ep)
+			continue
+		}
+		var list []any
+		if err := json.Unmarshal([]byte(body), &list); err != nil {
+			t.Errorf("%s: 不是 JSON 数组: %s", ep, body)
+		}
+	}
+}
+
 func TestAdminWriteRequiresToken(t *testing.T) {
 	s, _ := newTestServer(t) // AdminToken 为空
 	h := s.Handler()

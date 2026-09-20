@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>显示屏管理后台</title>
 <style>
   :root { --line:#ddd; --muted:#888; --accent:#1a6ee0; --bad:#d33; --ok:#2a2; --warn:#c60; }
@@ -119,13 +120,22 @@ const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
 const tplById = id => templates.find(t => t.id === id);
 const SOURCE = { test: "测试中", override: "设备覆盖", schedule: "时段", global: "全局", playlist: "目录轮播" };
 
+const arr = v => Array.isArray(v) ? v : [];
 async function refresh() {
   try {
-    [devices, templates, global, schedules, firmware, uploads] = await Promise.all([
+    const [d, t, g, s, f, u] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
       api("/api/v1/admin/schedules"), api("/api/v1/admin/firmware"), api("/api/v1/admin/uploads")]);
+    // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
+    [devices, templates, global, schedules, firmware, uploads] =
+      [arr(d), arr(t), g || {}, arr(s), arr(f), arr(u)];
   } catch { return; }
-  renderDevices(); renderTemplates(); renderSchedules(); renderFirmware();
+  try {
+    renderDevices(); renderTemplates(); renderSchedules(); renderFirmware();
+  } catch (e) {
+    console.error(e);
+    toast("界面渲染出错: " + e.message);
+  }
 }
 
 // ================= 设备 =================

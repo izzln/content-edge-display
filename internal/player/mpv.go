@@ -10,22 +10,36 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
+// ensureInterval 是“确保 mpv 真的在放期望内容”的巡检间隔。
+const ensureInterval = 2 * time.Second
+
 // MPV 通过 JSON IPC 驱动 mpv 全屏循环播放。
 //
-// 播放列表落地为 m3u 文件：mpv 运行中经 IPC `loadlist` 热更新；
-// mpv 被拉起/重启时经 --playlist 参数自动恢复，两条路径共用同一文件。
+// 播放列表落地为 m3u 文件，有两条送达路径：mpv 启动时的 --playlist 参数，
+// 以及运行中经 IPC `loadlist` 热更新。两条都可能落空——代理启动时 mpv 刚被拉起、
+// IPC socket 尚未建立，而 --playlist 只在 mpv 启动那一刻求值——所以由 ensureLoop
+// 持续比对 mpv 实际加载的列表与期望列表，不一致就重推，直到一致为止。
+// 没有这层巡检，一次落空就会黑屏到下次内容变化为止（服务端在清单未变时只回 304）。
+//
 // M1 简化：图片展示时长为全局 --image-display-duration（不支持逐条目时长）；
-// loadlist replace 会立即切换列表（"播完当前项再切"留待后续版本）。
+// loadlist replace 会立即切换列表（“播完当前项再切”留待后续版本）。
 type MPV struct {
 	socketPath   string
 	playlistPath string
 	imageDur     int
 	extraArgs    []string
 	reqID        atomic.Int64
+
+	mu      sync.Mutex
+	desired []Item
+	loaded  bool // 最近一次巡检是否确认 mpv 已加载期望列表（仅用于控制日志噪音）
+
+	wake chan struct{}
 }
 
 func NewMPV(socketPath, playlistPath string, imageDurationS int, extraArgs []string) *MPV {
@@ -34,11 +48,13 @@ func NewMPV(socketPath, playlistPath string, imageDurationS int, extraArgs []str
 		playlistPath: playlistPath,
 		imageDur:     imageDurationS,
 		extraArgs:    extraArgs,
+		wake:         make(chan struct{}, 1),
 	}
 }
 
 func (p *MPV) Start(ctx context.Context) error {
 	go p.supervise(ctx)
+	go p.ensureLoop(ctx)
 	return nil
 }
 
@@ -72,12 +88,80 @@ func (p *MPV) supervise(ctx context.Context) {
 			return
 		}
 		log.Printf("player(mpv): mpv exited (%v), restarting in 2s", err)
+		// mpv 重启后列表状态未知，让巡检重新确认一次。
+		p.setLoaded(false)
+		p.signal()
 		select {
 		case <-time.After(2 * time.Second):
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// ensureLoop 周期性确认 mpv 实际加载的播放列表与期望一致，不一致则重推。
+// mpv 未就绪（IPC 连不上）时静默跳过，下个周期再试。
+func (p *MPV) ensureLoop(ctx context.Context) {
+	ticker := time.NewTicker(ensureInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-p.wake:
+		}
+		p.ensureOnce()
+	}
+}
+
+func (p *MPV) ensureOnce() {
+	want := p.snapshot()
+	if len(want) == 0 {
+		return // 期望黑屏/待机：Load 已发过 stop，无需巡检
+	}
+	ok, err := p.playlistMatches(want)
+	if err != nil {
+		p.setLoaded(false) // mpv 未就绪或 IPC 异常，下个周期再试
+		return
+	}
+	if ok {
+		if !p.wasLoaded() {
+			log.Printf("player(mpv): playlist confirmed loaded (%d item(s))", len(want))
+			p.setLoaded(true)
+		}
+		return
+	}
+	if _, err := p.command("loadlist", p.playlistPath, "replace"); err != nil {
+		p.setLoaded(false)
+		return
+	}
+	log.Printf("player(mpv): pushed playlist to mpv (%d item(s))", len(want))
+}
+
+// playlistMatches 比对 mpv 当前播放列表与期望条目（按顺序比文件路径）。
+func (p *MPV) playlistMatches(want []Item) (bool, error) {
+	data, err := p.command("get_property", "playlist")
+	if err != nil {
+		return false, err
+	}
+	entries, ok := data.([]any)
+	if !ok {
+		return false, fmt.Errorf("mpv ipc: unexpected playlist property %T", data)
+	}
+	if len(entries) != len(want) {
+		return false, nil
+	}
+	for i, e := range entries {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		if name, _ := m["filename"].(string); name != want[i].Path {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (p *MPV) Load(items []Item) error {
@@ -95,16 +179,19 @@ func (p *MPV) Load(items []Item) error {
 		return err
 	}
 
-	var err error
+	p.mu.Lock()
+	p.desired = append([]Item(nil), items...)
+	p.loaded = false
+	p.mu.Unlock()
+
 	if len(items) == 0 {
-		_, err = p.command("stop")
-	} else {
-		_, err = p.command("loadlist", p.playlistPath, "replace")
+		if _, err := p.command("stop"); err != nil {
+			log.Printf("player(mpv): stop failed (%v); playlist emptied on disk", err)
+		}
+		return nil
 	}
-	if err != nil {
-		// mpv 可能尚未起来或正在重启：列表文件已就位，重启时会自动加载。
-		log.Printf("player(mpv): IPC load failed (%v); playlist file updated, will apply on mpv (re)start", err)
-	}
+	// 立即推一次（mpv 已在运行时可秒级生效）；失败也无妨，ensureLoop 会持续重试。
+	p.signal()
 	return nil
 }
 
@@ -115,6 +202,32 @@ func (p *MPV) NowPlaying() string {
 	}
 	s, _ := data.(string)
 	return s
+}
+
+func (p *MPV) snapshot() []Item {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]Item(nil), p.desired...)
+}
+
+func (p *MPV) wasLoaded() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.loaded
+}
+
+func (p *MPV) setLoaded(v bool) {
+	p.mu.Lock()
+	p.loaded = v
+	p.mu.Unlock()
+}
+
+// signal 唤醒 ensureLoop 立即巡检一次（不阻塞）。
+func (p *MPV) signal() {
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
 }
 
 // command 对每次调用独立建连，避免维护常驻连接与事件流解析。
