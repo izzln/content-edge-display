@@ -18,7 +18,7 @@ var ErrRestartForUpdate = errors.New("agent: restart required to apply update")
 // 更新失败后的最小重试间隔，避免每次轮询都重下坏包。
 const updateRetryInterval = 5 * time.Minute
 
-// installLayout 描述 OTA 安装布局（见 deploy/install-agent.sh）。
+// installLayout 描述 OTA 安装布局（见 deploy/agent/install-agent.sh）。
 type installLayout struct {
 	root string
 }

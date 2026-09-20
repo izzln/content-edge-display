@@ -53,5 +53,5 @@
 6. **避坑与验机**
    - 部分新批次盒子**锁了 bootloader**（如某些 E900V22C），需拆机短接用 USB Burning Tool
      线刷解锁底包——采购时避开，认准 M401A/UNT403A 等易刷型号；
-   - 每台刷完跑一遍验机清单（见 [deployment.md](deployment.md) 第 5 节），另加：
+   - 每台刷完跑一遍验机清单（见 [deployment.md](deployment.md) 第 6 节），另加：
      CPU 型号 `cat /proc/cpuinfo`、内存容量、mpv 硬解播放测试片。

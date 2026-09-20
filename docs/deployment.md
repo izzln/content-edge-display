@@ -13,19 +13,33 @@
 设备装好后很难再物理接触，所以**除首次烧录外的一切变更都必须能远程完成**——这是整套
 自注册 + OTA 设计的出发点。
 
-## 1. 服务端部署（运营方本地服务器）
+## 1. 构建成品包
+
+部署用的一切都由 `make package` 产出，**每个角色一个自包含压缩包**，拷过去解开即可安装，
+不需要从源码树里手工挑文件：
 
 ```sh
-make build
+make package
+# → bin/display-agent-<版本>-armv7.tar.gz    设备端（二进制 + 安装/加固/回滚脚本 + systemd 单元 + 配置样例）
+# → bin/display-server-<版本>-<架构>.tar.gz  服务端（二进制 + systemd 单元 + 配置样例）
+```
 
-# CJK 字体：模板与测试卡的中文由服务端渲染，缺字体会显示成方框
-apt install -y fonts-noto-cjk
+两个包里都带 `INSTALL.md`，现场不用带着仓库也能装。
+（`make build` / `make agent-arm` 仍然只产出裸二进制，OTA 上传用的就是 `bin/display-agent-armv7`。）
 
-mkdir -p /var/lib/display-server
-cp deploy/server.example.json /etc/display-server/server.json   # 按下表改写
-cp bin/display-server /usr/local/bin/
-cp deploy/display-server.service /etc/systemd/system/
-systemctl enable --now display-server
+## 2. 服务端部署（运营方本地服务器）
+
+```sh
+scp bin/display-server-*.tar.gz root@<服务器>:/root/
+ssh root@<服务器>
+tar xzf display-server-*.tar.gz && cd display-server-*/
+
+apt install -y fonts-noto-cjk          # 模板中文由服务端渲染，缺字体会变方框
+install -m 0755 display-server /usr/local/bin/
+mkdir -p /etc/display-server /var/lib/display-server
+cp server.example.json /etc/display-server/server.json    # 按下表改写
+install -m 0644 display-server.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now display-server
 ```
 
 `server.json` 关键字段：
@@ -41,18 +55,18 @@ systemctl enable --now display-server
 
 管理后台：浏览器打开 `http://<服务器>:8080/admin`，首次访问输入 `admin_token`。
 
-## 2. 设备端：单台部署（样机、调试、也是制作母镜像的第一步）
+## 3. 设备端：单台部署（样机、调试、也是制作母镜像的第一步）
 
 目标硬件：Orange Pi One（全志 H3，1GB，百兆网，HDMI）+ LCD 1440×900（HDMI 驱动板）。
 
-### 2.1 烧录 Armbian
+### 3.1 烧录 Armbian
 
 1. 从 [Armbian 官网](https://www.armbian.com/orange-pi-one/) 下载 Orange Pi One 的
    **Bookworm CLI（minimal 或 standard）** 镜像；
 2. 用 balenaEtcher 写入 TF 卡（建议**工业级/高耐久** TF 卡，≥16GB）；
 3. 首次上电走初始化向导（设 root 密码，普通用户可跳过），配好网络。
 
-### 2.2 固定 HDMI 输出为 1440×900 并禁用息屏
+### 3.2 固定 HDMI 输出为 1440×900 并禁用息屏
 
 编辑 `/boot/armbianEnv.txt`（`install-agent.sh` 会自动追加，手工部署时可自己加）：
 
@@ -66,34 +80,32 @@ extraargs=video=HDMI-A-1:1440x900@60 consoleblank=0
 
 重启后 `cat /sys/class/drm/card*-HDMI-A-1/modes` 首行应为 `1440x900`。
 
-### 2.3 安装 mpv 与代理
+### 3.3 安装 mpv 与代理
 
 ```sh
-# 开发机交叉编译并拷贝
-make agent-arm
-scp bin/display-agent-armv7 deploy/install-agent.sh deploy/display-agent.service \
-    deploy/rollback-check.sh deploy/harden.sh root@<设备IP>:/root/
+# 开发机：拷一个包过去即可
+scp bin/display-agent-*-armv7.tar.gz root@<设备IP>:/root/
 
 # 设备上（root）
-cd /root
+tar xzf display-agent-*-armv7.tar.gz && cd display-agent-*/
 SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
 SERVER_URL=http://<服务器IP>:8080 ENROLL_TOKEN=<server.json 的 enroll_token> ./install-agent.sh
 systemctl start display-agent
 journalctl -u display-agent -n 20     # 应看到注册成功
 ```
 
-设备会自动注册并出现在管理后台（在线），编号规则见 3.1。
+设备会自动注册并出现在管理后台（在线），编号规则见 4.1。
 
 mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/etc/display-agent/agent.json`
 的 `mpv_extra_args` 中加 `["--vo=gpu", "--gpu-context=drm"]`。H3 的硬解（Cedrus/v4l2）
 视内核版本而定，`--hwdec=auto-safe` 不可用时自动回退软解——1440×900 的 H.264 软解 H3 也够用，
 但投放视频仍建议控制在 **H.264 / ≤1440×900 / ≤30fps**。
 
-## 3. 设备端：母镜像批量部署
+## 4. 设备端：母镜像批量部署
 
 所有设备烧**同一个镜像**，首次上电自动获得唯一编号并注册。
 
-### 3.1 设备编号规则
+### 4.1 设备编号规则
 
 代理首次启动按以下优先级确定编号，并持久化到 `/var/lib/display-agent/identity.json`：
 
@@ -107,9 +119,9 @@ mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/
 密钥在首启随机生成，只存在于设备与服务端两处；`enroll_token` 仅用于首次注册。
 同 ID 不同密钥的注册会被拒绝（409），防止冒名顶替。
 
-### 3.2 制作母镜像
+### 4.2 制作母镜像
 
-先按第 2 节把一台样机完整装好并验证通过，然后清理成"出厂状态"：
+先按第 3 节把一台样机完整装好并验证通过，然后清理成"出厂状态"：
 
 ```sh
 systemctl stop display-agent
@@ -125,14 +137,14 @@ poweroff
 
 然后在管理后台**删除样机注册的那台设备**（它的密钥已随 identity.json 删除）。
 
-### 3.3 读出并收缩镜像（开发机/Linux）
+### 4.3 读出并收缩镜像（开发机/Linux）
 
 ```sh
 sudo dd if=/dev/sdX of=display-golden.raw bs=4M status=progress
 sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com/Drewsif/PiShrink
 ```
 
-### 3.4 批量烧录与上线
+### 4.4 批量烧录与上线
 
 1. 用 Armbian Imager / balenaEtcher 烧 `display-golden.img.gz`；若 Imager 支持，为每张卡填 hostname 作为编号；
 2. 插卡、接屏、接网、上电；
@@ -140,9 +152,9 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 4. 后台改名、设属性（如 `room=302`）、绑定图片 → 屏幕在一个轮询周期内更新；
 5. 点【测试】确认是哪块屏。
 
-## 4. 日常运维（管理后台）
+## 5. 日常运维（管理后台）
 
-### 4.1 内容
+### 5.1 内容
 
 - **模板与时段**页：新建左右分屏模板 → 【设为全局】。所有设备默认显示该模板；
 - **设备**页每行【图片】：为该设备指定图片区域要显示的图（上传/选择）；
@@ -150,12 +162,12 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 - **模板与时段**页下方：按顺序配置 `{模板, 星期, 起止时间}`，支持跨午夜；无命中回落全局模板；
 - 生效延迟 ≈ 设备的 `poll_interval_s`（局域网建议 5~10s，304 轮询开销可忽略）。
 
-### 4.2 现场定位
+### 5.2 现场定位
 
 **设备**页每行【测试】→ 选 1/5/15 分钟：该屏全屏显示"测试"卡片（含设备名与属性），到期自动恢复。
 这条路径与正常内容走同一套分发管线，因此测试成功本身就验证了整条链路。
 
-### 4.3 程序 OTA
+### 5.3 程序 OTA
 
 ```sh
 make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSION=1.2.0
@@ -170,7 +182,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 后台设备列表显示"程序版本 → 目标版本"，两者一致即完成。
 
-## 5. 验机清单（每台设备交付前）
+## 6. 验机清单（每台设备交付前）
 
 | 检查项 | 方法 |
 |---|---|
@@ -183,7 +195,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 | 断电恢复 | 拔电重启后 1 分钟内自动恢复播放上次内容（无需人工干预） |
 | 断网兜底 | 拔网线，播放不中断；插回后心跳恢复 |
 
-## 6. 安全基线（`harden.sh` 做了什么，为什么）
+## 7. 安全基线（`harden.sh` 做了什么，为什么）
 
 - **关闭系统自动更新**并 `apt-mark hold` 内核/dtb 包：屏幕设备要的是十年如一日，
   一次内核升级就可能打碎显示输出或硬解；
@@ -195,7 +207,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 > 执行 `harden.sh` 后，**先用另一个终端确认密钥 SSH 能登录，再断开当前会话**。
 
-## 7. 当前已知简化
+## 8. 当前已知简化
 
 - 图片展示时长为全局统一值（`image_duration_s`），暂不支持逐条目时长；
 - 清单更新时 mpv `loadlist replace` 立即切换列表（"播完当前项再切"留待优化）；

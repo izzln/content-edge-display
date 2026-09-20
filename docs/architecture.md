@@ -178,7 +178,7 @@ NotoSansCJK），未配置时退回内嵌拉丁字体，中文会显示为方框
 - **程序 OTA**（更新的是代理二进制，不是 OS）：后台上传版本 → 立即/定时下发（定时由服务端判定，设备无需可信时钟）→
   清单 `commands` 携带 `update{version,url,sha256,size}` → 设备断点续传下载、校验、`current` 符号链接原子切换、退出由 systemd 拉起 →
   首个心跳成功确认；`rollback-check.sh`（ExecStartPre）在新版本连续 3 次启动失败后自动回滚到 `previous`；
-- **安全基线**（`deploy/harden.sh`）：关闭系统自动更新并锁定内核包；nftables 入站默认拒绝；
+- **安全基线**（`deploy/agent/harden.sh`）：关闭系统自动更新并锁定内核包；nftables 入站默认拒绝；
   **SSH 保留但仅密钥 + 仅运维地址**——设备难以物理触达，SSH 是 OTA 之外唯一的远程救援通道。
 
 ## 7. 设备端可靠性设计（多级看门狗）
