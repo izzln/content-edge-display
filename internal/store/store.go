@@ -246,9 +246,10 @@ func (st *Store) Global() GlobalConfig {
 	return g
 }
 
-// Schedules 返回时段计划副本。
+// Schedules 返回时段计划副本；无计划时返回空切片而非 nil，
+// 使其经 JSON 序列化后是 []（返回 null 会让管理后台的渲染整体抛异常）。
 func (st *Store) Schedules() []Schedule {
-	var out []Schedule
+	out := []Schedule{}
 	st.View(func(s *State) { out = append(out, s.Schedules...) })
 	return out
 }

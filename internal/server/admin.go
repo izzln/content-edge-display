@@ -15,7 +15,7 @@ import (
 
 	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/store"
-	"github.com/izzln/content-edge-display/web"
+	"github.com/izzln/content-edge-display/internal/web"
 )
 
 // registerAdmin 挂载管理后台 UI 与管理 API。
