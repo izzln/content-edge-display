@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/sha256"
+	"debug/buildinfo"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,50 @@ import (
 )
 
 var versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// 设备端的目标平台（Orange Pi One = ARMv7）。
+const agentGOOS, agentGOARCH = "linux", "arm"
+
+// 从构建信息的 -ldflags 中取出注入的代理版本号。
+var versionLdflagPattern = regexp.MustCompile(`-X\s+\S*internal/agent\.Version=(\S+)`)
+
+// validateAgentBinary 校验上传的确实是设备端能执行的代理二进制，且其内置版本与填写的版本号一致。
+//
+// 没有这道校验时，误传 .tar.gz 成品包或本机架构的二进制都会被原样分发到所有设备：
+// 设备下载后切换符号链接并退出，systemd 执行失败，要连续失败 3 次才触发回滚，
+// 期间屏幕是黑的。Go 的构建信息可跨架构读取，因此这些错误都能在上传时当场挡住。
+func validateAgentBinary(path, declaredVersion string) error {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("这不是 Go 二进制文件——是否误传了 display-agent-*.tar.gz 成品包？" +
+			"请上传包内解开的 display-agent-armv7")
+	}
+	var goos, goarch, ldflags string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "GOOS":
+			goos = s.Value
+		case "GOARCH":
+			goarch = s.Value
+		case "-ldflags":
+			ldflags = s.Value
+		}
+	}
+	if goos != agentGOOS || goarch != agentGOARCH {
+		return fmt.Errorf("这个二进制的目标平台是 %s/%s，设备需要 %s/%s——"+
+			"是否误传了本机架构的 bin/display-agent？请上传 bin/display-agent-armv7",
+			goos, goarch, agentGOOS, agentGOARCH)
+	}
+	m := versionLdflagPattern.FindStringSubmatch(ldflags)
+	if m == nil {
+		return fmt.Errorf("这个二进制没有注入版本号，请用 make agent-arm 或 make package 构建")
+	}
+	if got := strings.Trim(m[1], `"'`); got != declaredVersion {
+		return fmt.Errorf("二进制内置版本是 %q，与填写的版本号 %q 不一致——"+
+			"版本号必须相同，否则设备升级后服务端无法判断已完成", got, declaredVersion)
+	}
+	return nil
+}
 
 // updateCommand 判断是否要给设备下发更新指令：
 // 有目标 && 到达 not_before && 设备上报版本 ≠ 目标版本 && 固件仍存在。
@@ -107,6 +152,12 @@ func (s *Server) handleUploadFirmware(w http.ResponseWriter, r *http.Request) {
 	if err != nil || n == 0 {
 		os.Remove(tmp)
 		http.Error(w, "empty or unreadable file", http.StatusBadRequest)
+		return
+	}
+	// 在落库前把"传错文件"挡住——这个包会分发到所有设备。
+	if err := validateAgentBinary(tmp, version); err != nil {
+		os.Remove(tmp)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := os.Rename(tmp, dst); err != nil {

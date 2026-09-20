@@ -194,8 +194,19 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSION=1.2.0
 ```
 
-**程序更新**页上传 `bin/display-agent-armv7` 并填版本号（需与二进制内置版本一致，
-可用 `./display-agent -version` 核对）→【下发】选择立即或定时、全部或指定设备。
+**程序更新**页要选的文件是 **`display-agent-armv7` 这个裸二进制**，不是 `.tar.gz` 成品包：
+
+| 来源 | 路径 |
+|---|---|
+| 本地构建 | `bin/display-agent-armv7`（`make agent-arm` 或 `make package` 都会产出） |
+| 从 GitHub 下载 | 把 `display-agent-<版本>-armv7.tar.gz` 解开，取里面的 `display-agent-armv7` |
+
+版本号必须与二进制内置版本**完全一致**（`./display-agent-armv7 -version` 可核对；
+标签构建时就是标签名）。服务端在上传时会读取二进制的构建信息校验三件事，任何一项不符都当场拒绝、
+不会下发到设备：是不是 Go 二进制（挡住误传 tar.gz）、目标平台是不是 linux/arm（挡住误传本机架构的
+`bin/display-agent`）、内置版本与填写的版本号是否一致。
+
+填好后点【下发】，选择立即或定时、全部或指定设备。
 
 设备端流程：轮询取到指令 → 断点续传下载 → sha256 校验 → `current` 符号链接原子切换 →
 进程退出由 systemd 拉起新版本 → 首个心跳成功即确认。若新版本连续 3 次启动失败，

@@ -80,7 +80,12 @@
         备注 <input type="text" id="fwNotes" placeholder="可选">
         <button class="primary" onclick="uploadFirmware()">上传程序</button>
       </div>
-      <span class="muted">上传 <code>make agent-arm</code> 产出的 display-agent-armv7；版本号需与二进制内置版本一致（<code>./display-agent -version</code>）。</span>
+      <span class="muted">
+        选择 <b><code>display-agent-armv7</code> 这个二进制文件</b>——<b>不是</b> <code>.tar.gz</code> 成品包
+        （成品包解开后里面就有它；也可用 <code>make agent-arm</code> 单独构建）。<br>
+        版本号必须与二进制内置版本一致，可用 <code>./display-agent-armv7 -version</code> 核对。
+        传错文件或版本号对不上会被服务端当场拒绝，不会下发到设备。
+      </span>
     </div>
     <table id="fwTable"></table>
   </div>
