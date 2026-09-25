@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ type fakeMPV struct {
 	mu        sync.Mutex
 	playlist  []string
 	loadlists int
+	imageDur  string // 最近一次 set_property image-display-duration 的值
 
 	ln net.Listener
 }
@@ -81,6 +83,12 @@ func (f *fakeMPV) serve(conn net.Conn, playlistPath string) {
 			f.playlist = files
 			f.loadlists++
 			f.mu.Unlock()
+		case "set_property":
+			if prop, _ := req.Command[1].(string); prop == "image-display-duration" {
+				f.mu.Lock()
+				f.imageDur = fmt.Sprint(req.Command[2])
+				f.mu.Unlock()
+			}
 		case "stop":
 			f.mu.Lock()
 			f.playlist = nil
@@ -207,5 +215,70 @@ func TestLoadEmptyStopsPlayback(t *testing.T) {
 	p.ensureOnce()
 	if after := func() int { _, n := fake.state(); return n }(); after != before {
 		t.Fatalf("empty desired list must not push: %d -> %d", before, after)
+	}
+}
+
+func (f *fakeMPV) imageDuration() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.imageDur
+}
+
+// 图片展示时长必须以清单为准：服务端是控制面，运营方在后台改了要能生效，
+// 而不是被每台设备本地配置里的值盖掉。
+func TestImageDurationComesFromManifest(t *testing.T) {
+	// 子测试名保持 ASCII 且简短：t.TempDir() 会带上用例名，unix socket 路径有长度限制。
+	cases := []struct {
+		name  string
+		items []Item
+		want  string
+		desc  string
+	}{
+		{"single-image", []Item{{Path: "/m/a.png", Type: "image", Duration: 10}}, "inf",
+			"单张静态图用 inf，避免每 N 秒重载一次造成闪烁"},
+		{"image-and-video", []Item{{Path: "/m/a.png", Type: "image", Duration: 7}, {Path: "/m/b.mp4", Type: "video"}}, "7",
+			"多条目时取清单里的时长，而不是构造时传入的配置值 30"},
+		{"video-only", []Item{{Path: "/m/a.mp4", Type: "video"}, {Path: "/m/b.mp4", Type: "video"}}, "30",
+			"纯视频列表里没有图片时长，保持兜底值"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, sock, playlistPath := newTestMPV(t)
+			p.imageDur = "30" // 模拟 agent.json 里的兜底值
+			fake := startFakeMPV(t, sock, playlistPath)
+			if err := p.Load(c.items); err != nil {
+				t.Fatal(err)
+			}
+			p.ensureOnce()
+			if got := fake.imageDuration(); got != c.want {
+				t.Fatalf("%s：推送给 mpv 的 image-display-duration = %q，期望 %q", c.desc, got, c.want)
+			}
+			// mpv 启动参数也应使用同一个值
+			if c.want != "" && p.snapshotImageDur() != c.want {
+				t.Fatalf("启动参数用的时长 = %q，期望 %q", p.snapshotImageDur(), c.want)
+			}
+		})
+	}
+}
+
+// 同一个值不应每轮巡检都重复下发。
+func TestImageDurationAppliedOnce(t *testing.T) {
+	p, sock, playlistPath := newTestMPV(t)
+	fake := startFakeMPV(t, sock, playlistPath)
+	if err := p.Load([]Item{{Path: "/m/a.png", Type: "image", Duration: 5}, {Path: "/m/b.mp4", Type: "video"}}); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+	if fake.imageDuration() != "5" {
+		t.Fatalf("首次应下发 5，实际 %q", fake.imageDuration())
+	}
+	fake.mu.Lock()
+	fake.imageDur = "（未再下发）"
+	fake.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		p.ensureOnce()
+	}
+	if fake.imageDuration() != "（未再下发）" {
+		t.Fatalf("时长未变时不应重复下发，实际又收到 %q", fake.imageDuration())
 	}
 }

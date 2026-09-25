@@ -71,6 +71,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | `enroll_token` | 设备自注册口令，需与母镜像里 `agent.json` 的同名字段一致 |
 | `font_path` | CJK 字体路径，如 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` |
 | `data_dir` | 状态、上传图片、渲染结果、固件的存放目录 |
+| `image_duration_s` | 图片停留时长（秒），默认 10。改这里对所有设备生效，无需登录设备 |
 | `timezone` | 时段计划所用时区，默认取系统时区 |
 | `devices` | 静态配置设备（可留空，自注册设备自动写入 `data_dir/state.json`） |
 
@@ -214,6 +215,20 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 后台设备列表显示"程序版本 → 目标版本"，两者一致即完成。
 
+**OTA 能改什么、不能改什么**——设备装好后很难再物理接触，这条边界决定了哪些改动要提前想清楚：
+
+| | 内容 |
+|---|---|
+| 仅 OTA 代理即可 | 播放逻辑、mpv 启动参数、播放列表行为、清单新字段的解析、下载与缓存策略、心跳内容 |
+| 还需同时更新服务端 | 清单生成、模板渲染、管理后台界面（服务端在机房，更新它不用去现场） |
+| **OTA 改不了，需要 SSH** | `/etc/display-agent/agent.json`（OTA 只替换二进制）、systemd 单元、系统软件包（mpv、内核、DRM 驱动） |
+
+所以新增设备端配置项时，务必让"缺省值即可用"——否则这批设备就得逐台登录。
+
+**播放能力现状**：图片与视频都已支持（H.264 MP4 等，见 `internal/manifest` 的扩展名表），
+目录轮播模式下图文混排、视频播完自动切下一条、列表循环都已实测可用；视频不需要任何升级。
+模板渲染的是静态图，因此"模板里嵌视频"目前不支持，那需要服务端配合，不是仅升级代理能做到的。
+
 ## 6. 验机清单（每台设备交付前）
 
 | 检查项 | 方法 |
@@ -241,7 +256,9 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 ## 8. 当前已知简化
 
-- 图片展示时长为全局统一值（`image_duration_s`），暂不支持逐条目时长；
+- 图片展示时长由**服务端** `image_duration_s` 决定（设备端 agent.json 的同名字段只是收到第一份
+  清单之前的兜底）；同一份清单里的图片共用一个时长，暂不支持逐条目时长——mpv 的 m3u 不支持
+  逐条目选项。单张静态图（模板模式恒为此情形）用 `inf`，不会周期性重载；
 - 清单更新时 mpv `loadlist replace` 立即切换列表（"播完当前项再切"留待优化）；
 - SoC 硬件看门狗（`/dev/watchdog`）与只读根文件系统在 M4 实现；当前已有 systemd 软看门狗
   （进程假死 90s 内重启）、mpv 进程自动拉起，以及播放列表巡检（mpv 未加载期望内容时自动重推）。

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,18 +27,23 @@ const ensureInterval = 2 * time.Second
 // 持续比对 mpv 实际加载的列表与期望列表，不一致就重推，直到一致为止。
 // 没有这层巡检，一次落空就会黑屏到下次内容变化为止（服务端在清单未变时只回 304）。
 //
-// M1 简化：图片展示时长为全局 --image-display-duration（不支持逐条目时长）；
-// loadlist replace 会立即切换列表（“播完当前项再切”留待后续版本）。
+// 图片展示时长以**清单**为准（服务端是控制面，运营方在后台改了要能生效），
+// 配置里的 image_duration_s 只作为收到第一份清单之前的兜底。
+// mpv 的 m3u 不支持逐条目选项，所以同一份清单里的图片共用一个时长；
+// 单张静态图（模板模式恒为此情形）用 inf，避免每 N 秒重新加载一次造成闪烁。
+//
+// M1 简化：loadlist replace 会立即切换列表（“播完当前项再切”留待后续版本）。
 type MPV struct {
 	socketPath   string
 	playlistPath string
-	imageDur     int
 	extraArgs    []string
 	reqID        atomic.Int64
 
-	mu      sync.Mutex
-	desired []Item
-	loaded  bool // 最近一次巡检是否确认 mpv 已加载期望列表（仅用于控制日志噪音）
+	mu         sync.Mutex
+	desired    []Item
+	imageDur   string // mpv --image-display-duration 的值：秒数或 "inf"
+	loaded     bool   // 最近一次巡检是否确认 mpv 已加载期望列表（仅用于控制日志噪音）
+	durApplied bool   // 本轮是否已把图片时长同步给 mpv
 
 	wake chan struct{}
 }
@@ -46,10 +52,24 @@ func NewMPV(socketPath, playlistPath string, imageDurationS int, extraArgs []str
 	return &MPV{
 		socketPath:   socketPath,
 		playlistPath: playlistPath,
-		imageDur:     imageDurationS,
+		imageDur:     strconv.Itoa(imageDurationS),
 		extraArgs:    extraArgs,
 		wake:         make(chan struct{}, 1),
 	}
+}
+
+// imageDurationFor 由清单条目决定图片展示时长。
+// 单张图片 → inf（静止画面无需反复重载）；多条目 → 取首张图片的时长。
+func imageDurationFor(items []Item) string {
+	if len(items) == 1 && items[0].Type == "image" {
+		return "inf"
+	}
+	for _, it := range items {
+		if it.Type == "image" && it.Duration > 0 {
+			return strconv.Itoa(it.Duration)
+		}
+	}
+	return "" // 没有图片，保持现值
 }
 
 func (p *MPV) Start(ctx context.Context) error {
@@ -70,7 +90,7 @@ func (p *MPV) supervise(ctx context.Context) {
 			"--osd-level=0",
 			"--no-terminal",
 			"--loop-playlist=inf",
-			fmt.Sprintf("--image-display-duration=%d", p.imageDur),
+			"--image-display-duration=" + p.snapshotImageDur(),
 			"--hwdec=auto-safe",
 			"--input-ipc-server=" + p.socketPath,
 		}
@@ -88,8 +108,11 @@ func (p *MPV) supervise(ctx context.Context) {
 			return
 		}
 		log.Printf("player(mpv): mpv exited (%v), restarting in 2s", err)
-		// mpv 重启后列表状态未知，让巡检重新确认一次。
+		// mpv 重启后列表与时长状态都未知，让巡检重新确认一次。
 		p.setLoaded(false)
+		p.mu.Lock()
+		p.durApplied = false
+		p.mu.Unlock()
 		p.signal()
 		select {
 		case <-time.After(2 * time.Second):
@@ -125,6 +148,8 @@ func (p *MPV) ensureOnce() {
 		p.setLoaded(false) // mpv 未就绪或 IPC 异常，下个周期再试
 		return
 	}
+	// 时长要先于列表生效，否则切换后的第一张图会沿用旧时长。
+	p.applyImageDuration()
 	if ok {
 		if !p.wasLoaded() {
 			log.Printf("player(mpv): playlist confirmed loaded (%d item(s))", len(want))
@@ -137,6 +162,23 @@ func (p *MPV) ensureOnce() {
 		return
 	}
 	log.Printf("player(mpv): pushed playlist to mpv (%d item(s))", len(want))
+}
+
+// applyImageDuration 把期望的图片展示时长同步给运行中的 mpv（每轮只做一次）。
+func (p *MPV) applyImageDuration() {
+	p.mu.Lock()
+	dur, done := p.imageDur, p.durApplied
+	p.mu.Unlock()
+	if done || dur == "" {
+		return
+	}
+	if _, err := p.command("set_property", "image-display-duration", dur); err != nil {
+		return // mpv 未就绪，下个周期再试
+	}
+	p.mu.Lock()
+	p.durApplied = true
+	p.mu.Unlock()
+	log.Printf("player(mpv): image-display-duration = %s", dur)
 }
 
 // playlistMatches 比对 mpv 当前播放列表与期望条目（按顺序比文件路径）。
@@ -182,6 +224,9 @@ func (p *MPV) Load(items []Item) error {
 	p.mu.Lock()
 	p.desired = append([]Item(nil), items...)
 	p.loaded = false
+	if dur := imageDurationFor(items); dur != "" && dur != p.imageDur {
+		p.imageDur, p.durApplied = dur, false
+	}
 	p.mu.Unlock()
 
 	if len(items) == 0 {
@@ -202,6 +247,12 @@ func (p *MPV) NowPlaying() string {
 	}
 	s, _ := data.(string)
 	return s
+}
+
+func (p *MPV) snapshotImageDur() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.imageDur
 }
 
 func (p *MPV) snapshot() []Item {
