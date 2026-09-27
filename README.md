@@ -30,6 +30,7 @@ internal/
   web/                内嵌的管理后台单页
 deploy/agent/         设备端部署资产：安装/加固/回滚脚本、systemd 单元、配置样例
 deploy/server/        服务端部署资产：systemd 单元、配置样例
+scripts/              构建辅助脚本（口令生成）
 docs/                 设计与运维文档
 bin/                  构建产物与成品包（gitignore，非源码）
 ```
@@ -40,13 +41,14 @@ bin/                  构建产物与成品包（gitignore，非源码）
 ## 快速开始
 
 ```sh
-make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖
+make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖，并生成两个口令（见下）
 # → bin/display-agent-<版本>-armv7.tar.gz    设备端一包（含二进制、安装/加固脚本、systemd 单元、INSTALL.md）
 # → bin/display-server-<版本>-<架构>.tar.gz  服务端一包
-# 本机没有 Go 环境时，可直接从 GitHub Actions 构建产物或 Release 下载这两个包，见 docs/deployment.md 1.2
+# 本机没有 Go 环境时可从 GitHub Actions 产物或 Release 下载这两个包；
+# 但公开仓库的 CI 产物里不含真实口令（占位值），需自行生成，见 docs/deployment.md 2.1
 
 # 1. 服务端：拷过去解开，按包内 INSTALL.md 安装
-#    必改 server.json 的 admin_token（后台口令）与 enroll_token（设备注册口令）；
+#    server.json 里的 admin_token / enroll_token 已由 make 生成填好（存于 .secrets/tokens.env，勿提交）
 #    模板中文渲染需 CJK 字体：apt install fonts-noto-cjk 并设置 font_path
 
 # 2. 管理后台：浏览器打开 http://<服务器>:8080/admin （输入 admin_token）

@@ -35,17 +35,21 @@ type DeviceConfig struct {
 	Name   string `json:"name"`
 }
 
+// placeholderToken 是配置样例里的占位口令。仓库是公开的，样例值人人可见，
+// 带着它启动等于没有口令，所以直接拒绝启动。
+const placeholderToken = "change-me"
+
 // Config 是服务端配置（JSON 文件）。
+// 设备不在这里配置：一律由设备凭 enroll_token 自注册，记录在 data_dir/state.json。
 type Config struct {
-	Listen         string         `json:"listen"`
-	MediaRoot      string         `json:"media_root"`
-	DataDir        string         `json:"data_dir"`  // state.json / uploads / rendered / firmware
-	FontPath       string         `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
-	AdminToken     string         `json:"admin_token"`
-	EnrollToken    string         `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
-	Timezone       string         `json:"timezone"`     // 时段计划时区，默认系统时区
-	ImageDurationS int            `json:"image_duration_s"`
-	Devices        []DeviceConfig `json:"devices"` // 静态配置设备（可选，自注册设备在 state.json）
+	Listen         string `json:"listen"`
+	MediaRoot      string `json:"media_root"`
+	DataDir        string `json:"data_dir"`  // state.json / uploads / rendered / firmware
+	FontPath       string `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
+	AdminToken     string `json:"admin_token"`
+	EnrollToken    string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
+	Timezone       string `json:"timezone"`     // 时段计划时区，默认系统时区
+	ImageDurationS int    `json:"image_duration_s"`
 }
 
 // resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
@@ -89,12 +93,13 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ImageDurationS <= 0 {
 		cfg.ImageDurationS = 10
 	}
-	if len(cfg.Devices) == 0 && cfg.EnrollToken == "" {
-		return nil, errors.New("config: 需要配置 devices 或 enroll_token（否则没有任何设备能接入）")
+	if cfg.EnrollToken == "" {
+		return nil, errors.New("config: enroll_token 不能为空，否则没有任何设备能接入（用 make tokens 生成）")
 	}
-	for _, d := range cfg.Devices {
-		if d.ID == "" || d.Secret == "" {
-			return nil, errors.New("config: device id/secret must not be empty")
+	for name, tok := range map[string]string{"admin_token": cfg.AdminToken, "enroll_token": cfg.EnrollToken} {
+		if tok == placeholderToken {
+			return nil, fmt.Errorf("config: %s 还是配置样例里的占位值 %q，这个值是公开的，请用 make tokens 生成后替换",
+				name, placeholderToken)
 		}
 	}
 	return &cfg, nil
@@ -115,7 +120,6 @@ type Heartbeat struct {
 type DeviceStatus struct {
 	ID           string              `json:"id"`
 	Name         string              `json:"name"`
-	Registered   bool                `json:"registered"` // 自注册（可删除）还是静态配置
 	Online       bool                `json:"online"`
 	LastSeen     *time.Time          `json:"last_seen,omitempty"`
 	Heartbeat    *Heartbeat          `json:"heartbeat,omitempty"`
@@ -132,7 +136,6 @@ type DeviceStatus struct {
 // Server 持有配置与运行期状态。
 type Server struct {
 	cfg      *Config
-	devices  map[string]DeviceConfig // 静态配置设备
 	hashes   *manifest.HashCache
 	store    *store.Store
 	renderer *render.Renderer
@@ -159,7 +162,6 @@ func New(cfg *Config) (*Server, error) {
 	}
 	s := &Server{
 		cfg:      cfg,
-		devices:  make(map[string]DeviceConfig),
 		hashes:   manifest.NewHashCache(),
 		store:    st,
 		loc:      loc,
@@ -178,9 +180,6 @@ func New(cfg *Config) (*Server, error) {
 	}
 	if cfg.FontPath == "" {
 		log.Printf("warning: font_path 未配置，模板/测试卡中的中文将无法正常显示（请安装 CJK 字体并配置，如 fonts-noto-cjk）")
-	}
-	for _, d := range cfg.Devices {
-		s.devices[d.ID] = d
 	}
 	return s, nil
 }
@@ -202,31 +201,24 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// deviceByID 在静态配置与自注册设备中查找。
+// deviceByID 查找已注册的设备。
 func (s *Server) deviceByID(id string) (DeviceConfig, bool) {
-	if dev, ok := s.devices[id]; ok {
-		return dev, true
-	}
 	if d, ok := s.store.Device(id); ok {
 		return DeviceConfig{ID: d.ID, Secret: d.Secret, Name: d.Name}, true
 	}
 	return DeviceConfig{}, false
 }
 
-// allDevices 返回静态 + 自注册设备（静态在前，其余按 ID 排序）。
+// allDevices 返回全部已注册设备，按 ID 排序。
 func (s *Server) allDevices() []DeviceConfig {
-	out := append([]DeviceConfig(nil), s.cfg.Devices...)
-	var reg []DeviceConfig
+	out := []DeviceConfig{}
 	s.store.View(func(st *store.State) {
 		for _, d := range st.Devices {
-			if _, static := s.devices[d.ID]; static {
-				continue
-			}
-			reg = append(reg, DeviceConfig{ID: d.ID, Secret: d.Secret, Name: d.Name})
+			out = append(out, DeviceConfig{ID: d.ID, Secret: d.Secret, Name: d.Name})
 		}
 	})
-	sort.Slice(reg, func(i, j int) bool { return reg[i].ID < reg[j].ID })
-	return append(out, reg...)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // authenticate 校验设备签名请求头，返回设备配置。

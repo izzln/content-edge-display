@@ -4,6 +4,7 @@
 
 ```
 display-agent-armv7      设备代理二进制（ARMv7，静态编译）
+enroll-token             设备自注册口令，与服务端包里的 server.json 匹配
 install-agent.sh         安装脚本：建立 OTA 布局、写配置、装 systemd 单元、固定 1440×900
 harden.sh                安全加固：关自动更新、nftables 入站白名单、SSH 仅密钥
 rollback-check.sh        OTA 回滚检查（由 systemd ExecStartPre 调用）
@@ -19,8 +20,9 @@ tar xzf display-agent-<版本>-armv7.tar.gz && cd display-agent-<版本>
 # 1. 安全加固（母镜像制作时执行一次；加固后请先另开一个终端确认密钥 SSH 能登录再断开）
 SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
 
-# 2. 安装代理（ENROLL_TOKEN 取自服务端 server.json 的同名字段）
-SERVER_URL=http://<服务器IP>:8080 ENROLL_TOKEN=<enroll_token> ./install-agent.sh
+# 2. 安装代理（注册口令默认取包内 enroll-token，无需手工填）
+#    server_url 写死在设备上、OTA 改不了，所以请用域名而不是 IP
+SERVER_URL=http://display.lan:8080 ./install-agent.sh
 
 # 3. 启动并确认
 systemctl start display-agent

@@ -85,7 +85,7 @@ func TestRegisterFlow(t *testing.T) {
 			found = &statuses[i]
 		}
 	}
-	if found == nil || !found.Registered || found.HW == nil || found.HW.Hostname != "scr-0017" || found.HW.Secret != "" {
+	if found == nil || found.HW == nil || found.HW.Hostname != "scr-0017" || found.HW.Secret != "" {
 		t.Fatalf("registered device not listed properly: %+v", found)
 	}
 
@@ -95,13 +95,15 @@ func TestRegisterFlow(t *testing.T) {
 	do(t, h, signedAs("scr-0017", secret, "GET", "/api/v1/device/manifest"), http.StatusUnauthorized)
 	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", strings.Repeat("cd", 32), enrollToken)), http.StatusCreated)
 
-	// 静态设备不能删
-	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/"+testDeviceID, nil), http.StatusConflict)
+	// 设备只有自注册这一种，任何设备都能改名与删除
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/name", map[string]string{"name": "改个名"}), http.StatusNoContent)
+	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/"+testDeviceID, nil), http.StatusNoContent)
 }
 
 func TestRegisterDisabledWithoutToken(t *testing.T) {
-	_, h := newAdminTestServer(t) // 无 EnrollToken
-	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("x-1", strings.Repeat("ab", 32), "")), http.StatusForbidden)
+	s, _ := newAdminTestServer(t)
+	s.cfg.EnrollToken = "" // 未配置注册口令时，注册通道整体关闭
+	do(t, s.Handler(), jsonReq("POST", "/api/v1/device/register", registerBody("x-1", strings.Repeat("ab", 32), "")), http.StatusForbidden)
 }
 
 // testAgentVersion 是测试用代理二进制里注入的版本号。

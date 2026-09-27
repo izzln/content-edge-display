@@ -21,8 +21,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("init server: %v", err)
 	}
-	log.Printf("display-server listening on %s, media_root=%s, devices=%d, admin UI at /admin",
-		cfg.Listen, cfg.MediaRoot, len(cfg.Devices))
+	log.Printf("display-server listening on %s, media_root=%s, data_dir=%s, admin UI at /admin",
+		cfg.Listen, cfg.MediaRoot, cfg.DataDir)
 	if err := http.ListenAndServe(cfg.Listen, s.Handler()); err != nil {
 		log.Fatal(err)
 	}

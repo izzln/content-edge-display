@@ -139,7 +139,7 @@ func TestRegisterThenPoll(t *testing.T) {
 	h.ServeHTTP(w, r)
 	var statuses []server.DeviceStatus
 	json.Unmarshal(w.Body.Bytes(), &statuses)
-	if len(statuses) != 1 || statuses[0].ID != a.DeviceID() || !statuses[0].Online || !statuses[0].Registered {
+	if len(statuses) != 1 || statuses[0].ID != a.DeviceID() || !statuses[0].Online {
 		t.Fatalf("device not online in admin: %+v", statuses)
 	}
 	if statuses[0].AgentVersion != Version {

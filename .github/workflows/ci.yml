@@ -9,6 +9,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# GitHub Actions 会设 CI=true，Makefile 据此不把真实口令打进产物——
+# 本仓库是公开的，Actions 产物与 Release 附件谁都能下载。
+env:
+  CI: "true"
+
 permissions:
   contents: read
 

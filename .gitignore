@@ -3,3 +3,6 @@ data/
 *.log
 server.json
 agent.json
+
+# 本地生成的口令，绝不提交（丢失会导致新设备无法注册）
+.secrets/

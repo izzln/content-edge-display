@@ -3,7 +3,7 @@
 ```
 display-server           服务端二进制
 display-server.service   systemd 单元
-server.example.json      配置样例
+server.json              配置，两个口令已自动生成填好
 ```
 
 ## 安装（自包含目录布局）
@@ -17,13 +17,15 @@ tar xzf display-server-<版本>-<架构>.tar.gz && cd display-server-<版本>
 
 install -d /srv/display/fonts
 install -m 0755 display-server /srv/display/
-cp server.example.json /srv/display/server.json
+cp server.json /srv/display/
 
 # 中文字体：模板与测试卡由服务端渲染，缺字体中文会变方框
 apt install -y fonts-noto-cjk
 cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /srv/display/fonts/
 
-# 必改 server.json：admin_token（后台口令）、enroll_token（设备注册口令）
+#   server.json 里的 admin_token / enroll_token 已由 make 生成填好；
+#   若是从 GitHub Releases 下载的包，里面是占位值 change-me，服务端会拒绝启动，
+#   需在构建机上执行 make tokens 生成后替换。
 #   media/ data/ 会在首次启动时自动创建
 
 useradd -r -s /usr/sbin/nologin display 2>/dev/null || true

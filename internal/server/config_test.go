@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,5 +93,41 @@ func TestGlobalImageDurationReachesDevices(t *testing.T) {
 	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]any{"image_duration_s": 0}), http.StatusOK)
 	if back := deviceManifest(t, h); back.Items[0].Duration != s.cfg.ImageDurationS {
 		t.Fatalf("清零后应回落到配置值，得到 %d", back.Items[0].Duration)
+	}
+}
+
+// 仓库是公开的，配置样例里的占位口令人人可见，带着它启动等于没有口令。
+func TestLoadConfigRejectsPlaceholderAndMissingTokens(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		p := filepath.Join(dir, "server.json")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name, body, wantIn string
+	}{
+		{"占位 admin_token", `{"admin_token":"change-me","enroll_token":"G2o4MrHY"}`, "admin_token"},
+		{"占位 enroll_token", `{"admin_token":"6DOTtuXB","enroll_token":"change-me"}`, "enroll_token"},
+		{"缺少 enroll_token", `{"admin_token":"6DOTtuXB"}`, "enroll_token"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := LoadConfig(write(t, c.body))
+			if err == nil {
+				t.Fatal("应当拒绝启动")
+			}
+			if !strings.Contains(err.Error(), c.wantIn) {
+				t.Fatalf("错误信息应点明是哪个字段，得到：%v", err)
+			}
+		})
+	}
+
+	// 正常口令可以加载
+	if _, err := LoadConfig(write(t, `{"admin_token":"6DOTtuXB","enroll_token":"G2o4MrHY"}`)); err != nil {
+		t.Fatalf("正常配置不应报错：%v", err)
 	}
 }

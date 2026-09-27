@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -18,7 +19,9 @@ import (
 
 const (
 	testDeviceID = "dev-001"
-	testSecret   = "test-secret"
+	// 注册接口要求密钥不短于 32 字节（真实设备用 32 字节随机数的 hex）
+	testSecret = "0123456789abcdef0123456789abcdef"
+	testEnroll = "enroll-me"
 )
 
 // rangeRecorder 记录媒体请求携带的 Range 头，用于断言续传确实发生。
@@ -45,7 +48,7 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 		MediaRoot:      mediaRoot,
 		DataDir:        t.TempDir(),
 		ImageDurationS: 10,
-		Devices:        []server.DeviceConfig{{ID: testDeviceID, Secret: testSecret, Name: "客户A"}},
+		EnrollToken:    testEnroll,
 	}
 	srv, err := server.New(srvCfg)
 	if err != nil {
@@ -54,6 +57,8 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 	rr := &rangeRecorder{Handler: srv.Handler()}
 	ts := httptest.NewServer(rr)
 	t.Cleanup(ts.Close)
+	// 设备只有自注册这一条路径，先把测试设备注册进去
+	registerTestDevice(t, ts.URL, testDeviceID, testSecret)
 
 	cfg := &Config{
 		ServerURL: ts.URL,
@@ -75,6 +80,22 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 		t.Fatal(err)
 	}
 	return a, p, srv, rr, devDir
+}
+
+// registerTestDevice 走真实的注册接口登记一台设备。
+func registerTestDevice(t *testing.T, baseURL, id, secret string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{
+		"device_id": id, "secret": secret, "enroll_token": testEnroll,
+	})
+	resp, err := http.Post(baseURL+"/api/v1/device/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		t.Fatalf("注册测试设备失败: %s", resp.Status)
+	}
 }
 
 func TestEndToEnd(t *testing.T) {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net"
@@ -37,21 +38,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if req.EnrollToken != s.cfg.EnrollToken {
+	if subtle.ConstantTimeCompare([]byte(req.EnrollToken), []byte(s.cfg.EnrollToken)) != 1 {
 		http.Error(w, "bad enroll token", http.StatusUnauthorized)
 		return
 	}
 	if !deviceIDPattern.MatchString(req.DeviceID) || len(req.Secret) < 32 {
 		http.Error(w, "invalid device_id or secret", http.StatusBadRequest)
-		return
-	}
-	// 与静态配置设备同名：只接受密钥一致的情况（等价于幂等）。
-	if static, ok := s.devices[req.DeviceID]; ok {
-		if static.Secret != req.Secret {
-			http.Error(w, "device id conflicts with configured device", http.StatusConflict)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if req.IP == "" {

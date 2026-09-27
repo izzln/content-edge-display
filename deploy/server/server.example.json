@@ -5,6 +5,5 @@
   "font_path": "fonts/NotoSansCJK-Regular.ttc",
   "admin_token": "change-me",
   "enroll_token": "change-me-too",
-  "timezone": "Asia/Shanghai",
-  "devices": []
+  "timezone": "Asia/Shanghai"
 }

@@ -170,16 +170,16 @@ function renderDevices() {
     const hw = d.hw ? `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>` : "";
     return `<tr>
       <td>${st}</td>
-      <td><b>${esc(d.name)}</b> ${d.registered ? '<span class="badge">自注册</span>' : ""}<div class="muted">${esc(d.id)}</div>${hw}${ver}</td>
+      <td><b>${esc(d.name)}</b><div class="muted">${esc(d.id)}</div>${hw}${ver}</td>
       <td>${attrs}</td>
       <td>${show}</td>
       <td>
         <button onclick="testDialog('${esc(d.id)}')">测试</button>
         <button onclick="imagesDialog('${esc(d.id)}')">图片</button>
         <button onclick="attrsDialog('${esc(d.id)}')">属性</button>
-        <button onclick="renameDevice('${esc(d.id)}')" ${d.registered ? "" : "disabled title='静态配置设备请改 server.json'"}>改名</button>
+        <button onclick="renameDevice('${esc(d.id)}')">改名</button>
         <button onclick="displayDialog('${esc(d.id)}')" class="sm">高级</button>
-        <button onclick="deleteDevice('${esc(d.id)}')" class="danger sm" ${d.registered ? "" : "disabled"}>删除</button>
+        <button onclick="deleteDevice('${esc(d.id)}')" class="danger sm">删除</button>
       </td></tr>`;
   }).join("");
   $("#devTable").innerHTML = `<tr><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">暂无设备。设备烧录母镜像上电后会自动注册出现在这里。</td></tr>'}`;

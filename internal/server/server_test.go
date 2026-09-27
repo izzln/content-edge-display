@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/sign"
+	"github.com/izzln/content-edge-display/internal/store"
 )
 
 const (
@@ -27,16 +28,27 @@ func newTestServer(t *testing.T) (*Server, string) {
 		MediaRoot:      mediaRoot,
 		DataDir:        t.TempDir(),
 		ImageDurationS: 10,
-		Devices: []DeviceConfig{
-			{ID: testDeviceID, Secret: testSecret, Name: "客户A"},
-			{ID: "dev-002", Secret: "other-secret", Name: "客户B"},
-		},
+		EnrollToken:    "enroll-me",
 	}
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 设备只有自注册这一条路径，测试里直接写进 store，省去逐个走注册接口。
+	addTestDevice(t, s, testDeviceID, testSecret, "客户A")
+	addTestDevice(t, s, "dev-002", "other-secret", "客户B")
 	return s, mediaRoot
+}
+
+func addTestDevice(t *testing.T, s *Server, id, secret, name string) {
+	t.Helper()
+	err := s.store.Update(func(st *store.State) error {
+		st.Devices[id] = store.Device{ID: id, Secret: secret, Name: name, RegisteredAt: s.now()}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func signedRequest(method, path string, body *strings.Reader) *http.Request {

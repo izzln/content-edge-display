@@ -46,7 +46,8 @@ git tag v1.2.0 && git push origin v1.2.0     # 随后在 Releases 页面下载
 > 服务端包按 Actions 运行器的架构（amd64）构建。若你的服务器是 ARM，请在本地用
 > `GOOS=linux GOARCH=arm64 make package-server` 自行构建。
 
-两个包里都带 `INSTALL.md`，现场不用带着仓库也能装。
+两个包里都带 `INSTALL.md`，现场不用带着仓库也能装。服务端包里的 `server.json`
+已填好自动生成的口令，设备端包里带匹配的 `enroll-token`（见 2.1）。
 
 ## 2. 服务端部署（运营方本地服务器）
 
@@ -87,32 +88,47 @@ systemctl daemon-reload && systemctl enable --now display-server
 
 | 字段 | 说明 |
 |---|---|
-| `admin_token` | 管理后台口令。**未配置时所有写接口一律拒绝**，避免管理面裸奔 |
-| `enroll_token` | 设备自注册口令，需与母镜像里 `agent.json` 的同名字段一致 |
+| `admin_token` | 管理后台口令，由 `make` 生成并已填好（见 2.1）。**留空则所有写接口一律拒绝**，避免管理面裸奔 |
+| `enroll_token` | 设备自注册口令，由 `make` 生成并已填好；设备端包里的 `enroll-token` 与之匹配 |
 | `media_root` | 目录轮播模式的内容目录，下面按设备 ID 分子目录 |
 | `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
 | `timezone` | 时段计划所用时区，默认取系统时区 |
-| `devices` | **可留空**。静态配置的设备，见 2.1 |
 | `image_duration_s` | 可选，图片停留秒数的初始默认值（默认 10）。**日常在管理后台改**，后台的设置优先 |
 
 管理后台：浏览器打开 `http://<服务器>:8080/admin`，首次访问输入 `admin_token`。
 
-### 2.1 `devices` 数组是做什么的
+### 2.1 两个口令从哪来
 
-它是**静态配置的设备**，在自注册机制之前是登记设备的唯一方式，现在留作两种用途：
-调试时用固定的 id/secret 起一台设备；或给某台设备钉死一个你自己指定的密钥。
+`make package` 会在本地生成一次并长期沿用，写在 `.secrets/tokens.env`（已 gitignore，
+`make clean` 不会删）。8 位字母数字，含大小写与数字，不带符号——这两个值要写进 JSON、
+经环境变量传给脚本、还要在浏览器里手敲，带符号只会徒增转义和输入错误。
 
-批量部署不需要它——设备凭 `enroll_token` 自注册，信息写进 `data_dir/state.json`。
-两类设备在后台都能看到，区别是：
+```sh
+make tokens     # 查看当前口令；文件不存在时生成
+```
 
-| | 静态配置（`devices`） | 自注册 |
+打出来的**服务端包里的 `server.json` 已经填好这两个口令**，设备端包里也带了一份
+匹配的 `enroll-token`，所以装机时不用再想口令怎么定、也不用手工对齐两边。
+
+| 口令 | 用途 | 改了会怎样 |
 |---|---|---|
-| 来源 | `server.json` | 设备首次上电时写入 `state.json` |
-| 后台改名/删除 | 不行（返回 409，请改配置文件） | 可以 |
-| 适用 | 调试、少数需要固定密钥的机器 | 批量部署的常规路径 |
+| `admin_token` | 登录管理后台 | 重新登录即可，无其他影响 |
+| `enroll_token` | 设备自注册的凭证，烧进母镜像 | **已注册的设备不受影响**（它们用的是各自的密钥），但用旧母镜像新刷的设备注册不进来 |
 
-`devices` 与 `enroll_token` 至少要有一个，否则没有任何设备能接入，服务端会拒绝启动。
+所以 `.secrets/tokens.env` 要保管好：丢了不影响现有设备运行，但要加新设备就得重做母镜像。
+
+> **公开仓库的注意事项**：CI 构建（GitHub Actions）**不会**把真实口令打进产物——
+> 否则它们会随 Release 附件公开。从 Releases 下载的包里是占位值 `change-me`，
+> 服务端带着占位值会直接拒绝启动并提示你生成。自己 `make package` 出来的包才含真实口令，
+> 因此那个包本身也要当作机密对待，别到处发。
+
+### 2.2 设备是怎么登记的
+
+没有"在配置里登记设备"这回事——设备一律凭 `enroll_token` 自注册，信息写进
+`data_dir/state.json`：首次上电时自己确定编号、生成随机密钥、向服务端注册，
+随后出现在后台设备列表里，可以改名、删除。同一编号用不同密钥再注册会被拒（409），
+防止冒名顶替。详见 4.1。
 
 ## 3. 设备端：单台部署（样机、调试、也是制作母镜像的第一步）
 
@@ -148,7 +164,7 @@ scp bin/display-agent-*-armv7.tar.gz root@<设备IP>:/root/
 # 设备上（root）
 tar xzf display-agent-*-armv7.tar.gz && cd display-agent-*/
 SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
-SERVER_URL=http://<服务器IP>:8080 ENROLL_TOKEN=<server.json 的 enroll_token> ./install-agent.sh
+SERVER_URL=http://display.lan:8080 ./install-agent.sh   # 注册口令取包内 enroll-token
 systemctl start display-agent
 journalctl -u display-agent -n 20     # 应看到注册成功
 ```
@@ -280,7 +296,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 | `data/firmware/` | 上传的代理程序 | 建议（否则待下发的更新目标会失效） |
 | `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
 | `media/` | 目录轮播模式的内容 | **必须** |
-| `server.json` | 配置 | **必须**（`enroll_token` 变了设备就注册不进来） |
+| `server.json` | 配置（含两个口令） | **必须**。另外把 `.secrets/tokens.env` 也备份到构建机之外 |
 
 ### 6.1 原地升级
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,7 +55,10 @@ func (s *Server) handleAdminUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminAuthed(r *http.Request) bool {
-	return s.cfg.AdminToken == "" || r.Header.Get("X-Admin-Token") == s.cfg.AdminToken
+	if s.cfg.AdminToken == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Token")), []byte(s.cfg.AdminToken)) == 1
 }
 
 func (s *Server) adminRead(h http.HandlerFunc) http.HandlerFunc {
@@ -105,8 +109,7 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	statuses := make([]DeviceStatus, 0, len(devices))
 	s.mu.Lock()
 	for _, d := range devices {
-		_, static := s.devices[d.ID]
-		st := DeviceStatus{ID: d.ID, Name: d.Name, Registered: !static}
+		st := DeviceStatus{ID: d.ID, Name: d.Name}
 		if seen, ok := s.lastSeen[d.ID]; ok {
 			seenCopy := seen
 			st.LastSeen = &seenCopy
@@ -154,10 +157,6 @@ func (s *Server) handleRenameDevice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if _, static := s.devices[dev.ID]; static {
-		http.Error(w, "静态配置设备请在 server.json 中改名", http.StatusConflict)
-		return
-	}
 	err := s.store.Update(func(st *store.State) error {
 		d := st.Devices[dev.ID]
 		d.Name = strings.TrimSpace(req.Name)
@@ -175,10 +174,6 @@ func (s *Server) handleRenameDevice(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	dev, ok := s.pathDevice(w, r)
 	if !ok {
-		return
-	}
-	if _, static := s.devices[dev.ID]; static {
-		http.Error(w, "静态配置设备请在 server.json 中移除", http.StatusConflict)
 		return
 	}
 	err := s.store.Update(func(st *store.State) error {

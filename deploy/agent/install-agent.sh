@@ -2,7 +2,8 @@
 # 在 Orange Pi One (Armbian) 上安装 display-agent（OTA 布局）。
 #
 # 用法（在设备上以 root 运行，同目录需有 display-agent-armv7、display-agent.service、rollback-check.sh）:
-#   SERVER_URL=http://192.168.1.10:8080 ENROLL_TOKEN=xxxx ./install-agent.sh
+#   SERVER_URL=http://display.lan:8080 ./install-agent.sh
+# 注册口令默认取同目录的 enroll-token（make package 时写入），也可用 ENROLL_TOKEN= 覆盖。
 #
 # 安装布局:
 #   /usr/local/lib/display-agent/versions/display-agent-<ver>
@@ -10,11 +11,21 @@
 #   /usr/local/lib/display-agent/rollback-check.sh          (ExecStartPre)
 #   /etc/display-agent/agent.json
 set -eu
-: "${SERVER_URL:?需要 SERVER_URL，如 http://192.168.1.10:8080}"
-: "${ENROLL_TOKEN:?需要 ENROLL_TOKEN（与服务端 server.json 的 enroll_token 一致）}"
+: "${SERVER_URL:?需要 SERVER_URL，如 http://display.lan:8080（建议用域名而非 IP：server_url 写死在设备上，OTA 改不了）}"
 BIN="${BIN:-./display-agent-armv7}"
 INSTALL_DIR=/usr/local/lib/display-agent
 HERE=$(cd "$(dirname "$0")" && pwd)
+
+# 注册口令：优先用环境变量，否则取包内 enroll-token（make package 时写入）
+if [ -z "${ENROLL_TOKEN:-}" ] && [ -f "$HERE/enroll-token" ]; then
+	ENROLL_TOKEN=$(cat "$HERE/enroll-token")
+fi
+: "${ENROLL_TOKEN:?需要 ENROLL_TOKEN（与服务端 server.json 的 enroll_token 一致）}"
+if [ "$ENROLL_TOKEN" = "change-me-too" ]; then
+	echo "enroll-token 还是占位值（CI 构建的包不含真实口令）。" >&2
+	echo "请用服务端 server.json 里的 enroll_token：ENROLL_TOKEN=xxxxxxxx $0" >&2
+	exit 1
+fi
 
 [ -f "$BIN" ] || { echo "找不到二进制 $BIN"; exit 1; }
 VERSION=$("$BIN" -version 2>/dev/null || echo dev)
