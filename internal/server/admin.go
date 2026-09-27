@@ -312,6 +312,10 @@ func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if g.ImageDurationS < 0 || g.ImageDurationS > 3600 {
+		http.Error(w, "图片停留时长须为 1~3600 秒（0 表示用 server.json 的默认值）", http.StatusBadRequest)
+		return
+	}
 	if err := s.store.Update(func(st *store.State) error { st.Global = g; return nil }); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

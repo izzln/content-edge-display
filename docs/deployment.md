@@ -50,18 +50,38 @@ git tag v1.2.0 && git push origin v1.2.0     # 随后在 Releases 页面下载
 
 ## 2. 服务端部署（运营方本地服务器）
 
+推荐**自包含目录**布局：二进制、配置、内容、状态、字体全在一个目录下，整个目录拷走即可搬迁。
+
 ```sh
 scp bin/display-server-*.tar.gz root@<服务器>:/root/
 ssh root@<服务器>
 tar xzf display-server-*.tar.gz && cd display-server-*/
 
 apt install -y fonts-noto-cjk          # 模板中文由服务端渲染，缺字体会变方框
-install -m 0755 display-server /usr/local/bin/
-mkdir -p /etc/display-server /var/lib/display-server
-cp server.example.json /etc/display-server/server.json    # 按下表改写
+install -d /srv/display/fonts
+install -m 0755 display-server /srv/display/
+cp server.example.json /srv/display/server.json          # 按下表改写
+cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /srv/display/fonts/
+
+useradd -r -s /usr/sbin/nologin display 2>/dev/null || true
+chown -R display:display /srv/display
 install -m 0644 display-server.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now display-server
 ```
+
+```
+/srv/display/
+  display-server      二进制
+  server.json         配置
+  media/<设备ID>/     目录轮播模式要播的图片与视频（运营方放）
+  fonts/              渲染用字体
+  data/               服务端状态：state.json、uploads/、firmware/、rendered/（首次启动自动创建）
+```
+
+**配置里的相对路径按 `server.json` 所在目录解析**，与进程工作目录无关——systemd 启动服务时
+工作目录是 `/`，若按工作目录解析，`"data"` 会悄悄落到 `/data`。要用 FHS 布局
+（二进制 `/usr/local/bin`、配置 `/etc`、数据 `/var/lib`）就在配置里写绝对路径，并相应改
+`display-server.service` 的 ExecStart。
 
 `server.json` 关键字段：
 
@@ -69,13 +89,30 @@ systemctl daemon-reload && systemctl enable --now display-server
 |---|---|
 | `admin_token` | 管理后台口令。**未配置时所有写接口一律拒绝**，避免管理面裸奔 |
 | `enroll_token` | 设备自注册口令，需与母镜像里 `agent.json` 的同名字段一致 |
-| `font_path` | CJK 字体路径，如 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` |
-| `data_dir` | 状态、上传图片、渲染结果、固件的存放目录 |
-| `image_duration_s` | 图片停留时长（秒），默认 10。改这里对所有设备生效，无需登录设备 |
+| `media_root` | 目录轮播模式的内容目录，下面按设备 ID 分子目录 |
+| `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
+| `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
 | `timezone` | 时段计划所用时区，默认取系统时区 |
-| `devices` | 静态配置设备（可留空，自注册设备自动写入 `data_dir/state.json`） |
+| `devices` | **可留空**。静态配置的设备，见 2.1 |
+| `image_duration_s` | 可选，图片停留秒数的初始默认值（默认 10）。**日常在管理后台改**，后台的设置优先 |
 
 管理后台：浏览器打开 `http://<服务器>:8080/admin`，首次访问输入 `admin_token`。
+
+### 2.1 `devices` 数组是做什么的
+
+它是**静态配置的设备**，在自注册机制之前是登记设备的唯一方式，现在留作两种用途：
+调试时用固定的 id/secret 起一台设备；或给某台设备钉死一个你自己指定的密钥。
+
+批量部署不需要它——设备凭 `enroll_token` 自注册，信息写进 `data_dir/state.json`。
+两类设备在后台都能看到，区别是：
+
+| | 静态配置（`devices`） | 自注册 |
+|---|---|---|
+| 来源 | `server.json` | 设备首次上电时写入 `state.json` |
+| 后台改名/删除 | 不行（返回 409，请改配置文件） | 可以 |
+| 适用 | 调试、少数需要固定密钥的机器 | 批量部署的常规路径 |
+
+`devices` 与 `enroll_token` 至少要有一个，否则没有任何设备能接入，服务端会拒绝启动。
 
 ## 3. 设备端：单台部署（样机、调试、也是制作母镜像的第一步）
 
@@ -182,6 +219,8 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 - **设备**页每行【图片】：为该设备指定图片区域要显示的图（上传/选择）；
 - **设备**页每行【属性】：`room=302` 之类的键值对，模板的 attribute 区域按 key 取值显示；
 - **模板与时段**页下方：按顺序配置 `{模板, 星期, 起止时间}`，支持跨午夜；无命中回落全局模板；
+- **模板与时段**页顶部的"图片停留 N 秒"：目录轮播模式下每张图片的停留时长，对所有设备生效，
+  改完一个轮询周期内到位（视频按自身长度播完；模板模式是单张静态图，不受此项影响）；
 - 生效延迟 ≈ 设备的 `poll_interval_s`（局域网建议 5~10s，304 轮询开销可忽略）。
 
 ### 5.2 现场定位
@@ -229,7 +268,56 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 目录轮播模式下图文混排、视频播完自动切下一条、列表循环都已实测可用；视频不需要任何升级。
 模板渲染的是静态图，因此"模板里嵌视频"目前不支持，那需要服务端配合，不是仅升级代理能做到的。
 
-## 6. 验机清单（每台设备交付前）
+## 6. 服务端升级与数据迁移
+
+服务端的全部可变状态只有两处：**`data_dir`** 和 **`media_root`**。自包含布局下它们都在
+`/srv/display` 里，所以升级和搬迁都很直接。
+
+| 路径 | 内容 | 要不要保留 |
+|---|---|---|
+| `data/state.json` | 设备（含自注册设备的密钥）、属性、模板、时段、全局设置、固件元数据、更新目标 | **必须** |
+| `data/uploads/` | 后台上传的图片 | **必须** |
+| `data/firmware/` | 上传的代理程序 | 建议（否则待下发的更新目标会失效） |
+| `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
+| `media/` | 目录轮播模式的内容 | **必须** |
+| `server.json` | 配置 | **必须**（`enroll_token` 变了设备就注册不进来） |
+
+### 6.1 原地升级
+
+```sh
+systemctl stop display-server
+cp display-server /srv/display/display-server     # 只换二进制
+systemctl start display-server
+```
+
+`state.json` 的字段是增量演进的，新版本读旧文件时缺失字段取零值，不需要迁移脚本。
+保险起见升级前先 `cp -a /srv/display/data /srv/display/data.bak`。
+
+### 6.2 换一台服务器
+
+```sh
+systemctl stop display-server                      # 可选，见下
+tar czf display-backup.tar.gz -C /srv display
+# 在新机器上解开到同样的 /srv/display，装好 systemd 单元后启动
+```
+
+`state.json` 是原子写入（临时文件 + rename），所以**热备份也是一致的**——不停机拷贝拿到的
+要么是旧版本要么是新版本，不会拿到写坏的半个文件。停机只是为了避免拷贝过程中运营方刚好在改配置。
+
+> **搬迁前务必确认一件事**：设备端 `agent.json` 里的 `server_url` 是写死在每台设备上的，
+> OTA 只替换二进制、改不了它。服务器换 IP 就意味着要逐台 SSH。
+> 所以**从一开始就用域名而不是 IP**（例如 `http://display.lan:8080`），
+> 搬迁时只改 DNS 指向即可，设备无感。
+
+### 6.3 定期备份
+
+```sh
+tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/data/rendered'
+```
+
+排除 `rendered/` 可以显著减小体积，它会按需重新生成。
+
+## 7. 验机清单（每台设备交付前）
 
 | 检查项 | 方法 |
 |---|---|
@@ -242,7 +330,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 | 断电恢复 | 拔电重启后 1 分钟内自动恢复播放上次内容（无需人工干预） |
 | 断网兜底 | 拔网线，播放不中断；插回后心跳恢复 |
 
-## 7. 安全基线（`harden.sh` 做了什么，为什么）
+## 8. 安全基线（`harden.sh` 做了什么，为什么）
 
 - **关闭系统自动更新**并 `apt-mark hold` 内核/dtb 包：屏幕设备要的是十年如一日，
   一次内核升级就可能打碎显示输出或硬解；
@@ -254,10 +342,10 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 > 执行 `harden.sh` 后，**先用另一个终端确认密钥 SSH 能登录，再断开当前会话**。
 
-## 8. 当前已知简化
+## 9. 当前已知简化
 
-- 图片展示时长由**服务端** `image_duration_s` 决定（设备端 agent.json 的同名字段只是收到第一份
-  清单之前的兜底）；同一份清单里的图片共用一个时长，暂不支持逐条目时长——mpv 的 m3u 不支持
+- 图片展示时长在**管理后台**设置（服务端 `image_duration_s` 只是初始默认值，设备端 agent.json
+  的同名字段只是收到第一份清单之前的兜底）；同一份清单里的图片共用一个时长，暂不支持逐条目时长——mpv 的 m3u 不支持
   逐条目选项。单张静态图（模板模式恒为此情形）用 `inf`，不会周期性重载；
 - 清单更新时 mpv `loadlist replace` 立即切换列表（"播完当前项再切"留待优化）；
 - SoC 硬件看门狗（`/dev/watchdog`）与只读根文件系统在 M4 实现；当前已有 systemd 软看门狗

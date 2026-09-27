@@ -48,7 +48,19 @@ type Config struct {
 	Devices        []DeviceConfig `json:"devices"` // 静态配置设备（可选，自注册设备在 state.json）
 }
 
+// resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
+func resolvePath(base, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(base, p)
+}
+
 // LoadConfig 读取配置文件并填充默认值。
+//
+// 配置里的相对路径一律相对**配置文件所在目录**解析，而不是进程的工作目录：
+// systemd 启动服务时工作目录是 /，按工作目录解析会让 "./data" 悄悄落到 /data。
+// 这样也支持把 display-server、server.json、media/、data/、fonts/ 放在同一个目录里整体搬走。
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -58,15 +70,22 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
 	if cfg.MediaRoot == "" {
-		cfg.MediaRoot = "./data/media"
+		cfg.MediaRoot = "data/media"
 	}
 	if cfg.DataDir == "" {
-		cfg.DataDir = "./data"
+		cfg.DataDir = "data"
 	}
+	cfg.MediaRoot = resolvePath(base, cfg.MediaRoot)
+	cfg.DataDir = resolvePath(base, cfg.DataDir)
+	cfg.FontPath = resolvePath(base, cfg.FontPath)
 	if cfg.ImageDurationS <= 0 {
 		cfg.ImageDurationS = 10
 	}
@@ -281,6 +300,15 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 // 渲染画布尺寸（与显示屏一致）。
 const canvasW, canvasH = 1440, 900
 
+// imageDuration 返回当前生效的图片停留秒数：管理后台的设置优先，
+// 未设置时回落到 server.json 的 image_duration_s。
+func (s *Server) imageDuration() int {
+	if d := s.store.Global().ImageDurationS; d > 0 {
+		return d
+	}
+	return s.cfg.ImageDurationS
+}
+
 // resolveTemplate 决定设备当前应显示的模板及来源：
 // 设备级覆盖 > 时段计划命中 > 全局默认模板；都没有则 ok=false（目录轮播）。
 func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Template, source string, ok bool) {
@@ -327,7 +355,7 @@ func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
 			return nil, err
 		}
 	} else {
-		m, err := manifest.BuildFromDir(s.deviceMediaDir(dev.ID), dev.ID, s.cfg.ImageDurationS, s.hashes)
+		m, err := manifest.BuildFromDir(s.deviceMediaDir(dev.ID), dev.ID, s.imageDuration(), s.hashes)
 		if err != nil {
 			return nil, err
 		}
@@ -382,7 +410,7 @@ func (s *Server) renderedItems(deviceID, kind string, img image.Image) ([]manife
 		URL:      "/render/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
 		SHA256:   sumHex,
 		Size:     int64(buf.Len()),
-		Duration: s.cfg.ImageDurationS,
+		Duration: s.imageDuration(),
 		Order:    1,
 	}}, nil
 }

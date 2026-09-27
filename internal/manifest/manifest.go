@@ -110,10 +110,13 @@ func VersionOf(items []Item) string {
 }
 
 // VersionWith 在条目之外把指令一并纳入版本号，保证指令出现/消失都会触发设备刷新。
+//
+// 参与计算的不只是文件本身，还有影响播放行为的字段（类型、停留时长）：
+// 只改停留时长而文件不变时版本号也必须变，否则设备一直收到 304，新设置永远到不了现场。
 func VersionWith(items []Item, cmds []Command) string {
 	h := sha256.New()
 	for _, it := range items {
-		fmt.Fprintf(h, "%s|%s\n", it.Name, it.SHA256)
+		fmt.Fprintf(h, "%s|%s|%s|%d\n", it.Name, it.SHA256, it.Type, it.Duration)
 	}
 	for _, c := range cmds {
 		fmt.Fprintf(h, "cmd|%s|%s|%s\n", c.Type, c.Version, c.SHA256)

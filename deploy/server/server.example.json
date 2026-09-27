@@ -1,11 +1,10 @@
 {
   "listen": ":8080",
-  "media_root": "/var/lib/display-server/media",
-  "data_dir": "/var/lib/display-server",
-  "font_path": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "media_root": "media",
+  "data_dir": "data",
+  "font_path": "fonts/NotoSansCJK-Regular.ttc",
   "admin_token": "change-me",
   "enroll_token": "change-me-too",
   "timezone": "Asia/Shanghai",
-  "image_duration_s": 10,
   "devices": []
 }

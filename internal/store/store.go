@@ -75,9 +75,10 @@ type UpdateTarget struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// GlobalConfig 是全局显示设置。
+// GlobalConfig 是全局显示设置（运营方在管理后台改，立即对所有设备生效）。
 type GlobalConfig struct {
-	TemplateID string `json:"template_id,omitempty"` // 全局默认模板
+	TemplateID     string `json:"template_id,omitempty"`      // 全局默认模板
+	ImageDurationS int    `json:"image_duration_s,omitempty"` // 图片停留秒数；0 = 用 server.json 的值
 }
 
 // Schedule 是一条时段计划：命中时用该模板替代全局默认模板。

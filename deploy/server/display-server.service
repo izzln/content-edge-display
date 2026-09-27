@@ -1,15 +1,21 @@
 # 服务端 systemd 单元（运营方本地服务器）
-# 安装: cp display-server.service /etc/systemd/system/ && systemctl enable --now display-server
+#
+# 默认按“自包含目录”布局：二进制、server.json、media/、data/、fonts/ 全在 /srv/display 下，
+# 整个目录拷走即可搬迁。配置里的相对路径按 server.json 所在目录解析，与工作目录无关。
+#
+# 若偏好 FHS 布局，把 ExecStart 改成
+#   /usr/local/bin/display-server -config /etc/display-server/server.json
+# 并在 server.json 里用绝对路径（如 /var/lib/display-server）。
 [Unit]
 Description=Content Edge Display Server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/display-server -config /etc/display-server/server.json
+ExecStart=/srv/display/display-server -config /srv/display/server.json
 Restart=always
 RestartSec=5
 User=display
-StateDirectory=display-server
+Group=display
 
 [Install]
 WantedBy=multi-user.target

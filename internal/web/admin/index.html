@@ -62,8 +62,10 @@
     <div class="bar">
       <b>全局默认模板：</b>
       <select id="globalSel"></select>
+      　图片停留 <input type="number" id="globalDur" min="1" max="3600" style="width:5em"> 秒
       <button class="primary" onclick="saveGlobal()">保存</button>
-      <span class="muted">所有设备默认显示此模板；各设备图片区域在"设备 → 图片"里单独指定。</span>
+      <span class="muted">所有设备默认显示此模板；各设备图片区域在"设备 → 图片"里单独指定。<br>
+        图片停留时长对所有设备生效（视频按自身长度播完为准；模板模式是单张静态图，不受此项影响）。</span>
     </div>
     <p><button class="primary" onclick="newSplitTemplate()">新建左右分屏模板</button>
        <button onclick="editTemplateJSON()">新建/编辑(JSON)</button></p>
@@ -294,6 +296,8 @@ async function saveDisplay(id) {
 
 // ================= 模板 / 全局 / 时段 =================
 function renderTemplates() {
+  $("#globalDur").value = global.image_duration_s || "";
+  $("#globalDur").placeholder = global.image_duration_s ? "" : "默认";
   $("#globalSel").innerHTML = `<option value="">（无：设备播放 media 目录）</option>` +
     templates.map(t => `<option value="${esc(t.id)}" ${global.template_id === t.id ? "selected" : ""}>${esc(t.name)} (${esc(t.id)})</option>`).join("");
   const rows = templates.map(t => `<tr>
@@ -309,8 +313,11 @@ function renderTemplates() {
 }
 async function setGlobal(id) { $("#globalSel").value = id; await saveGlobal(); }
 async function saveGlobal() {
-  await api("/api/v1/admin/global", { method: "PUT", ...J({ template_id: $("#globalSel").value }) });
-  toast("全局模板已保存"); refresh();
+  const body = { template_id: $("#globalSel").value };
+  const d = parseInt($("#globalDur").value, 10);
+  if (d > 0) body.image_duration_s = d;
+  await api("/api/v1/admin/global", { method: "PUT", ...J(body) });
+  toast("已保存"); refresh();
 }
 function newSplitTemplate() {
   modal(`<h2>新建左右分屏模板</h2>
