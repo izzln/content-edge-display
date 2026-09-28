@@ -40,7 +40,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 /srv/display/
   display-server      二进制
   server.json         配置
-  media/<设备ID>/     目录轮播模式要播的图片与视频（运营方放）
+  media/<设备ID>/     该设备要播的图片与视频（后台上传，也可直接拷进来）
   fonts/              渲染用字体
   data/               服务端状态：state.json、uploads/、firmware/、rendered/
 ```

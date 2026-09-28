@@ -266,3 +266,85 @@ func TestRestoreFromLocalCache(t *testing.T) {
 	}
 	_ = p
 }
+
+// 模板承载视频：服务端下发 layout，设备端要把叠加图下载下来、解码成 mpv 能用的
+// BGRA，并把播放区限制在媒体区——而不是让视频铺满整屏盖掉属性。
+func TestLayoutBecomesOverlayScene(t *testing.T) {
+	a, p, _, _, devDir := newTestEnv(t)
+	ctx := context.Background()
+
+	// 媒体区还没内容：整屏图，没有叠加层
+	if _, err := a.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sc := p.Scene(); sc.Overlay != nil || len(sc.Items) != 1 {
+		t.Fatalf("媒体区空时应整屏播放一张模板图：%+v", sc)
+	}
+
+	os.WriteFile(filepath.Join(devDir, "clip.mp4"), []byte("video-bytes"), 0o644)
+	if _, err := a.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sc := p.Scene()
+	if sc.Overlay == nil {
+		t.Fatal("清单带 layout 时必须合成叠加层")
+	}
+	if len(sc.Items) != 1 || !strings.HasSuffix(sc.Items[0].Path, "_clip.mp4") {
+		t.Fatalf("播放列表应是媒体文件本身：%+v", sc.Items)
+	}
+	if sc.CanvasW != 1440 || sc.CanvasH != 900 {
+		t.Fatalf("画布尺寸错误：%dx%d", sc.CanvasW, sc.CanvasH)
+	}
+	if sc.Media != (player.Rect{X: 720, Y: 0, W: 720, H: 900}) {
+		t.Fatalf("媒体区应是右半屏，得到 %+v", sc.Media)
+	}
+	// 叠加层必须是解好的 BGRA 原始像素：w*h*4 字节，mpv 直接 mmap 用
+	if sc.Overlay.W != 1440 || sc.Overlay.H != 900 {
+		t.Fatalf("叠加层尺寸错误：%dx%d", sc.Overlay.W, sc.Overlay.H)
+	}
+	fi, err := os.Stat(sc.Overlay.Path)
+	if err != nil {
+		t.Fatalf("叠加层数据文件不存在：%v", err)
+	}
+	if want := int64(sc.Overlay.W * sc.Overlay.H * 4); fi.Size() != want {
+		t.Fatalf("叠加层数据 %d 字节，期望 %d", fi.Size(), want)
+	}
+	// 媒体区那块必须是全透明的，否则视频透不出来
+	raw, err := os.ReadFile(sc.Overlay.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	center := ((sc.Media.Y+sc.Media.H/2)*sc.Overlay.W + sc.Media.X + sc.Media.W/2) * 4
+	if raw[center+3] != 0 {
+		t.Fatalf("媒体区中心的 alpha = %d，应为 0（全透明）", raw[center+3])
+	}
+	if left := ((450)*sc.Overlay.W + 100) * 4; raw[left+3] != 0xFF {
+		t.Fatalf("属性区的 alpha = %d，应为 255（完全不透明）", raw[left+3])
+	}
+
+	// 缓存清理不能顺手把叠加图和它的解码产物删掉，否则每次巡检都要重下重解
+	data, err := os.ReadFile(a.currentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cur manifest.Manifest
+	if err := json.Unmarshal(data, &cur); err != nil {
+		t.Fatal(err)
+	}
+	a.cleanup(&cur)
+	for _, path := range []string{sc.Overlay.Path, strings.TrimSuffix(sc.Overlay.Path, overlaySuffix)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("清理时误删了仍被引用的文件 %s：%v", filepath.Base(path), err)
+		}
+	}
+
+	// 断网重启：从本地缓存恢复时叠加层也要一起恢复
+	p2 := player.NewNull()
+	a2 := New(a.cfg, p2)
+	if err := a2.LoadCurrent(); err != nil {
+		t.Fatalf("从缓存恢复失败：%v", err)
+	}
+	if p2.Scene().Overlay == nil {
+		t.Fatal("重启恢复后叠加层丢失，画面会变成整屏视频")
+	}
+}
