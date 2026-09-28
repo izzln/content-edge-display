@@ -89,15 +89,16 @@ func TestRegisterFlow(t *testing.T) {
 		t.Fatalf("registered device not listed properly: %+v", found)
 	}
 
-	// 改名、删除、删除后可重新注册
-	do(t, h, adminReq("PUT", "/api/v1/admin/devices/scr-0017/name", map[string]string{"name": "3楼大堂"}), http.StatusNoContent)
+	// 删除、删除后可重新注册
 	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/scr-0017", nil), http.StatusNoContent)
 	do(t, h, signedAs("scr-0017", secret, "GET", "/api/v1/device/manifest"), http.StatusUnauthorized)
 	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", strings.Repeat("cd", 32), enrollToken)), http.StatusCreated)
 
-	// 设备只有自注册这一种，任何设备都能改名与删除
-	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/name", map[string]string{"name": "改个名"}), http.StatusNoContent)
+	// 设备只有自注册这一种，任何设备都能删除
 	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/"+testDeviceID, nil), http.StatusNoContent)
+
+	// 改名功能已移除：设备名由设备自己上报，后台不再提供改名入口
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/scr-0017/name", map[string]string{"name": "3楼大堂"}), http.StatusNotFound)
 }
 
 func TestRegisterDisabledWithoutToken(t *testing.T) {
@@ -292,9 +293,13 @@ func TestGlobalTemplateAndSchedules(t *testing.T) {
 	do(t, h, adminReq("POST", "/api/v1/admin/templates", day), http.StatusOK)
 	do(t, h, adminReq("POST", "/api/v1/admin/templates", night), http.StatusOK)
 
-	// 无全局模板：目录轮播（空）
-	if m := deviceManifest(t, h); len(m.Items) != 0 {
-		t.Fatalf("expected playlist mode: %+v", m.Items)
+	// 首启已播种默认模板并设为全局默认，所以开箱就有版式（而不是黑屏）
+	seeded := globalTemplateID(t, s)
+	if m := deviceManifest(t, h); len(m.Items) != 1 || !strings.HasPrefix(m.Items[0].Name, "tpl_") {
+		t.Fatalf("首启应当已有可用的全局模板：%+v", m.Items)
+	}
+	if seeded == "day" || seeded == "night" {
+		t.Fatalf("播种的模板 ID 应当是自动生成的，得到 %q", seeded)
 	}
 
 	// 设全局模板 → 所有设备走模板
@@ -343,8 +348,7 @@ func TestGlobalTemplateAndSchedules(t *testing.T) {
 		t.Fatalf("active source not reported: %+v", statuses[0])
 	}
 
-	// 全局/时段引用的模板不可删除；非法时段被拒
-	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/day", nil), http.StatusConflict)
+	// 时段引用的模板不可删除；非法时段被拒
 	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/night", nil), http.StatusConflict)
 	do(t, h, adminReq("PUT", "/api/v1/admin/schedules", []map[string]any{
 		{"template_id": "nope", "start": "22:00", "end": "06:00"},

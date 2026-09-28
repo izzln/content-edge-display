@@ -45,10 +45,9 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 	t.Helper()
 	mediaRoot := t.TempDir()
 	srvCfg := &server.Config{
-		MediaRoot:      mediaRoot,
-		DataDir:        t.TempDir(),
-		ImageDurationS: 10,
-		EnrollToken:    testEnroll,
+		MediaRoot:   mediaRoot,
+		DataDir:     t.TempDir(),
+		EnrollToken: testEnroll,
 	}
 	srv, err := server.New(srvCfg)
 	if err != nil {

@@ -49,18 +49,48 @@ func New(fontPath, uploadsDir string) (*Renderer, error) {
 	return &Renderer{font: f, uploadsDir: uploadsDir}, nil
 }
 
+// Rendered 是一次模板渲染的产物。
+type Rendered struct {
+	Image       *image.RGBA
+	MediaRegion image.Rectangle // 媒体区在画布上的位置；HasMedia 为 false 时无意义
+	HasMedia    bool
+}
+
 // Render 按模板 + 设备属性 + 区域绑定合成一张图。
-func (r *Renderer) Render(tpl store.Template, attrs map[string]string, bindings map[string]string) (*image.RGBA, error) {
+//
+// mirror 为真时所有区域左右对调（属性在左还是在右，用同一个模板即可覆盖两种设备）。
+//
+// overlayMode 决定媒体区怎么画：
+//   - true：留全透明，作为叠加图交给设备端贴在视频之上（Go 的 image.RGBA 本身是预乘 alpha，
+//     正是 mpv overlay-add 需要的格式）
+//   - false：填上自己的底色，得到一张整屏静态图——用于模板没有媒体区、或媒体区还没有内容的情形
+func (r *Renderer) Render(tpl store.Template, attrs, bindings map[string]string, mirror, overlayMode bool) (*Rendered, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
+	out := &Rendered{Image: canvas}
 	fill(canvas, canvas.Bounds(), parseColor(tpl.Background))
 
 	for _, reg := range tpl.Regions {
+		if mirror {
+			reg = store.Mirrored(reg, tpl.W)
+		}
 		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
+
+		if reg.Type == store.RegionMedia {
+			out.MediaRegion, out.HasMedia = rect, true
+			if overlayMode {
+				// 挖洞：透明黑，设备端的视频从这里透出来
+				draw.Draw(canvas, rect, image.NewUniform(color.RGBA{}), image.Point{}, draw.Src)
+			} else if reg.Bg != "" {
+				fill(canvas, rect, parseColor(reg.Bg))
+			}
+			continue
+		}
+
 		if reg.Bg != "" {
 			fill(canvas, rect, parseColor(reg.Bg))
 		}
 		switch reg.Type {
-		case "attribute":
+		case store.RegionAttribute:
 			text := attrs[reg.Key]
 			if text == "" {
 				text = "-"
@@ -68,11 +98,11 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, bindings 
 			if err := r.drawText(canvas, rect, text, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
 				return nil, err
 			}
-		case "text":
+		case store.RegionText:
 			if err := r.drawText(canvas, rect, reg.Key, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
 				return nil, err
 			}
-		case "image":
+		case store.RegionImage:
 			name := bindings[reg.ID]
 			if name == "" {
 				continue // 未绑定内容的图片区域留区域底色
@@ -81,10 +111,10 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, bindings 
 			if err != nil {
 				return nil, fmt.Errorf("region %q: %w", reg.ID, err)
 			}
-			drawFitted(canvas, rect, img)
+			drawCover(canvas, rect, img)
 		}
 	}
-	return canvas, nil
+	return out, nil
 }
 
 // RenderTestCard 生成现场定位用的测试卡：纯色底 + 大号“测试” + 设备信息。
@@ -184,18 +214,25 @@ func (r *Renderer) drawText(dst *image.RGBA, rect image.Rectangle, text string, 
 	return nil
 }
 
-// drawFitted 把图片等比缩放后居中绘制到 rect 内。
-func drawFitted(dst *image.RGBA, rect image.Rectangle, src image.Image) {
+// drawCover 让图片撑满 rect：按较大的那个缩放比取源图中央的一块，超出的部分裁掉，
+// 不留黑边（等同 CSS 的 object-fit: cover）。设备端播放媒体区内容时用的 --panscan=1 是同样的效果。
+func drawCover(dst *image.RGBA, rect image.Rectangle, src image.Image) {
 	sb := src.Bounds()
-	if sb.Dx() == 0 || sb.Dy() == 0 {
+	if sb.Dx() == 0 || sb.Dy() == 0 || rect.Empty() {
 		return
 	}
-	scale := min(float64(rect.Dx())/float64(sb.Dx()), float64(rect.Dy())/float64(sb.Dy()))
-	w := int(float64(sb.Dx()) * scale)
-	h := int(float64(sb.Dy()) * scale)
-	x := rect.Min.X + (rect.Dx()-w)/2
-	y := rect.Min.Y + (rect.Dy()-h)/2
-	xdraw.CatmullRom.Scale(dst, image.Rect(x, y, x+w, y+h), src, sb, draw.Over, nil)
+	// 需要用到的源图尺寸：以 rect 的宽高比为准，从源图中央裁一块
+	srcW, srcH := sb.Dx(), sb.Dy()
+	wantW, wantH := srcW, srcH
+	if srcW*rect.Dy() > rect.Dx()*srcH {
+		wantW = srcH * rect.Dx() / rect.Dy() // 源图更宽：按高撑满，左右各裁掉一部分
+	} else {
+		wantH = srcW * rect.Dy() / rect.Dx() // 源图更高：按宽撑满，上下各裁掉一部分
+	}
+	sx := sb.Min.X + (srcW-wantW)/2
+	sy := sb.Min.Y + (srcH-wantH)/2
+	crop := image.Rect(sx, sy, sx+wantW, sy+wantH)
+	xdraw.CatmullRom.Scale(dst, rect, src, crop, draw.Over, nil)
 }
 
 func fill(dst *image.RGBA, rect image.Rectangle, c color.Color) {

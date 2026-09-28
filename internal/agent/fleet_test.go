@@ -82,11 +82,10 @@ func TestConfigRequiresEnrollOrStatic(t *testing.T) {
 func newEnrollEnv(t *testing.T) (*Agent, *server.Server, http.Handler) {
 	t.Helper()
 	srvCfg := &server.Config{
-		MediaRoot:      t.TempDir(),
-		DataDir:        t.TempDir(),
-		ImageDurationS: 10,
-		EnrollToken:    "enroll-me",
-		AdminToken:     "admin",
+		MediaRoot:   t.TempDir(),
+		DataDir:     t.TempDir(),
+		EnrollToken: "enroll-me",
+		AdminToken:  "admin",
 	}
 	srv, err := server.New(srvCfg)
 	if err != nil {

@@ -24,11 +24,10 @@ func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	mediaRoot := t.TempDir()
 	cfg := &Config{
-		Listen:         ":0",
-		MediaRoot:      mediaRoot,
-		DataDir:        t.TempDir(),
-		ImageDurationS: 10,
-		EnrollToken:    "enroll-me",
+		Listen:      ":0",
+		MediaRoot:   mediaRoot,
+		DataDir:     t.TempDir(),
+		EnrollToken: "enroll-me",
 	}
 	s, err := New(cfg)
 	if err != nil {

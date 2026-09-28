@@ -43,9 +43,9 @@ func TestPersistAndReload(t *testing.T) {
 	if !st2.TestUntil("dev-001").Equal(until) {
 		t.Fatal("test_until not persisted")
 	}
-	// 未配置设备的默认值
-	if st2.Display("dev-999").Mode != "playlist" {
-		t.Fatal("default display mode should be playlist")
+	// 未配置设备的默认值：跟随全局模板
+	if st2.Display("dev-999").Mode != ModeGlobal {
+		t.Fatal("未配置的设备应当跟随全局模板")
 	}
 }
 
@@ -94,6 +94,9 @@ func TestValidateTemplate(t *testing.T) {
 	if tpl.Regions[0].FontSize != 48 || tpl.Regions[0].Align != "center" || tpl.Regions[0].Color != "#FFFFFF" {
 		t.Fatalf("region defaults not filled: %+v", tpl.Regions[0])
 	}
+	if tpl.ImageDurationS != DefaultImageDurationS {
+		t.Fatalf("图片停留时长默认值未填充：%d", tpl.ImageDurationS)
+	}
 
 	cases := []func(*Template){
 		func(x *Template) { x.ID = "bad id!" },
@@ -106,6 +109,11 @@ func TestValidateTemplate(t *testing.T) {
 		func(x *Template) { x.Regions[0].X = -1 },
 		func(x *Template) { x.Regions[0].Align = "top" },
 		func(x *Template) { x.Regions[0].Color = "#12345" },
+		func(x *Template) { x.ImageDurationS = 99999 }, // 停留时长上限
+		func(x *Template) { // 一个模板至多一个媒体区（mpv 只能把视频放进一个矩形）
+			x.Regions[0].Type, x.Regions[0].Key = RegionMedia, ""
+			x.Regions[1].Type = RegionMedia
+		},
 	}
 	for i, mutate := range cases {
 		tpl := valid()
@@ -125,8 +133,8 @@ func TestValidateDisplay(t *testing.T) {
 	}
 
 	d := DisplayConfig{}
-	if err := ValidateDisplay(&d, get); err != nil || d.Mode != "playlist" {
-		t.Fatalf("empty config should default to playlist: %v %+v", err, d)
+	if err := ValidateDisplay(&d, get); err != nil || d.Mode != ModeGlobal {
+		t.Fatalf("空配置应当默认跟随全局模板：%v %+v", err, d)
 	}
 	d = DisplayConfig{Mode: "template", TemplateID: "t1", Bindings: map[string]string{"right": "a.png"}}
 	if err := ValidateDisplay(&d, get); err != nil {
@@ -143,5 +151,61 @@ func TestValidateDisplay(t *testing.T) {
 	d = DisplayConfig{Mode: "weird"}
 	if err := ValidateDisplay(&d, get); err == nil {
 		t.Fatal("unknown mode accepted")
+	}
+}
+
+// 首启播种：开箱就得有一个能用的左右分屏模板，并被设为全局默认。
+func TestSeedDefaultTemplateAndEnsureGlobal(t *testing.T) {
+	st := &State{}
+	st.init()
+
+	tpl, seeded := SeedDefaultTemplate(st)
+	if !seeded || len(st.Templates) != 1 {
+		t.Fatalf("首启应当播种一个模板：seeded=%v templates=%d", seeded, len(st.Templates))
+	}
+	if _, ok := tpl.MediaRegion(); !ok {
+		t.Fatal("默认模板必须带一个媒体区，否则没法放图片/视频")
+	}
+	if tpl.ID == "" || tpl.ImageDurationS <= 0 {
+		t.Fatalf("默认模板字段不完整：%+v", tpl)
+	}
+
+	// 已有模板时不再播种
+	if _, seeded := SeedDefaultTemplate(st); seeded {
+		t.Fatal("已有模板时不应重复播种")
+	}
+
+	// 全局默认模板缺失 → 自动指向现存模板
+	if !EnsureGlobalTemplate(st) || st.Global.TemplateID != tpl.ID {
+		t.Fatalf("全局默认模板未自动指向播种出来的模板：%q", st.Global.TemplateID)
+	}
+	if EnsureGlobalTemplate(st) {
+		t.Fatal("已经指向有效模板时不应再改")
+	}
+
+	// 全局指向被删掉的模板 → 自动纠正到 ID 最小的现存模板
+	st.Templates["tpl-0000"] = tpl
+	st.Global.TemplateID = "已删除"
+	if !EnsureGlobalTemplate(st) || st.Global.TemplateID != "tpl-0000" {
+		t.Fatalf("全局指向失效模板时应自动纠正，得到 %q", st.Global.TemplateID)
+	}
+}
+
+// Mirrored 只换位置不镜像文字：一个模板即可覆盖“属性在左”和“属性在右”两种设备。
+func TestMirrored(t *testing.T) {
+	left := Region{ID: "left", X: 0, Y: 100, W: 720, H: 900, Align: "left"}
+	got := Mirrored(left, 1440)
+	if got.X != 720 || got.Y != 100 || got.W != 720 || got.H != 900 {
+		t.Fatalf("对调后位置错误：%+v", got)
+	}
+	if got.Align != "right" {
+		t.Fatalf("对调后对齐应跟着换边，得到 %q", got.Align)
+	}
+	// 对调两次回到原处
+	if back := Mirrored(got, 1440); back != left {
+		t.Fatalf("对调两次应回到原处：%+v", back)
+	}
+	if c := Mirrored(Region{X: 100, W: 200, Align: "center"}, 1000); c.X != 700 || c.Align != "center" {
+		t.Fatalf("居中对齐不应改变：%+v", c)
 	}
 }

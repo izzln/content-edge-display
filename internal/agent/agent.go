@@ -261,7 +261,7 @@ func (a *Agent) PollOnce(ctx context.Context) (bool, error) {
 
 // syncManifest 下载缺失文件、校验、原子落盘 current.json 并切换播放列表。
 func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
-	for _, item := range m.Items {
+	for _, item := range m.Downloads() {
 		dst := a.localPath(item)
 		if fi, err := os.Stat(dst); err == nil && fi.Size() == item.Size {
 			continue // 文件名内嵌哈希前缀 + 尺寸一致，视为已就绪
@@ -301,7 +301,7 @@ func (a *Agent) LoadCurrent() error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return err
 	}
-	for _, item := range m.Items {
+	for _, item := range m.Downloads() {
 		if fi, err := os.Stat(a.localPath(item)); err != nil || fi.Size() != item.Size {
 			return fmt.Errorf("cached file %s missing or truncated", item.Name)
 		}
@@ -310,15 +310,25 @@ func (a *Agent) LoadCurrent() error {
 }
 
 func (a *Agent) apply(m *manifest.Manifest) error {
-	items := make([]player.Item, 0, len(m.Items))
+	scene := player.Scene{Items: make([]player.Item, 0, len(m.Items))}
 	for _, it := range m.Items {
-		items = append(items, player.Item{
+		scene.Items = append(scene.Items, player.Item{
 			Path:     a.localPath(it),
 			Type:     it.Type,
 			Duration: it.Duration,
 		})
 	}
-	if err := a.player.Load(items); err != nil {
+	if l := m.Layout; l != nil {
+		// 叠加层解码失败不该让屏幕黑掉：退化为整屏播放，比没有画面好。
+		if ovl, err := prepareOverlay(a.localPath(l.Overlay)); err != nil {
+			log.Printf("agent: overlay unusable (%v), falling back to fullscreen playback", err)
+		} else {
+			scene.Overlay = ovl
+			scene.Media = player.Rect{X: l.Media.X, Y: l.Media.Y, W: l.Media.W, H: l.Media.H}
+			scene.CanvasW, scene.CanvasH = l.CanvasW, l.CanvasH
+		}
+	}
+	if err := a.player.Load(scene); err != nil {
 		return err
 	}
 	a.version = m.Version
@@ -332,8 +342,9 @@ func (a *Agent) localPath(item manifest.Item) string {
 
 // cleanup 删除不再被当前清单引用的缓存文件。
 func (a *Agent) cleanup(m *manifest.Manifest) {
-	referenced := make(map[string]bool, len(m.Items))
-	for _, it := range m.Items {
+	downloads := m.Downloads()
+	referenced := make(map[string]bool, len(downloads))
+	for _, it := range downloads {
 		referenced[filepath.Base(a.localPath(it))] = true
 	}
 	entries, err := os.ReadDir(a.mediaDir())
@@ -342,9 +353,15 @@ func (a *Agent) cleanup(m *manifest.Manifest) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		base, isPart := trimSuffix(name, ".part")
-		// 被引用的文件、以及仍被引用条目正在续传的 .part 文件都保留。
-		if referenced[name] || (isPart && referenced[base]) {
+		// 被引用的文件、仍被引用条目正在续传的 .part 文件、
+		// 以及叠加图解码出来的 .bgra 都保留。
+		if referenced[name] {
+			continue
+		}
+		if base, ok := trimSuffix(name, ".part"); ok && referenced[base] {
+			continue
+		}
+		if base, ok := trimSuffix(name, overlaySuffix); ok && referenced[base] {
 			continue
 		}
 		_ = os.Remove(filepath.Join(a.mediaDir(), name))

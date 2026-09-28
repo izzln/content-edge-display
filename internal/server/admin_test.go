@@ -128,6 +128,7 @@ func TestAttributesRoundTrip(t *testing.T) {
 	}
 }
 
+// splitTemplate 左半属性、右半静态图片（image 区由服务端合成进画面）。
 func splitTemplate() map[string]any {
 	return map[string]any{
 		"id": "split", "name": "左右分屏",
@@ -136,6 +137,27 @@ func splitTemplate() map[string]any {
 			{"id": "right", "x": 720, "y": 0, "w": 720, "h": 900, "type": "image"},
 		},
 	}
+}
+
+// mediaTemplate 左半属性、右半媒体区（播放列表由设备端播放，可以是视频）。
+func mediaTemplate(id string) map[string]any {
+	return map[string]any{
+		"id": id, "name": "左右分屏(媒体)", "image_duration_s": 10,
+		"regions": []map[string]any{
+			{"id": "left", "x": 0, "y": 0, "w": 720, "h": 900, "type": "attribute", "key": "room", "font_size": 160, "bg": "#1E3A8A"},
+			{"id": "right", "x": 720, "y": 0, "w": 720, "h": 900, "type": "media"},
+		},
+	}
+}
+
+// globalTemplateID 返回首启播种出来的默认模板 ID。
+func globalTemplateID(t *testing.T, s *Server) string {
+	t.Helper()
+	id := s.store.Global().TemplateID
+	if id == "" {
+		t.Fatal("首次启动应当已播种默认模板并设为全局默认")
+	}
+	return id
 }
 
 func TestTemplateCRUDAndPreview(t *testing.T) {
@@ -169,8 +191,8 @@ func TestTemplateCRUDAndPreview(t *testing.T) {
 
 	// 解除引用后可删除
 	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/display",
-		map[string]any{"mode": "playlist"}), http.StatusOK)
-	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/split", nil), http.StatusNoContent)
+		map[string]any{"mode": "global"}), http.StatusOK)
+	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/split", nil), http.StatusOK)
 }
 
 func TestTemplateModeManifest(t *testing.T) {
@@ -201,11 +223,12 @@ func TestTemplateModeManifest(t *testing.T) {
 		t.Fatal("attribute change did not change manifest version")
 	}
 
-	// 切回 playlist → 回到目录清单
+	// 切回跟随全局 → 用首启播种的默认模板；媒体区还没有内容，渲染成整屏图而不是黑屏
 	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/display",
-		map[string]any{"mode": "playlist"}), http.StatusOK)
-	if m3 := deviceManifest(t, h); len(m3.Items) != 0 {
-		t.Fatalf("expected empty playlist manifest, got %+v", m3)
+		map[string]any{"mode": "global"}), http.StatusOK)
+	m3 := deviceManifest(t, h)
+	if len(m3.Items) != 1 || !strings.HasPrefix(m3.Items[0].Name, "tpl_") || m3.Layout != nil {
+		t.Fatalf("媒体区没内容时应回落到整屏图：%+v", m3)
 	}
 }
 
