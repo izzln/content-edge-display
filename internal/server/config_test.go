@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/izzln/content-edge-display/internal/store"
 )
 
 // 相对路径必须按配置文件所在目录解析，而不是进程工作目录：
@@ -58,9 +60,9 @@ func TestLoadConfigKeepsAbsolutePathsAndDefaults(t *testing.T) {
 	}
 }
 
-// 图片停留时长应能在管理后台改并立即对设备生效——
+// 图片停留时长是版式的一部分，跟着模板走：在后台改模板就要立即对设备生效——
 // 包括让清单版本号变化，否则设备一直 304，新设置到不了现场。
-func TestGlobalImageDurationReachesDevices(t *testing.T) {
+func TestTemplateImageDurationReachesDevices(t *testing.T) {
 	s, mediaRoot := newTestServer(t)
 	s.cfg.AdminToken = adminToken
 	h := s.Handler()
@@ -68,16 +70,22 @@ func TestGlobalImageDurationReachesDevices(t *testing.T) {
 	os.MkdirAll(devDir, 0o755)
 	os.WriteFile(filepath.Join(devDir, "a.jpg"), []byte("img"), 0o644)
 
+	tplID := globalTemplateID(t, s)
 	before := deviceManifest(t, h)
-	if before.Items[0].Duration != s.cfg.ImageDurationS {
-		t.Fatalf("默认应取 server.json 的值 %d，得到 %d", s.cfg.ImageDurationS, before.Items[0].Duration)
+	if len(before.Items) != 1 || before.Items[0].Name != "a.jpg" {
+		t.Fatalf("媒体区有内容时清单应是媒体文件本身：%+v", before.Items)
+	}
+	if before.Items[0].Duration != store.DefaultImageDurationS {
+		t.Fatalf("默认停留时长应为 %d，得到 %d", store.DefaultImageDurationS, before.Items[0].Duration)
 	}
 
-	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]any{"image_duration_s": 25}), http.StatusOK)
+	tpl, _ := s.store.Template(tplID)
+	tpl.ImageDurationS = 25
+	do(t, h, adminReq("PUT", "/api/v1/admin/templates/"+tplID, tpl), http.StatusOK)
 
 	after := deviceManifest(t, h)
 	if after.Items[0].Duration != 25 {
-		t.Fatalf("后台设置未生效：duration = %d", after.Items[0].Duration)
+		t.Fatalf("模板里的设置未生效：duration = %d", after.Items[0].Duration)
 	}
 	if after.Version == before.Version {
 		t.Fatal("只改时长也必须改变清单版本号，否则设备收到 304 永远不会更新")
@@ -87,12 +95,14 @@ func TestGlobalImageDurationReachesDevices(t *testing.T) {
 	}
 
 	// 非法值被拒绝
-	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]any{"image_duration_s": 99999}), http.StatusBadRequest)
+	tpl.ImageDurationS = 99999
+	do(t, h, adminReq("PUT", "/api/v1/admin/templates/"+tplID, tpl), http.StatusBadRequest)
 
-	// 归零 → 回落到 server.json 的值
-	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]any{"image_duration_s": 0}), http.StatusOK)
-	if back := deviceManifest(t, h); back.Items[0].Duration != s.cfg.ImageDurationS {
-		t.Fatalf("清零后应回落到配置值，得到 %d", back.Items[0].Duration)
+	// 归零 → 回落到默认值
+	tpl.ImageDurationS = 0
+	do(t, h, adminReq("PUT", "/api/v1/admin/templates/"+tplID, tpl), http.StatusOK)
+	if back := deviceManifest(t, h); back.Items[0].Duration != store.DefaultImageDurationS {
+		t.Fatalf("清零后应回落到默认值，得到 %d", back.Items[0].Duration)
 	}
 }
 

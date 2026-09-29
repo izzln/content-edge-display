@@ -26,12 +26,15 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/{$}", s.handleAdminUI)
 
 	mux.HandleFunc("GET /api/v1/admin/devices", s.adminRead(s.handleAdminDevices))
-	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/name", s.adminWrite(s.handleRenameDevice))
 	mux.HandleFunc("DELETE /api/v1/admin/devices/{id}", s.adminWrite(s.handleDeleteDevice))
 	mux.HandleFunc("GET /api/v1/admin/devices/{id}/attributes", s.adminRead(s.handleGetAttrs))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/attributes", s.adminWrite(s.handlePutAttrs))
 	mux.HandleFunc("POST /api/v1/admin/devices/{id}/test", s.adminWrite(s.handleTest))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/display", s.adminWrite(s.handlePutDisplay))
+	mux.HandleFunc("GET /api/v1/admin/devices/{id}/media", s.adminRead(s.handleListDeviceMedia))
+	mux.HandleFunc("POST /api/v1/admin/devices/{id}/media", s.adminWrite(s.handleUploadDeviceMedia))
+	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/media", s.adminWrite(s.handleReorderDeviceMedia))
+	mux.HandleFunc("DELETE /api/v1/admin/devices/{id}/media/{file}", s.adminWrite(s.handleDeleteDeviceMedia))
 	mux.HandleFunc("GET /api/v1/admin/templates", s.adminRead(s.handleListTemplates))
 	mux.HandleFunc("POST /api/v1/admin/templates", s.adminWrite(s.handlePutTemplate))
 	mux.HandleFunc("PUT /api/v1/admin/templates/{id}", s.adminWrite(s.handlePutTemplate))
@@ -101,7 +104,7 @@ func (s *Server) pathDevice(w http.ResponseWriter, r *http.Request) (DeviceConfi
 	return dev, ok
 }
 
-// ---- 设备列表 / 改名 / 删除 / 属性 / 测试 / 显示配置 ----
+// ---- 设备列表 / 删除 / 属性 / 测试 / 显示配置 / 播放列表 ----
 
 func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
@@ -145,31 +148,6 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, statuses)
 }
 
-func (s *Server) handleRenameDevice(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
-		http.Error(w, "bad body", http.StatusBadRequest)
-		return
-	}
-	err := s.store.Update(func(st *store.State) error {
-		d := st.Devices[dev.ID]
-		d.Name = strings.TrimSpace(req.Name)
-		st.Devices[dev.ID] = d
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // handleDeleteDevice 删除自注册设备及其属性/显示配置/更新目标（设备可重新注册）。
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	dev, ok := s.pathDevice(w, r)
@@ -193,6 +171,7 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastHB, dev.ID)
 	s.mu.Unlock()
 	os.RemoveAll(filepath.Join(s.renderedDir(), dev.ID))
+	os.RemoveAll(s.deviceMediaDir(dev.ID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -301,14 +280,8 @@ func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if g.TemplateID != "" {
-		if _, ok := s.store.Template(g.TemplateID); !ok {
-			http.Error(w, "模板不存在", http.StatusBadRequest)
-			return
-		}
-	}
-	if g.ImageDurationS < 0 || g.ImageDurationS > 3600 {
-		http.Error(w, "图片停留时长须为 1~3600 秒（0 表示用 server.json 的默认值）", http.StatusBadRequest)
+	if _, ok := s.store.Template(g.TemplateID); !ok {
+		http.Error(w, "模板不存在", http.StatusBadRequest)
 		return
 	}
 	if err := s.store.Update(func(st *store.State) error { st.Global = g; return nil }); err != nil {
@@ -359,6 +332,8 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// handlePutTemplate 新建或修改模板。模板 ID 由服务端生成：它只是内部标识，
+// 运营方不需要关心，管理后台也不显示——新建时（POST 且未带 ID）自动分配。
 func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	var t store.Template
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&t); err != nil {
@@ -367,6 +342,9 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	if id := r.PathValue("id"); id != "" {
 		t.ID = id
+	}
+	if t.ID == "" {
+		t.ID = store.NewTemplateID()
 	}
 	if err := store.ValidateTemplate(&t); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -383,41 +361,58 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, t)
 }
 
+// handleDeleteTemplate 删除模板。
+//
+// 两条保护：仍被某台设备或某个时段直接引用的模板不能删（会让那些设备没有版式）；
+// 最后一个模板也不能删（系统必须始终有一个全局默认模板可用）。
+// 删掉的正好是全局默认模板时不拦——删除后自动改指向剩下的模板。
 func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// 拒绝删除仍被设备/全局/时段引用的模板。
-	var inUse []string
+	var (
+		inUse []string
+		total int
+		last  bool
+	)
 	s.store.View(func(st *store.State) {
 		for devID, d := range st.Displays {
-			if d.Mode == "template" && d.TemplateID == id {
+			if d.Mode == store.ModeTemplate && d.TemplateID == id {
 				inUse = append(inUse, "设备 "+devID)
 			}
-		}
-		if st.Global.TemplateID == id {
-			inUse = append(inUse, "全局默认模板")
 		}
 		for _, sc := range st.Schedules {
 			if sc.TemplateID == id {
 				inUse = append(inUse, "时段 "+sc.ID)
 			}
 		}
+		total = len(st.Templates)
+		_, exists := st.Templates[id]
+		last = exists && total == 1
 	})
+	if last {
+		http.Error(w, "这是最后一个模板，不能删除（系统始终需要一个全局默认模板）", http.StatusConflict)
+		return
+	}
 	if len(inUse) > 0 {
 		http.Error(w, fmt.Sprintf("模板使用中: %s", strings.Join(inUse, ", ")), http.StatusConflict)
 		return
 	}
+	var newGlobal string
 	err := s.store.Update(func(st *store.State) error {
 		delete(st.Templates, id)
+		store.EnsureGlobalTemplate(st)
+		newGlobal = st.Global.TemplateID
 		return nil
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, map[string]string{"global_template_id": newGlobal})
 }
 
-// handlePreview 渲染模板预览图（可选 ?device= 用某台设备的属性与绑定）。
+// handlePreview 渲染模板预览图。
+// ?device= 用某台设备的属性、绑定与左右对调设置；?mirror=1 单独预览对调后的版式。
+// 预览始终出整屏图（媒体区填自己的底色），这样在后台里能直接看到版式。
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	tpl, ok := s.store.Template(r.PathValue("id"))
 	if !ok {
@@ -426,19 +421,22 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	attrs := map[string]string{}
 	bindings := map[string]string{}
+	mirror := r.URL.Query().Get("mirror") == "1"
 	if devID := r.URL.Query().Get("device"); devID != "" {
 		attrs = s.store.Attrs(devID)
-		if d := s.store.Display(devID); d.TemplateID == tpl.ID {
+		d := s.store.Display(devID)
+		mirror = mirror || d.Mirror
+		if d.TemplateID == tpl.ID {
 			bindings = d.Bindings
 		}
 	}
-	img, err := s.renderer.Render(tpl, attrs, bindings)
+	rendered, err := s.renderer.Render(tpl, attrs, bindings, mirror, false)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
-	if err := render.EncodePNG(w, img); err != nil {
+	if err := render.EncodePNG(w, rendered.Image); err != nil {
 		log.Printf("preview encode failed: %v", err)
 	}
 }

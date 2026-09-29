@@ -3,24 +3,49 @@
 package store
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 )
 
+// DefaultImageDurationS 是模板未指定时图片在媒体区的停留秒数。
+const DefaultImageDurationS = 10
+
+// 区域类型。
+const (
+	RegionAttribute = "attribute" // 显示设备属性值
+	RegionText      = "text"      // 静态文字
+	RegionImage     = "image"     // 静态图片（如 logo），由服务端合成进画面
+	RegionMedia     = "media"     // 播放列表区：图片/视频由设备端播放，每个模板至多一个
+)
+
 // Template 是运营方定义的显示模板（画布 + 若干区域）。
 type Template struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	W          int      `json:"w"`
-	H          int      `json:"h"`
-	Background string   `json:"background"`
-	Regions    []Region `json:"regions"`
+	ID             string   `json:"id"` // 自动生成，管理后台不暴露给使用者
+	Name           string   `json:"name"`
+	W              int      `json:"w"`
+	H              int      `json:"h"`
+	Background     string   `json:"background"`
+	ImageDurationS int      `json:"image_duration_s"` // 媒体区里每张图片停留几秒（视频播完即切）
+	Regions        []Region `json:"regions"`
+}
+
+// MediaRegion 返回模板的播放列表区域。
+func (t Template) MediaRegion() (Region, bool) {
+	for _, r := range t.Regions {
+		if r.Type == RegionMedia {
+			return r, true
+		}
+	}
+	return Region{}, false
 }
 
 // Region 是模板中的一个显示区域。
@@ -30,8 +55,8 @@ type Region struct {
 	Y        int    `json:"y"`
 	W        int    `json:"w"`
 	H        int    `json:"h"`
-	Type     string `json:"type"` // "attribute" | "text" | "image"
-	Key      string `json:"key"`  // attribute: 属性名; text: 静态文字内容
+	Type     string `json:"type"`
+	Key      string `json:"key"` // attribute: 属性名; text: 静态文字内容
 	FontSize int    `json:"font_size"`
 	Color    string `json:"color"`
 	Bg       string `json:"bg"`
@@ -40,9 +65,11 @@ type Region struct {
 
 // DisplayConfig 是一台设备的显示配置。
 type DisplayConfig struct {
-	Mode       string            `json:"mode"` // "playlist"(默认) | "template"
-	TemplateID string            `json:"template_id,omitempty"`
-	Bindings   map[string]string `json:"bindings,omitempty"` // region_id -> 上传图片文件名
+	Mode       string            `json:"mode"`                  // ""/"global" 跟随全局模板 | "template" 用本设备专属模板
+	TemplateID string            `json:"template_id,omitempty"` // Mode=template 时指向专属模板
+	Mirror     bool              `json:"mirror,omitempty"`      // 左右对调：属性在左还是在右，一个全局模板即可覆盖两种设备
+	Playlist   []string          `json:"playlist,omitempty"`    // 媒体区播放顺序，文件位于 media_root/<设备>/
+	Bindings   map[string]string `json:"bindings,omitempty"`    // 静态 image 区域 -> uploads/ 里的文件名
 }
 
 // Device 是自注册设备（静态配置的设备在 server.json 中，不在此处）。
@@ -77,8 +104,7 @@ type UpdateTarget struct {
 
 // GlobalConfig 是全局显示设置（运营方在管理后台改，立即对所有设备生效）。
 type GlobalConfig struct {
-	TemplateID     string `json:"template_id,omitempty"`      // 全局默认模板
-	ImageDurationS int    `json:"image_duration_s,omitempty"` // 图片停留秒数；0 = 用 server.json 的值
+	TemplateID string `json:"template_id,omitempty"` // 全局默认模板
 }
 
 // Schedule 是一条时段计划：命中时用该模板替代全局默认模板。
@@ -200,7 +226,7 @@ func (st *Store) Attrs(deviceID string) map[string]string {
 	return out
 }
 
-// Display 返回设备显示配置（未配置时为 playlist 模式）。
+// Display 返回设备显示配置的副本（未配置时跟随全局模板）。
 func (st *Store) Display(deviceID string) DisplayConfig {
 	var d DisplayConfig
 	st.View(func(s *State) {
@@ -210,9 +236,10 @@ func (st *Store) Display(deviceID string) DisplayConfig {
 			b[k] = v
 		}
 		d.Bindings = b
+		d.Playlist = append([]string(nil), d.Playlist...)
 	})
 	if d.Mode == "" {
-		d.Mode = "playlist"
+		d.Mode = ModeGlobal
 	}
 	return d
 }
@@ -380,7 +407,14 @@ func ValidateTemplate(t *Template) error {
 	if len(t.Regions) == 0 {
 		return errors.New("template: 至少需要一个区域")
 	}
+	if t.ImageDurationS <= 0 {
+		t.ImageDurationS = DefaultImageDurationS
+	}
+	if t.ImageDurationS > 3600 {
+		return errors.New("template: 图片停留时长须在 1~3600 秒之间")
+	}
 	seen := map[string]bool{}
+	media := 0
 	for i := range t.Regions {
 		r := &t.Regions[i]
 		if !idPattern.MatchString(r.ID) {
@@ -391,11 +425,16 @@ func ValidateTemplate(t *Template) error {
 		}
 		seen[r.ID] = true
 		switch r.Type {
-		case "attribute", "text", "image":
+		case RegionAttribute, RegionText, RegionImage:
+		case RegionMedia:
+			media++
+			if media > 1 {
+				return errors.New("template: 至多只能有一个媒体区（mpv 只能把视频放进一个矩形）")
+			}
 		default:
 			return fmt.Errorf("region %q: 未知类型 %q", r.ID, r.Type)
 		}
-		if r.Type == "attribute" && r.Key == "" {
+		if r.Type == RegionAttribute && r.Key == "" {
 			return fmt.Errorf("region %q: attribute 区域必须指定 key", r.ID)
 		}
 		if r.W <= 0 || r.H <= 0 || r.X < 0 || r.Y < 0 ||
@@ -425,13 +464,20 @@ func ValidateTemplate(t *Template) error {
 	return nil
 }
 
+// 设备的显示模式。
+const (
+	ModeGlobal   = "global"   // 跟随全局默认模板
+	ModeTemplate = "template" // 用本设备专属模板
+)
+
 // ValidateDisplay 校验显示配置引用的模板与区域绑定。
 func ValidateDisplay(d *DisplayConfig, getTemplate func(string) (Template, bool)) error {
 	switch d.Mode {
-	case "", "playlist":
-		d.Mode = "playlist"
+	case "", ModeGlobal:
+		d.Mode = ModeGlobal
+		d.TemplateID = ""
 		return nil
-	case "template":
+	case ModeTemplate:
 	default:
 		return fmt.Errorf("display: 未知模式 %q", d.Mode)
 	}
@@ -449,4 +495,71 @@ func ValidateDisplay(d *DisplayConfig, getTemplate func(string) (Template, bool)
 		}
 	}
 	return nil
+}
+
+// Mirrored 返回区域左右对调后的位置：属性在左还是在右，用同一个模板即可覆盖两种设备。
+// 只换位置，文字本身不镜像。
+func Mirrored(r Region, canvasW int) Region {
+	r.X = canvasW - (r.X + r.W)
+	switch r.Align {
+	case "left":
+		r.Align = "right"
+	case "right":
+		r.Align = "left"
+	}
+	return r
+}
+
+// NewTemplateID 生成模板 ID。使用者不需要关心它，管理后台也不暴露。
+func NewTemplateID() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("tpl-%d", time.Now().UnixNano())
+	}
+	return "tpl-" + hex.EncodeToString(b)
+}
+
+// DefaultTemplate 是首次启动时播种的左右分屏模板：左显示房间号，右放图片/视频。
+func DefaultTemplate() Template {
+	return Template{
+		ID: NewTemplateID(), Name: "左右分屏", W: 1440, H: 900,
+		Background: "#000000", ImageDurationS: DefaultImageDurationS,
+		Regions: []Region{
+			{ID: "left", X: 0, Y: 0, W: 720, H: 900, Type: RegionAttribute,
+				Key: "room", FontSize: 160, Color: "#FFFFFF", Bg: "#1E3A8A", Align: "center"},
+			{ID: "right", X: 720, Y: 0, W: 720, H: 900, Type: RegionMedia},
+		},
+	}
+}
+
+// SeedDefaultTemplate 在还没有任何模板时播种一个左右分屏模板，返回是否播种了。
+// 运营方开箱就有能用的版式，不必先自己建模板。
+func SeedDefaultTemplate(st *State) (Template, bool) {
+	if len(st.Templates) > 0 {
+		return Template{}, false
+	}
+	t := DefaultTemplate()
+	if err := ValidateTemplate(&t); err != nil {
+		return Template{}, false // DefaultTemplate 由代码给出，不可能不合法
+	}
+	st.Templates[t.ID] = t
+	return t, true
+}
+
+// EnsureGlobalTemplate 保证全局默认模板指向一个真实存在的模板：缺失或指向已删除的模板时，
+// 自动指向 ID 最小的现存模板（确定性），返回是否做了改动。
+func EnsureGlobalTemplate(st *State) bool {
+	if _, ok := st.Templates[st.Global.TemplateID]; ok {
+		return false
+	}
+	ids := make([]string, 0, len(st.Templates))
+	for id := range st.Templates {
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	sort.Strings(ids)
+	st.Global.TemplateID = ids[0]
+	return true
 }

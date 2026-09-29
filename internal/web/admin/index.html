@@ -43,6 +43,11 @@
   .badge { display:inline-block; background:#eef; border-radius:4px; padding:1px 6px; font-size:12px; margin:1px 2px; }
   .badge.global { background:#dfd; }
   .days label { margin-right:6px; font-size:12px; white-space:nowrap; }
+  .pl-item { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:4px; padding:5px 8px; margin-bottom:4px; background:#fafafa; }
+  .pl-item.over { border-color:var(--accent); background:#eef5ff; }
+  .pl-item .grip { cursor:grab; color:var(--muted); }
+  .pl-item .sp { flex:1; }
+  button[disabled] { opacity:.45; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -62,13 +67,12 @@
     <div class="bar">
       <b>全局默认模板：</b>
       <select id="globalSel"></select>
-      　图片停留 <input type="number" id="globalDur" min="1" max="3600" style="width:5em"> 秒
       <button class="primary" onclick="saveGlobal()">保存</button>
-      <span class="muted">所有设备默认显示此模板；各设备图片区域在"设备 → 图片"里单独指定。<br>
-        图片停留时长对所有设备生效（视频按自身长度播完为准；模板模式是单张静态图，不受此项影响）。</span>
+      <span class="muted">所有设备默认显示此模板。属性在左还是在右，用各设备"内容"里的<b>左右对调</b>开关切换，不用建两个模板。<br>
+        图片停留时长是版式的一部分，写在模板里（视频按自身长度播完即切）。</span>
     </div>
-    <p><button class="primary" onclick="newSplitTemplate()">新建左右分屏模板</button>
-       <button onclick="editTemplateJSON()">新建/编辑(JSON)</button></p>
+    <p><button class="primary" onclick="templateForm()">新建模板</button>
+       <button onclick="editTemplateJSON()">新建(JSON)</button></p>
     <table id="tplTable"></table>
     <h2 class="sec">时段计划 <span class="muted">按顺序匹配第一条命中的时段；无命中用全局默认模板；开始 &gt; 结束表示跨午夜</span></h2>
     <table id="schTable"></table>
@@ -149,8 +153,9 @@ async function refresh() {
 function renderDevices() {
   const g = tplById(global.template_id);
   $("#globalBar").innerHTML = g
-    ? `当前全局默认模板：<b>${esc(g.name)}</b> <span class="muted">(${esc(g.id)})</span>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}`
-    : `<span class="warn">尚未设置全局模板</span>——设备将播放各自 media 目录内容。到"模板与时段"页设置。`;
+    ? `当前全局默认模板：<b>${esc(g.name)}</b>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}
+       <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
+    : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
   const rows = devices.map(d => {
     const st = d.online ? '<span class="dot on"></span>在线'
       : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
@@ -174,11 +179,9 @@ function renderDevices() {
       <td>${attrs}</td>
       <td>${show}</td>
       <td>
-        <button onclick="testDialog('${esc(d.id)}')">测试</button>
-        <button onclick="imagesDialog('${esc(d.id)}')">图片</button>
+        <button class="primary" onclick="contentDialog('${esc(d.id)}')">内容</button>
         <button onclick="attrsDialog('${esc(d.id)}')">属性</button>
-        <button onclick="renameDevice('${esc(d.id)}')">改名</button>
-        <button onclick="displayDialog('${esc(d.id)}')" class="sm">高级</button>
+        <button onclick="testDialog('${esc(d.id)}')">测试</button>
         <button onclick="deleteDevice('${esc(d.id)}')" class="danger sm">删除</button>
       </td></tr>`;
   }).join("");
@@ -198,13 +201,6 @@ function testDialog(id) {
 async function doTest(id, secs) {
   await api(`/api/v1/admin/devices/${id}/test`, { method: "POST", ...J({ duration_s: secs }) });
   toast(secs > 0 ? "已下发测试屏" : "已取消测试"); closeModal(); refresh();
-}
-async function renameDevice(id) {
-  const d = devices.find(x => x.id === id);
-  const name = prompt("设备名称", d.name);
-  if (name === null || !name.trim()) return;
-  await api(`/api/v1/admin/devices/${id}/name`, { method: "PUT", ...J({ name: name.trim() }) });
-  toast("已改名"); refresh();
 }
 async function deleteDevice(id) {
   if (!confirm(`删除设备 ${id}？其属性/图片绑定/更新目标一并删除；设备若仍在线会重新自注册（新密钥）。`)) return;
@@ -229,23 +225,187 @@ async function saveAttrs(id) {
   toast("属性已保存"); closeModal(); refresh();
 }
 
-// ---- 图片绑定（针对该设备当前/全局模板及所有时段模板的 image 区域）----
-function imagesDialog(id) {
+// ---- 内容：模板选择 + 左右对调 + 播放列表 + 静态图片绑定 ----
+// 一台设备要配的东西都在这一个对话框里：以前"图片"和"高级"分开，改哪边都像只改了一半。
+let pl = [];            // 当前设备的播放列表（服务端返回的顺序即播放顺序）
+let plDirty = false;    // 顺序是否被拖动过（未保存）
+
+const mediaRegionOf = tid => (tplById(tid)?.regions || []).find(r => r.type === "media");
+// 设备实际会用到的模板：专属优先，否则全局默认。
+const effectiveTplID = d => (d.display.mode === "template" && d.display.template_id) || global.template_id;
+
+async function contentDialog(id) {
   const d = devices.find(x => x.id === id);
-  // 收集该设备可能显示的全部模板的 image 区域（全局 + 时段 + 覆盖），按区域 ID 去重
-  const tplIDs = new Set([global.template_id, ...schedules.map(s => s.template_id), d.display.template_id].filter(Boolean));
-  const regions = new Map();
-  for (const tid of tplIDs) for (const r of (tplById(tid)?.regions || [])) if (r.type === "image" && !regions.has(r.id)) regions.set(r.id, tid);
-  window._bindings = { ...(d.display.bindings || {}) };
-  const rows = [...regions].map(([rid, tid]) => `<div class="row">图片区域 <b>${esc(rid)}</b> <span class="muted">(模板 ${esc(tid)})</span>:
-      <select onchange="window._bindings['${esc(rid)}']=this.value"><option value="">（未绑定）</option>
-      ${uploads.map(u => `<option value="${esc(u)}" ${window._bindings[rid] === u ? "selected" : ""}>${esc(u)}</option>`).join("")}</select></div>`).join("");
-  modal(`<h2>图片绑定 — ${esc(d.name)}</h2>
-    ${rows || '<p class="warn">当前没有含图片区域的模板（先设置全局模板）</p>'}
-    <div class="row"><input type="file" id="upFile" accept=".png,.jpg,.jpeg"><button onclick="doUpload(() => imagesDialog('${esc(id)}'))">上传新图片</button></div>
-    <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前模板效果（按已保存配置）</button></div><div id="previewBox"></div>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveBindings('${esc(id)}')">保存</button></div>`);
+  try { pl = arr(await api(`/api/v1/admin/devices/${id}/media`)); } catch { pl = []; }
+  plDirty = false;
+  const own = d.display.mode === "template";
+  const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  modal(`<h2>内容 — ${esc(d.name)} <span class="muted">${esc(d.id)}</span></h2>
+    <div class="row"><label><input type="radio" name="mode" value="global" ${own ? "" : "checked"} onchange="onModeChange()">
+        跟随全局模板<span class="muted">（${esc(tplById(global.template_id)?.name || "未设置")}）</span></label></div>
+    <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
+      <select id="ovSel" ${own ? "" : "disabled"} onchange="renderContentBody('${esc(id)}')">${opts}</select>
+      <button class="sm" onclick="copyGlobalTemplate()">复制全局模板再改</button></div>
+    <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""}> 左右对调
+      <span class="muted">同一个模板，属性放到另一边（不镜像文字）</span></label></div>
+    <hr style="border:none;border-top:1px solid var(--line);margin:12px 0">
+    <div id="contentBody"></div>
+    <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
+    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveContent('${esc(id)}')">保存</button></div>`);
+  renderContentBody(id);
 }
+
+function onModeChange() {
+  const own = document.querySelector('input[name=mode]:checked').value === "template";
+  $("#ovSel").disabled = !own;
+  renderContentBody(currentDeviceID());
+}
+function currentDeviceID() { return $("#contentBody")?.dataset.device || ""; }
+
+// copyGlobalTemplate 以全局模板为蓝本建一个副本，供这台设备单独改。
+async function copyGlobalTemplate() {
+  const g = tplById(global.template_id);
+  if (!g) { toast("尚无全局模板"); return; }
+  const copy = { ...g, name: g.name + " 副本" };
+  delete copy.id; // 由服务端生成
+  const created = await api("/api/v1/admin/templates", { method: "POST", ...J(copy) });
+  templates.push(created);
+  const sel = $("#ovSel");
+  sel.insertAdjacentHTML("beforeend", `<option value="${esc(created.id)}">${esc(created.name)}</option>`);
+  sel.value = created.id; sel.disabled = false;
+  document.querySelector('input[name=mode][value=template]').checked = true;
+  toast("已复制为专属模板，可在「模板与时段」页继续编辑");
+  renderContentBody(currentDeviceID());
+}
+
+// renderContentBody 画出与当前所选模板匹配的内容区：媒体区 → 播放列表；image 区域 → 图片绑定。
+function renderContentBody(id) {
+  const box = $("#contentBody");
+  if (!box) return;
+  box.dataset.device = id;
+  const own = document.querySelector('input[name=mode]:checked').value === "template";
+  const tid = own ? $("#ovSel").value : global.template_id;
+  const tpl = tplById(tid);
+  const media = mediaRegionOf(tid);
+  let html = "";
+  if (!tpl) {
+    html = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
+  } else if (!media) {
+    html = `<p class="muted">模板「${esc(tpl.name)}」没有媒体区，这台设备不播放列表内容。
+      要放图片/视频，请换一个带媒体区的模板。</p>`;
+  } else {
+    html = `<div class="row"><b>播放内容</b><span class="muted">按顺序循环播放；图片停留 ${esc(tpl.image_duration_s)} 秒（写在模板里），视频播完即切</span></div>
+      <div class="row"><input type="file" id="plFiles" multiple accept=".png,.jpg,.jpeg,.mp4,.mov">
+        <button class="primary" onclick="uploadDeviceMedia('${esc(id)}')">上传</button></div>
+      <p class="muted">图片 png/jpg，单张不超过 20MB 且不超过约 1200 万像素；视频 mp4/mov，不超过 500MB，
+        <b>编码必须是 H.264</b>（设备芯片不能硬解 H.265，传上来也放不动，会被当场拒收）。视频一律静音播放。</p>
+      <div id="plBox"></div>`;
+  }
+  // 静态图片区域（如 logo）由服务端合成进画面，与播放列表无关
+  const imgRegions = (tpl?.regions || []).filter(r => r.type === "image");
+  if (imgRegions.length) {
+    window._bindings = { ...(devices.find(x => x.id === id).display.bindings || {}) };
+    html += `<div class="row" style="margin-top:12px"><b>固定图片区域</b><span class="muted">由服务端合成进画面（如 logo）</span></div>` +
+      imgRegions.map(r => `<div class="row">区域 <b>${esc(r.id)}</b>
+        <select onchange="window._bindings['${esc(r.id)}']=this.value"><option value="">（未绑定）</option>
+        ${uploads.map(u => `<option value="${esc(u)}" ${window._bindings[r.id] === u ? "selected" : ""}>${esc(u)}</option>`).join("")}</select></div>`).join("") +
+      `<div class="row"><input type="file" id="upFile" accept=".png,.jpg,.jpeg">
+        <button onclick="doUpload(() => renderContentBody('${esc(id)}'))">上传图片</button></div>`;
+  } else {
+    window._bindings = {};
+  }
+  box.innerHTML = html;
+  renderPlaylist(id);
+}
+
+const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+
+function renderPlaylist(id) {
+  const box = $("#plBox");
+  if (!box) return;
+  if (!pl.length) {
+    box.innerHTML = '<p class="muted">还没有内容。媒体区暂时显示模板底色，不会黑屏。</p>';
+    return;
+  }
+  box.innerHTML = pl.map((f, i) => `<div class="pl-item" draggable="true" data-i="${i}">
+      <span class="grip">☰</span><b>${i + 1}.</b> ${esc(f.name)}
+      <span class="badge">${f.type === "video" ? "视频" : "图片"}</span>
+      <span class="muted">${esc(fmtSize(f.size))}</span>
+      <span class="sp"></span>
+      <button class="sm" onclick="movePl(${i},-1,'${esc(id)}')">↑</button>
+      <button class="sm" onclick="movePl(${i},1,'${esc(id)}')">↓</button>
+      <button class="sm danger" onclick="deleteMedia('${esc(id)}','${esc(f.name)}')">删除</button>
+    </div>`).join("") +
+    `<div class="row"><button class="primary" ${plDirty ? "" : "disabled"} id="plSave"
+        onclick="savePlaylistOrder('${esc(id)}')">保存播放顺序</button>
+      <span class="muted">拖动条目或用 ↑↓ 调整顺序</span></div>`;
+  bindPlDrag(id);
+}
+
+// bindPlDrag 用原生 HTML5 拖放实现排序（触屏上用 ↑↓ 按钮）。
+function bindPlDrag(id) {
+  let from = -1;
+  for (const el of document.querySelectorAll(".pl-item")) {
+    el.ondragstart = e => { from = +el.dataset.i; e.dataTransfer.effectAllowed = "move"; };
+    el.ondragover = e => { e.preventDefault(); el.classList.add("over"); };
+    el.ondragleave = () => el.classList.remove("over");
+    el.ondrop = e => {
+      e.preventDefault(); el.classList.remove("over");
+      const to = +el.dataset.i;
+      if (from < 0 || from === to) return;
+      pl.splice(to, 0, ...pl.splice(from, 1));
+      plDirty = true; renderPlaylist(id);
+    };
+  }
+}
+function movePl(i, delta, id) {
+  const j = i + delta;
+  if (j < 0 || j >= pl.length) return;
+  [pl[i], pl[j]] = [pl[j], pl[i]];
+  plDirty = true; renderPlaylist(id);
+}
+async function savePlaylistOrder(id) {
+  pl = arr(await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) }));
+  plDirty = false; toast("播放顺序已保存"); renderPlaylist(id);
+}
+async function uploadDeviceMedia(id) {
+  const files = $("#plFiles").files;
+  if (!files.length) { toast("请先选择文件"); return; }
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  toast(`正在上传 ${files.length} 个文件…`);
+  const r = await api(`/api/v1/admin/devices/${id}/media`, { method: "POST", body: fd });
+  pl = arr(r.playlist); plDirty = false;
+  const bad = arr(r.rejected);
+  if (bad.length) {
+    modal(`<h2>部分文件未通过校验</h2>
+      <p>已收下 ${arr(r.accepted).length} 个；以下文件被拒收：</p>
+      <table>${bad.map(b => `<tr><td>${esc(b.name)}</td><td>${esc(b.reason)}</td></tr>`).join("")}</table>
+      <div class="actions"><button class="primary" onclick="contentDialog('${esc(id)}')">返回</button></div>`);
+    return;
+  }
+  toast(`已上传 ${arr(r.accepted).length} 个文件`);
+  renderContentBody(id);
+}
+async function deleteMedia(id, name) {
+  if (!confirm(`从播放列表中删除 ${name}？文件会从服务器上删除。`)) return;
+  pl = arr(await api(`/api/v1/admin/devices/${id}/media/${encodeURIComponent(name)}`, { method: "DELETE" }));
+  plDirty = false; toast("已删除"); renderPlaylist(id);
+}
+
+async function saveContent(id) {
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const body = { mode, mirror: $("#mirrorChk").checked, bindings: {} };
+  if (mode === "template") {
+    body.template_id = $("#ovSel").value;
+    if (!body.template_id) { toast("请选择模板"); return; }
+  }
+  for (const [k, v] of Object.entries(window._bindings || {})) if (v) body.bindings[k] = v;
+  await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
+  if (plDirty) await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) });
+  toast("已保存"); closeModal(); refresh();
+}
+
 async function doUpload(after) {
   const f = $("#upFile").files[0];
   if (!f) { toast("请先选择文件"); return; }
@@ -254,16 +414,9 @@ async function doUpload(after) {
   if (!uploads.includes(r.name)) uploads.push(r.name);
   toast("已上传 " + r.name); if (after) after();
 }
-async function saveBindings(id) {
-  const d = devices.find(x => x.id === id);
-  const body = { mode: d.display.mode || "playlist", template_id: d.display.template_id, bindings: {} };
-  for (const [k, v] of Object.entries(window._bindings)) if (v) body.bindings[k] = v;
-  await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
-  toast("图片绑定已保存"); closeModal(); refresh();
-}
 async function previewDevice(id) {
   const d = devices.find(x => x.id === id);
-  const tid = d.active_template || global.template_id;
+  const tid = d.active_template || effectiveTplID(d);
   if (!tid) { toast("该设备当前没有模板"); return; }
   await showPreview(`/api/v1/admin/templates/${tid}/preview?device=${id}`, "#previewBox");
 }
@@ -275,81 +428,93 @@ async function showPreview(url, target) {
   if (target) $(target).innerHTML = html; else modal(`<h2>预览</h2>${html}<div class="actions"><button onclick="closeModal()">关闭</button></div>`);
 }
 
-// ---- 高级：设备级模板覆盖 ----
-function displayDialog(id) {
-  const d = devices.find(x => x.id === id);
-  const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)} (${esc(t.id)})</option>`).join("");
-  modal(`<h2>高级：设备级覆盖 — ${esc(id)}</h2>
-    <p class="muted">一般不需要。"跟随全局"时设备按全局模板/时段计划显示；"固定模板"则忽略全局与时段，始终显示所选模板。</p>
-    <div class="row"><label><input type="radio" name="mode" value="playlist" ${d.display.mode !== "template" ? "checked" : ""}> 跟随全局（无全局模板时播放 media 目录）</label></div>
-    <div class="row"><label><input type="radio" name="mode" value="template" ${d.display.mode === "template" ? "checked" : ""}> 固定模板</label> <select id="ovSel">${opts}</select></div>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveDisplay('${esc(id)}')">保存</button></div>`);
-}
-async function saveDisplay(id) {
-  const d = devices.find(x => x.id === id);
-  const mode = document.querySelector('input[name=mode]:checked').value;
-  const body = { mode, bindings: d.display.bindings || {} };
-  if (mode === "template") { body.template_id = $("#ovSel").value; if (!body.template_id) { toast("请选择模板"); return; } }
-  await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
-  toast("已保存"); closeModal(); refresh();
-}
-
 // ================= 模板 / 全局 / 时段 =================
+const REGION_LABEL = { attribute: "属性", text: "文字", image: "固定图片", media: "播放内容" };
 function renderTemplates() {
-  $("#globalDur").value = global.image_duration_s || "";
-  $("#globalDur").placeholder = global.image_duration_s ? "" : "默认";
-  $("#globalSel").innerHTML = `<option value="">（无：设备播放 media 目录）</option>` +
-    templates.map(t => `<option value="${esc(t.id)}" ${global.template_id === t.id ? "selected" : ""}>${esc(t.name)} (${esc(t.id)})</option>`).join("");
+  $("#globalSel").innerHTML =
+    templates.map(t => `<option value="${esc(t.id)}" ${global.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
   const rows = templates.map(t => `<tr>
-    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${esc(t.id)} · ${t.w}×${t.h}</div></td>
-    <td>${t.regions.map(r => `<span class="badge">${esc(r.id)}:${esc(r.type)}${r.type !== "image" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
+    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒</div></td>
+    <td>${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
     <td>
       ${global.template_id === t.id ? "" : `<button onclick="setGlobal('${esc(t.id)}')">设为全局</button>`}
       <button onclick="showPreview('/api/v1/admin/templates/${esc(t.id)}/preview')">预览</button>
-      <button onclick="editTemplateJSON('${esc(t.id)}')">编辑</button>
-      <button class="danger" onclick="deleteTemplate('${esc(t.id)}')">删除</button>
+      <button onclick="templateForm('${esc(t.id)}')">编辑</button>
+      <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
+      <button class="danger" onclick="deleteTemplate('${esc(t.id)}')" ${only ? 'disabled title="这是最后一个模板，不能删除"' : ""}>删除</button>
     </td></tr>`).join("");
   $("#tplTable").innerHTML = `<tr><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
 async function setGlobal(id) { $("#globalSel").value = id; await saveGlobal(); }
 async function saveGlobal() {
-  const body = { template_id: $("#globalSel").value };
-  const d = parseInt($("#globalDur").value, 10);
-  if (d > 0) body.image_duration_s = d;
-  await api("/api/v1/admin/global", { method: "PUT", ...J(body) });
+  await api("/api/v1/admin/global", { method: "PUT", ...J({ template_id: $("#globalSel").value }) });
   toast("已保存"); refresh();
 }
-function newSplitTemplate() {
-  modal(`<h2>新建左右分屏模板</h2>
-    <div class="row">模板 ID <input type="text" id="f_id" placeholder="split-room"></div>
-    <div class="row">名称 <input type="text" id="f_name" placeholder="房间号分屏"></div>
-    <div class="row">左侧显示属性 key <input type="text" id="f_key" value="room"></div>
-    <div class="row">左侧字号 <input type="text" id="f_size" value="160"> 文字色 <input type="text" id="f_color" value="#FFFFFF"> 底色 <input type="text" id="f_bg" value="#1E3A8A"></div>
-    <p class="muted">右半屏为图片区域 <b>right</b>，具体图片在各设备"图片"里指定。</p>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="createSplit()">创建</button></div>`);
+// templateForm 表单编辑左右分屏模板（一半属性、一半播放内容）。
+// 结构更复杂的模板表单表达不了，转到 JSON 编辑。
+function templateForm(id) {
+  const t = id ? tplById(id) : null;
+  if (t && !splitShape(t)) { editTemplateJSON(id); return; }
+  const attr = t?.regions.find(r => r.type === "attribute") || { key: "room", font_size: 160, color: "#FFFFFF", bg: "#1E3A8A" };
+  const mediaLeft = t ? t.regions.find(r => r.type === "media").x === 0 : false;
+  modal(`<h2>${t ? "编辑模板" : "新建模板"}</h2>
+    <div class="row">名称 <input type="text" id="f_name" value="${esc(t?.name || "左右分屏")}"></div>
+    <div class="row">左右版式
+      <select id="f_side">
+        <option value="right" ${mediaLeft ? "" : "selected"}>左边属性 / 右边播放内容</option>
+        <option value="left" ${mediaLeft ? "selected" : ""}>左边播放内容 / 右边属性</option>
+      </select>
+      <span class="muted">单台设备想反过来，不用另建模板——在该设备"内容"里打开左右对调</span></div>
+    <div class="row">属性 key <input type="text" id="f_key" value="${esc(attr.key || "room")}">
+      <span class="muted">显示设备属性里该 key 对应的值，如 room</span></div>
+    <div class="row">字号 <input type="text" id="f_size" value="${esc(attr.font_size || 160)}" style="width:5em">
+      文字色 <input type="text" id="f_color" value="${esc(attr.color || "#FFFFFF")}" style="width:7em">
+      底色 <input type="text" id="f_bg" value="${esc(attr.bg || "#1E3A8A")}" style="width:7em"></div>
+    <div class="row">图片停留 <input type="number" id="f_dur" min="1" max="3600" style="width:5em" value="${esc(t?.image_duration_s || 10)}"> 秒
+      <span class="muted">播放内容里每张图片停留多久；视频按自身长度播完即切</span></div>
+    <div class="actions"><button onclick="closeModal()">取消</button>
+      <button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button></div>`);
 }
-async function createSplit() {
-  const tpl = { id: $("#f_id").value.trim(), name: $("#f_name").value.trim(), w: 1440, h: 900, background: "#000000",
-    regions: [
-      { id: "left", x: 0, y: 0, w: 720, h: 900, type: "attribute", key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || 160, color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), align: "center" },
-      { id: "right", x: 720, y: 0, w: 720, h: 900, type: "image" } ] };
-  await api("/api/v1/admin/templates", { method: "POST", ...J(tpl) });
-  toast("模板已创建"); closeModal(); refresh();
+// splitShape 判断模板是不是表单能表达的"一半属性 + 一半播放内容"。
+function splitShape(t) {
+  return t.regions.length === 2 &&
+    t.regions.filter(r => r.type === "attribute").length === 1 &&
+    t.regions.filter(r => r.type === "media").length === 1;
 }
+async function saveTemplateForm(id) {
+  const half = 720, h = 900;
+  const mediaLeft = $("#f_side").value === "left";
+  const attrRegion = { id: "attr", x: mediaLeft ? half : 0, y: 0, w: half, h, type: "attribute",
+    key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || 160,
+    color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), align: "center" };
+  const mediaRegion = { id: "media", x: mediaLeft ? 0 : half, y: 0, w: half, h, type: "media" };
+  const tpl = { name: $("#f_name").value.trim(), w: 1440, h, background: "#000000",
+    image_duration_s: parseInt($("#f_dur").value) || 10,
+    regions: mediaLeft ? [mediaRegion, attrRegion] : [attrRegion, mediaRegion] };
+  if (id) tpl.id = id;
+  await api("/api/v1/admin/templates" + (id ? "/" + id : ""), { method: id ? "PUT" : "POST", ...J(tpl) });
+  toast("模板已保存"); closeModal(); refresh();
+}
+// editTemplateJSON 高级编辑：表单表达不了的版式（多区域、局部媒体区等）在这里直接改。
 function editTemplateJSON(id) {
   const t = tplById(id);
-  const sample = t || { id: "my-template", name: "示例", w: 1440, h: 900, background: "#000000",
-    regions: [{ id: "r1", x: 0, y: 0, w: 1440, h: 900, type: "text", key: "示例文字", font_size: 96, color: "#FFFFFF", align: "center" }] };
+  const sample = t || { name: "示例", w: 1440, h: 900, background: "#000000", image_duration_s: 10,
+    regions: [
+      { id: "attr", x: 0, y: 0, w: 720, h: 900, type: "attribute", key: "room", font_size: 160, color: "#FFFFFF", bg: "#1E3A8A", align: "center" },
+      { id: "media", x: 720, y: 0, w: 720, h: 900, type: "media" }] };
   modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2><textarea id="tplJSON">${esc(JSON.stringify(sample, null, 2))}</textarea>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveTemplateJSON()">保存</button></div>`);
+    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、image（服务端合成的固定图片）、
+      media（设备播放的图片/视频，每个模板至多一个）。</p>
+    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button></div>`);
 }
-async function saveTemplateJSON() {
+async function saveTemplateJSON(id) {
   let tpl; try { tpl = JSON.parse($("#tplJSON").value); } catch (e) { toast("JSON 语法错误: " + e.message); return; }
-  await api("/api/v1/admin/templates", { method: "POST", ...J(tpl) });
+  await api("/api/v1/admin/templates" + (id ? "/" + id : ""), { method: id ? "PUT" : "POST", ...J(tpl) });
   toast("模板已保存"); closeModal(); refresh();
 }
 async function deleteTemplate(id) {
-  if (!confirm(`确认删除模板 ${id}？`)) return;
+  if (!confirm(`确认删除模板「${tplById(id)?.name || id}」？`)) return;
   await api(`/api/v1/admin/templates/${id}`, { method: "DELETE" });
   toast("已删除"); refresh();
 }

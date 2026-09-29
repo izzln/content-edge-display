@@ -32,6 +32,10 @@ const ensureInterval = 2 * time.Second
 // mpv 的 m3u 不支持逐条目选项，所以同一份清单里的图片共用一个时长；
 // 单张静态图（模板模式恒为此情形）用 inf，避免每 N 秒重新加载一次造成闪烁。
 //
+// 模板叠加（Scene.Overlay 非 nil）时的合成方式：用 --video-margin-ratio-* 把画面压进媒体区、
+// --panscan=1 让内容撑满该区（超出部分裁掉），再用 overlay-add 把叠加层贴在上面。
+// 三者都是 mpv 运行期可改的属性/命令，所以属性文字变化只需重发一张小 PNG，视频不用重编码。
+//
 // M1 简化：loadlist replace 会立即切换列表（“播完当前项再切”留待后续版本）。
 type MPV struct {
 	socketPath   string
@@ -39,11 +43,12 @@ type MPV struct {
 	extraArgs    []string
 	reqID        atomic.Int64
 
-	mu         sync.Mutex
-	desired    []Item
-	imageDur   string // mpv --image-display-duration 的值：秒数或 "inf"
-	loaded     bool   // 最近一次巡检是否确认 mpv 已加载期望列表（仅用于控制日志噪音）
-	durApplied bool   // 本轮是否已把图片时长同步给 mpv
+	mu            sync.Mutex
+	desired       Scene
+	imageDur      string // mpv --image-display-duration 的值：秒数或 "inf"
+	loaded        bool   // 最近一次巡检是否确认 mpv 已加载期望列表（仅用于控制日志噪音）
+	durApplied    bool   // 本轮是否已把图片时长同步给 mpv
+	layoutApplied bool   // 本轮是否已把媒体区留白与叠加层同步给 mpv
 
 	wake chan struct{}
 }
@@ -57,6 +62,25 @@ func NewMPV(socketPath, playlistPath string, imageDurationS int, extraArgs []str
 		wake:         make(chan struct{}, 1),
 	}
 }
+
+// overlayID 是 mpv OSD 叠加层编号；只用一层。
+const overlayID = "0"
+
+// marginRatios 把媒体区矩形换算成 mpv 的四边留白比例。
+// 没有叠加层（整屏播放）或画布尺寸非法时全为 0。
+func marginRatios(s Scene) (left, right, top, bottom float64) {
+	if s.Overlay == nil || s.CanvasW <= 0 || s.CanvasH <= 0 ||
+		s.Media.W <= 0 || s.Media.H <= 0 {
+		return 0, 0, 0, 0
+	}
+	w, h := float64(s.CanvasW), float64(s.CanvasH)
+	return float64(s.Media.X) / w,
+		(w - float64(s.Media.X+s.Media.W)) / w,
+		float64(s.Media.Y) / h,
+		(h - float64(s.Media.Y+s.Media.H)) / h
+}
+
+func ratio(v float64) string { return strconv.FormatFloat(v, 'f', 6, 64) }
 
 // imageDurationFor 由清单条目决定图片展示时长。
 // 单张图片 → inf（静止画面无需反复重载）；多条目 → 取首张图片的时长。
@@ -81,6 +105,7 @@ func (p *MPV) Start(ctx context.Context) error {
 // supervise 拉起 mpv 并在其退出后自动重启（进程级守护的最内层）。
 func (p *MPV) supervise(ctx context.Context) {
 	for ctx.Err() == nil {
+		l, r, t, b := marginRatios(p.snapshot())
 		args := []string{
 			"--idle=yes",
 			"--force-window=yes",
@@ -92,6 +117,14 @@ func (p *MPV) supervise(ctx context.Context) {
 			"--loop-playlist=inf",
 			"--image-display-duration=" + p.snapshotImageDur(),
 			"--hwdec=auto-safe",
+			// 内容一律撑满播放区（超出部分裁掉），且一律静音。
+			"--panscan=1",
+			"--no-audio",
+			// 启动即带上媒体区留白，避免新起的 mpv 先整屏闪一下再被巡检压回去。
+			"--video-margin-ratio-left=" + ratio(l),
+			"--video-margin-ratio-right=" + ratio(r),
+			"--video-margin-ratio-top=" + ratio(t),
+			"--video-margin-ratio-bottom=" + ratio(b),
 			"--input-ipc-server=" + p.socketPath,
 		}
 		if _, err := os.Stat(p.playlistPath); err == nil {
@@ -108,10 +141,11 @@ func (p *MPV) supervise(ctx context.Context) {
 			return
 		}
 		log.Printf("player(mpv): mpv exited (%v), restarting in 2s", err)
-		// mpv 重启后列表与时长状态都未知，让巡检重新确认一次。
+		// mpv 重启后列表、时长与叠加层状态都未知（overlay-add 不会跨进程存活），
+		// 让巡检重新确认一次。
 		p.setLoaded(false)
 		p.mu.Lock()
-		p.durApplied = false
+		p.durApplied, p.layoutApplied = false, false
 		p.mu.Unlock()
 		p.signal()
 		select {
@@ -140,19 +174,20 @@ func (p *MPV) ensureLoop(ctx context.Context) {
 
 func (p *MPV) ensureOnce() {
 	want := p.snapshot()
-	if len(want) == 0 {
+	if len(want.Items) == 0 {
 		return // 期望黑屏/待机：Load 已发过 stop，无需巡检
 	}
-	ok, err := p.playlistMatches(want)
+	ok, err := p.playlistMatches(want.Items)
 	if err != nil {
 		p.setLoaded(false) // mpv 未就绪或 IPC 异常，下个周期再试
 		return
 	}
-	// 时长要先于列表生效，否则切换后的第一张图会沿用旧时长。
+	// 时长与版面要先于列表生效，否则切换后的第一帧会沿用旧设置（整屏闪一下）。
 	p.applyImageDuration()
+	p.applyLayout(want)
 	if ok {
 		if !p.wasLoaded() {
-			log.Printf("player(mpv): playlist confirmed loaded (%d item(s))", len(want))
+			log.Printf("player(mpv): playlist confirmed loaded (%d item(s))", len(want.Items))
 			p.setLoaded(true)
 		}
 		return
@@ -161,7 +196,49 @@ func (p *MPV) ensureOnce() {
 		p.setLoaded(false)
 		return
 	}
-	log.Printf("player(mpv): pushed playlist to mpv (%d item(s))", len(want))
+	log.Printf("player(mpv): pushed playlist to mpv (%d item(s))", len(want.Items))
+}
+
+// applyLayout 把媒体区留白与模板叠加层同步给运行中的 mpv（每轮只做一次）。
+// 任一步失败就保持“未同步”，由下个巡检周期重试。
+func (p *MPV) applyLayout(want Scene) {
+	p.mu.Lock()
+	done := p.layoutApplied
+	p.mu.Unlock()
+	if done {
+		return
+	}
+	l, r, t, b := marginRatios(want)
+	for _, m := range []struct {
+		prop string
+		v    float64
+	}{
+		{"video-margin-ratio-left", l},
+		{"video-margin-ratio-right", r},
+		{"video-margin-ratio-top", t},
+		{"video-margin-ratio-bottom", b},
+	} {
+		if _, err := p.command("set_property", m.prop, ratio(m.v)); err != nil {
+			return
+		}
+	}
+	if o := want.Overlay; o != nil {
+		// overlay-add <id> <x> <y> <file> <offset> <fmt> <w> <h> <stride>
+		if _, err := p.command("overlay-add", overlayID, 0, 0, o.Path, 0, "bgra", o.W, o.H, o.W*4); err != nil {
+			return
+		}
+	} else if _, err := p.command("overlay-remove", overlayID); err != nil {
+		return
+	}
+	p.mu.Lock()
+	p.layoutApplied = true
+	p.mu.Unlock()
+	if want.Overlay != nil {
+		log.Printf("player(mpv): overlay applied, media area %dx%d at (%d,%d) of %dx%d",
+			want.Media.W, want.Media.H, want.Media.X, want.Media.Y, want.CanvasW, want.CanvasH)
+	} else {
+		log.Printf("player(mpv): fullscreen playback (no overlay)")
+	}
 }
 
 // applyImageDuration 把期望的图片展示时长同步给运行中的 mpv（每轮只做一次）。
@@ -206,7 +283,8 @@ func (p *MPV) playlistMatches(want []Item) (bool, error) {
 	return true, nil
 }
 
-func (p *MPV) Load(items []Item) error {
+func (p *MPV) Load(scene Scene) error {
+	items := scene.Items
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	for _, it := range items {
@@ -222,8 +300,13 @@ func (p *MPV) Load(items []Item) error {
 	}
 
 	p.mu.Lock()
-	p.desired = append([]Item(nil), items...)
+	changed := !sameLayout(p.desired, scene)
+	p.desired = scene
+	p.desired.Items = append([]Item(nil), items...)
 	p.loaded = false
+	if changed {
+		p.layoutApplied = false
+	}
 	if dur := imageDurationFor(items); dur != "" && dur != p.imageDur {
 		p.imageDur, p.durApplied = dur, false
 	}
@@ -255,10 +338,23 @@ func (p *MPV) snapshotImageDur() string {
 	return p.imageDur
 }
 
-func (p *MPV) snapshot() []Item {
+func (p *MPV) snapshot() Scene {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]Item(nil), p.desired...)
+	s := p.desired
+	s.Items = append([]Item(nil), p.desired.Items...)
+	return s
+}
+
+// sameLayout 判断两个画面的叠加层与媒体区是否完全一致（播放列表不参与比较）。
+func sameLayout(a, b Scene) bool {
+	if (a.Overlay == nil) != (b.Overlay == nil) {
+		return false
+	}
+	if a.Overlay != nil && *a.Overlay != *b.Overlay {
+		return false
+	}
+	return a.Media == b.Media && a.CanvasW == b.CanvasW && a.CanvasH == b.CanvasH
 }
 
 func (p *MPV) wasLoaded() bool {

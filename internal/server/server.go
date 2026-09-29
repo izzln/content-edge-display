@@ -41,15 +41,15 @@ const placeholderToken = "change-me"
 
 // Config 是服务端配置（JSON 文件）。
 // 设备不在这里配置：一律由设备凭 enroll_token 自注册，记录在 data_dir/state.json。
+// 图片停留时长也不在这里配置：它是版式的一部分，跟着模板走（管理后台里改）。
 type Config struct {
-	Listen         string `json:"listen"`
-	MediaRoot      string `json:"media_root"`
-	DataDir        string `json:"data_dir"`  // state.json / uploads / rendered / firmware
-	FontPath       string `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
-	AdminToken     string `json:"admin_token"`
-	EnrollToken    string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
-	Timezone       string `json:"timezone"`     // 时段计划时区，默认系统时区
-	ImageDurationS int    `json:"image_duration_s"`
+	Listen      string `json:"listen"`
+	MediaRoot   string `json:"media_root"`
+	DataDir     string `json:"data_dir"`  // state.json / uploads / rendered / firmware
+	FontPath    string `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
+	AdminToken  string `json:"admin_token"`
+	EnrollToken string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
+	Timezone    string `json:"timezone"`     // 时段计划时区，默认系统时区
 }
 
 // resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
@@ -90,9 +90,6 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.MediaRoot = resolvePath(base, cfg.MediaRoot)
 	cfg.DataDir = resolvePath(base, cfg.DataDir)
 	cfg.FontPath = resolvePath(base, cfg.FontPath)
-	if cfg.ImageDurationS <= 0 {
-		cfg.ImageDurationS = 10
-	}
 	if cfg.EnrollToken == "" {
 		return nil, errors.New("config: enroll_token 不能为空，否则没有任何设备能接入（用 make tokens 生成）")
 	}
@@ -169,7 +166,8 @@ func New(cfg *Config) (*Server, error) {
 		lastHB:   make(map[string]Heartbeat),
 		now:      time.Now,
 	}
-	for _, dir := range []string{s.uploadsDir(), s.renderedDir(), s.firmwareDir()} {
+	// 首次启动时把需要的目录都建出来（media_root 也在内：设备媒体文件放这里）。
+	for _, dir := range []string{cfg.MediaRoot, s.uploadsDir(), s.renderedDir(), s.firmwareDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
@@ -181,7 +179,24 @@ func New(cfg *Config) (*Server, error) {
 	if cfg.FontPath == "" {
 		log.Printf("warning: font_path 未配置，模板/测试卡中的中文将无法正常显示（请安装 CJK 字体并配置，如 fonts-noto-cjk）")
 	}
+	if err := s.seedDefaults(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// seedDefaults 首次启动时播种一个可用的左右分屏模板并设为全局默认；
+// 全局模板指向已被删除的模板时也在这里纠正，避免服务端启动后谁都不显示内容。
+func (s *Server) seedDefaults() error {
+	return s.store.Update(func(st *store.State) error {
+		if t, seeded := store.SeedDefaultTemplate(st); seeded {
+			log.Printf("首次启动：已创建默认模板 %s（%s）", t.ID, t.Name)
+		}
+		if store.EnsureGlobalTemplate(st) {
+			log.Printf("全局默认模板设为 %s", st.Global.TemplateID)
+		}
+		return nil
+	})
 }
 
 func (s *Server) uploadsDir() string  { return filepath.Join(s.cfg.DataDir, "uploads") }
@@ -292,15 +307,6 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 // 渲染画布尺寸（与显示屏一致）。
 const canvasW, canvasH = 1440, 900
 
-// imageDuration 返回当前生效的图片停留秒数：管理后台的设置优先，
-// 未设置时回落到 server.json 的 image_duration_s。
-func (s *Server) imageDuration() int {
-	if d := s.store.Global().ImageDurationS; d > 0 {
-		return d
-	}
-	return s.cfg.ImageDurationS
-}
-
 // resolveTemplate 决定设备当前应显示的模板及来源：
 // 设备级覆盖 > 时段计划命中 > 全局默认模板；都没有则 ok=false（目录轮播）。
 func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Template, source string, ok bool) {
@@ -325,48 +331,106 @@ func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Temp
 	return store.Template{}, "playlist", false
 }
 
+// mediaItems 构建设备媒体区的播放条目。
+// 模板没有媒体区时返回空；播放列表为空时回落到扫描设备媒体目录（便于直接往目录里放文件）。
+func (s *Server) mediaItems(deviceID string, playlist []string, tpl store.Template) ([]manifest.Item, error) {
+	if _, ok := tpl.MediaRegion(); !ok {
+		return nil, nil
+	}
+	dir := s.deviceMediaDir(deviceID)
+	names := playlist
+	if len(names) == 0 {
+		var err error
+		if names, err = manifest.ListMedia(dir); err != nil {
+			return nil, err
+		}
+	}
+	return manifest.BuildItems(dir, deviceID, names, tpl.ImageDurationS, s.hashes)
+}
+
 // buildManifest 生成设备清单：测试屏 > 模板（覆盖/时段/全局）> 目录轮播，并附带待执行指令。
+//
+// 模板有媒体区且媒体区有内容时下发 layout：清单条目就是媒体文件本身（视频不转码），
+// 模板的静态部分作为“媒体区挖空”的叠加图随 layout 下发，由设备端贴在画面上。
+// 模板没有媒体区、或媒体区还没放内容时，退回到把整块模板渲染成一张整屏图的成熟路径，
+// 这样“刚建好还没传内容”的设备显示的是版式而不是黑屏。
 func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
 	now := s.now()
-	var items []manifest.Item
+	var (
+		items  []manifest.Item
+		layout *manifest.Layout
+		keep   []string // 本份清单用到的渲染文件名
+	)
 
 	if until := s.store.TestUntil(dev.ID); now.Before(until) {
 		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, dev.Name, s.store.Attrs(dev.ID), until)
 		if err != nil {
 			return nil, fmt.Errorf("render test card: %w", err)
 		}
-		if items, err = s.renderedItems(dev.ID, "test", img); err != nil {
+		it, err := s.renderedItem(dev.ID, "test", img)
+		if err != nil {
 			return nil, err
 		}
+		items, keep = []manifest.Item{it}, []string{it.Name}
 	} else if tpl, _, ok := s.resolveTemplate(dev.ID, now); ok {
-		img, err := s.renderer.Render(tpl, s.store.Attrs(dev.ID), s.store.Display(dev.ID).Bindings)
+		disp := s.store.Display(dev.ID)
+		media, err := s.mediaItems(dev.ID, disp.Playlist, tpl)
+		if err != nil {
+			return nil, err
+		}
+		rendered, err := s.renderer.Render(tpl, s.store.Attrs(dev.ID), disp.Bindings, disp.Mirror, len(media) > 0)
 		if err != nil {
 			return nil, fmt.Errorf("render template %s: %w", tpl.ID, err)
 		}
-		if items, err = s.renderedItems(dev.ID, "tpl", img); err != nil {
+		kind := "tpl" // 整屏静态图
+		if len(media) > 0 {
+			kind = "ovl" // 叠加图
+		}
+		png, err := s.renderedItem(dev.ID, kind, rendered.Image)
+		if err != nil {
 			return nil, err
 		}
+		keep = []string{png.Name}
+		if len(media) > 0 {
+			r := rendered.MediaRegion
+			items, layout = media, &manifest.Layout{
+				CanvasW: tpl.W, CanvasH: tpl.H,
+				Media:   manifest.Rect{X: r.Min.X, Y: r.Min.Y, W: r.Dx(), H: r.Dy()},
+				Overlay: png,
+			}
+		} else {
+			items = []manifest.Item{png}
+		}
 	} else {
-		m, err := manifest.BuildFromDir(s.deviceMediaDir(dev.ID), dev.ID, s.imageDuration(), s.hashes)
+		m, err := manifest.BuildFromDir(s.deviceMediaDir(dev.ID), dev.ID, store.DefaultImageDurationS, s.hashes)
 		if err != nil {
 			return nil, err
 		}
 		items = m.Items
 	}
+	s.pruneRendered(dev.ID, keep)
 
 	cmds := []manifest.Command{}
 	if cmd, ok := s.updateCommand(dev.ID, now); ok {
 		cmds = append(cmds, cmd)
 	}
-	return &manifest.Manifest{Version: manifest.VersionWith(items, cmds), Items: items, Commands: cmds}, nil
+	return &manifest.Manifest{
+		Version:  manifest.VersionWith(items, cmds, layout),
+		Items:    items,
+		Layout:   layout,
+		Commands: cmds,
+	}, nil
 }
 
-// renderedItems 把渲染结果落盘为 PNG 并包装成单条目列表。
+// renderedItem 把渲染结果落盘为 PNG 并包装成一个清单条目。
 // 文件名内嵌内容哈希：内容不变则复用既有文件（版本稳定、设备端不重下）。
-func (s *Server) renderedItems(deviceID, kind string, img image.Image) ([]manifest.Item, error) {
+//
+// Duration 恒为 0：渲染产物要么是整屏静态图（设备端对单图用 inf，不需要时长），
+// 要么是叠加图（不进播放列表）。媒体区里图片的停留时长来自模板，写在媒体条目上。
+func (s *Server) renderedItem(deviceID, kind string, img image.Image) (manifest.Item, error) {
 	var buf bytes.Buffer
 	if err := render.EncodePNG(&buf, img); err != nil {
-		return nil, err
+		return manifest.Item{}, err
 	}
 	sum := sha256.Sum256(buf.Bytes())
 	sumHex := hex.EncodeToString(sum[:])
@@ -374,37 +438,49 @@ func (s *Server) renderedItems(deviceID, kind string, img image.Image) ([]manife
 
 	dir := filepath.Join(s.renderedDir(), deviceID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return manifest.Item{}, err
 	}
 	path := filepath.Join(dir, name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		tmp := path + ".tmp"
 		if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-			return nil, err
+			return manifest.Item{}, err
 		}
 		if err := os.Rename(tmp, path); err != nil {
-			return nil, err
-		}
-		// 清理该设备同类前缀的旧渲染文件。
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				if n := e.Name(); n != name && strings.HasPrefix(n, kind+"_") {
-					os.Remove(filepath.Join(dir, n))
-				}
-			}
+			return manifest.Item{}, err
 		}
 	}
+	return manifest.Item{
+		ID:     sumHex[:12],
+		Type:   "image",
+		Name:   name,
+		URL:    "/render/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
+		SHA256: sumHex,
+		Size:   int64(buf.Len()),
+		Order:  1,
+	}, nil
+}
 
-	return []manifest.Item{{
-		ID:       sumHex[:12],
-		Type:     "image",
-		Name:     name,
-		URL:      "/render/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
-		SHA256:   sumHex,
-		Size:     int64(buf.Len()),
-		Duration: s.imageDuration(),
-		Order:    1,
-	}}, nil
+// pruneRendered 删除设备渲染目录里本份清单不再引用的 PNG
+// （模板改了、属性改了、或在“整屏图”与“叠加图”之间切换后留下的旧文件）。
+func (s *Server) pruneRendered(deviceID string, keep []string) {
+	dir := filepath.Join(s.renderedDir(), deviceID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	alive := make(map[string]bool, len(keep))
+	for _, n := range keep {
+		alive[n] = true
+	}
+	for _, e := range entries {
+		n := e.Name()
+		// .tmp 是别的请求正在写入的文件，不碰。
+		if alive[n] || strings.HasSuffix(n, ".tmp") {
+			continue
+		}
+		os.Remove(filepath.Join(dir, n))
+	}
 }
 
 func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {

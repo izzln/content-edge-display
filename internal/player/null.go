@@ -9,26 +9,38 @@ import (
 // Null 是不驱动真实显示的播放器实现，用于集成测试与无显示环境验证。
 type Null struct {
 	mu    sync.Mutex
-	items []Item
+	scene Scene
 }
 
 func NewNull() *Null { return &Null{} }
 
 func (p *Null) Start(ctx context.Context) error { return nil }
 
-func (p *Null) Load(items []Item) error {
+func (p *Null) Load(scene Scene) error {
 	p.mu.Lock()
-	p.items = items
+	p.scene = scene
 	p.mu.Unlock()
-	log.Printf("player(null): loaded %d item(s)", len(items))
+	if scene.Overlay != nil {
+		log.Printf("player(null): loaded %d item(s) + overlay in %dx%d at (%d,%d)",
+			len(scene.Items), scene.Media.W, scene.Media.H, scene.Media.X, scene.Media.Y)
+	} else {
+		log.Printf("player(null): loaded %d item(s) fullscreen", len(scene.Items))
+	}
 	return nil
+}
+
+// Scene 返回最近一次加载的画面（测试用）。
+func (p *Null) Scene() Scene {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.scene
 }
 
 func (p *Null) NowPlaying() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.items) == 0 {
+	if len(p.scene.Items) == 0 {
 		return ""
 	}
-	return p.items[0].Path
+	return p.scene.Items[0].Path
 }

@@ -35,11 +35,41 @@ type Command struct {
 	Size    int64  `json:"size,omitempty"`
 }
 
+// Rect 是画布上的一个矩形（像素）。
+type Rect struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
+}
+
+// Layout 描述“模板承载媒体”的合成方式：Overlay 是一张整屏 PNG，媒体区被挖成全透明；
+// 设备端把它贴在画面之上，并把播放内容限制在 Media 矩形里、按 cover 撑满。
+// 这样属性/文字变化只需重发这张小 PNG，视频完全不用重新编码。
+//
+// 为 nil 表示整屏播放（没有模板叠加），即老版本设备端唯一认识的形态。
+type Layout struct {
+	CanvasW int  `json:"canvas_w"`
+	CanvasH int  `json:"canvas_h"`
+	Media   Rect `json:"media"`
+	Overlay Item `json:"overlay"`
+}
+
 // Manifest 是设备的播放清单。
 type Manifest struct {
 	Version  string    `json:"version"`
 	Items    []Item    `json:"items"`
+	Layout   *Layout   `json:"layout,omitempty"`
 	Commands []Command `json:"commands"`
+}
+
+// Downloads 返回本份清单需要设备端下载校验的全部文件（播放条目 + 叠加图）。
+func (m *Manifest) Downloads() []Item {
+	out := append([]Item(nil), m.Items...)
+	if m.Layout != nil {
+		out = append(out, m.Layout.Overlay)
+	}
+	return out
 }
 
 var imageExts = map[string]bool{
@@ -106,14 +136,15 @@ func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
 // VersionOf 由条目列表 (name, sha256) 计算清单版本号：内容不变则版本稳定，
 // 与清单的生成方式（目录扫描/模板渲染/测试卡）无关。
 func VersionOf(items []Item) string {
-	return VersionWith(items, nil)
+	return VersionWith(items, nil, nil)
 }
 
-// VersionWith 在条目之外把指令一并纳入版本号，保证指令出现/消失都会触发设备刷新。
+// VersionWith 在条目之外把指令与叠加布局一并纳入版本号，保证它们出现/消失/变化都会触发设备刷新。
 //
-// 参与计算的不只是文件本身，还有影响播放行为的字段（类型、停留时长）：
-// 只改停留时长而文件不变时版本号也必须变，否则设备一直收到 304，新设置永远到不了现场。
-func VersionWith(items []Item, cmds []Command) string {
+// 参与计算的不只是文件本身，还有影响播放行为的字段（类型、停留时长、媒体区位置）：
+// 只改停留时长或只改模板属性文字而媒体文件不变时版本号也必须变，
+// 否则设备一直收到 304，新设置永远到不了现场。
+func VersionWith(items []Item, cmds []Command, layout *Layout) string {
 	h := sha256.New()
 	for _, it := range items {
 		fmt.Fprintf(h, "%s|%s|%s|%d\n", it.Name, it.SHA256, it.Type, it.Duration)
@@ -121,27 +152,26 @@ func VersionWith(items []Item, cmds []Command) string {
 	for _, c := range cmds {
 		fmt.Fprintf(h, "cmd|%s|%s|%s\n", c.Type, c.Version, c.SHA256)
 	}
+	if layout != nil {
+		fmt.Fprintf(h, "layout|%d|%d|%d|%d|%d|%d|%s\n",
+			layout.CanvasW, layout.CanvasH,
+			layout.Media.X, layout.Media.Y, layout.Media.W, layout.Media.H,
+			layout.Overlay.SHA256)
+	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-// BuildFromDir 扫描 dir 下的媒体文件（按文件名排序）构建清单。
-// 目录不存在视为空清单。隐藏文件、下载临时文件与不支持的类型会被跳过。
-func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*Manifest, error) {
+// ListMedia 返回 dir 下受支持的媒体文件名，按文件名排序。
+// 目录不存在视为空目录。隐藏文件、下载临时文件与不支持的类型会被跳过。
+func ListMedia(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			entries = nil
-		} else {
-			return nil, err
+			return []string{}, nil
 		}
+		return nil, err
 	}
-
-	type fileInfo struct {
-		name  string
-		size  int64
-		mtime int64
-	}
-	var files []fileInfo
+	out := []string{}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -153,34 +183,57 @@ func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*M
 		if TypeOf(name) == "" {
 			continue
 		}
-		info, err := e.Info()
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// BuildItems 按给定顺序为 names 构建播放条目。已不存在的文件会被跳过
+// （管理后台的播放列表可能残留刚被删掉的文件名，不该因此让整份清单构建失败）。
+func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *HashCache) ([]Item, error) {
+	items := []Item{}
+	for _, name := range names {
+		if name != filepath.Base(name) || strings.HasPrefix(name, ".") || TypeOf(name) == "" {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return nil, err
 		}
-		files = append(files, fileInfo{name: name, size: info.Size(), mtime: info.ModTime().Unix()})
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
-
-	m := &Manifest{Items: []Item{}, Commands: []Command{}}
-	for i, f := range files {
-		sum, err := cache.FileSHA256(filepath.Join(dir, f.name), f.size, f.mtime)
+		sum, err := cache.FileSHA256(filepath.Join(dir, name), info.Size(), info.ModTime().Unix())
 		if err != nil {
 			return nil, err
 		}
 		item := Item{
 			ID:     sum[:12],
-			Type:   TypeOf(f.name),
-			Name:   f.name,
-			URL:    "/media/" + url.PathEscape(deviceID) + "/" + url.PathEscape(f.name),
+			Type:   TypeOf(name),
+			Name:   name,
+			URL:    "/media/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
 			SHA256: sum,
-			Size:   f.size,
-			Order:  i + 1,
+			Size:   info.Size(),
+			Order:  len(items) + 1,
 		}
 		if item.Type == "image" {
 			item.Duration = imageDuration
 		}
-		m.Items = append(m.Items, item)
+		items = append(items, item)
 	}
-	m.Version = VersionOf(m.Items)
-	return m, nil
+	return items, nil
+}
+
+// BuildFromDir 扫描 dir 下的媒体文件（按文件名排序）构建清单。
+func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*Manifest, error) {
+	names, err := ListMedia(dir)
+	if err != nil {
+		return nil, err
+	}
+	items, err := BuildItems(dir, deviceID, names, imageDuration, cache)
+	if err != nil {
+		return nil, err
+	}
+	return &Manifest{Version: VersionOf(items), Items: items, Commands: []Command{}}, nil
 }

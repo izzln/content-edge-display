@@ -19,7 +19,9 @@ type fakeMPV struct {
 	mu        sync.Mutex
 	playlist  []string
 	loadlists int
-	imageDur  string // 最近一次 set_property image-display-duration 的值
+	imageDur  string            // 最近一次 set_property image-display-duration 的值
+	props     map[string]string // 最近一次 set_property 的其它属性值
+	overlays  []string          // 收到的 overlay-add / overlay-remove 命令（原样拼接）
 
 	ln net.Listener
 }
@@ -30,7 +32,7 @@ func startFakeMPV(t *testing.T, socketPath, playlistPath string) *fakeMPV {
 	if err != nil {
 		t.Fatalf("fake mpv listen: %v", err)
 	}
-	f := &fakeMPV{ln: ln}
+	f := &fakeMPV{ln: ln, props: map[string]string{}}
 	t.Cleanup(func() { ln.Close() })
 
 	go func() {
@@ -84,11 +86,22 @@ func (f *fakeMPV) serve(conn net.Conn, playlistPath string) {
 			f.loadlists++
 			f.mu.Unlock()
 		case "set_property":
-			if prop, _ := req.Command[1].(string); prop == "image-display-duration" {
-				f.mu.Lock()
+			prop, _ := req.Command[1].(string)
+			f.mu.Lock()
+			if prop == "image-display-duration" {
 				f.imageDur = fmt.Sprint(req.Command[2])
-				f.mu.Unlock()
+			} else {
+				f.props[prop] = fmt.Sprint(req.Command[2])
 			}
+			f.mu.Unlock()
+		case "overlay-add", "overlay-remove":
+			parts := []string{name}
+			for _, a := range req.Command[1:] {
+				parts = append(parts, fmt.Sprint(a))
+			}
+			f.mu.Lock()
+			f.overlays = append(f.overlays, strings.Join(parts, " "))
+			f.mu.Unlock()
 		case "stop":
 			f.mu.Lock()
 			f.playlist = nil
@@ -135,7 +148,7 @@ func TestEnsureLoadsPlaylistAfterMpvBecomesReady(t *testing.T) {
 
 	items := []Item{{Path: "/media/a.png", Type: "image", Duration: 10}, {Path: "/media/b.mp4", Type: "video"}}
 	// mpv 尚未启动：Load 不应报错，且应把 m3u 落盘
-	if err := p.Load(items); err != nil {
+	if err := p.Load(Scene{Items: items}); err != nil {
 		t.Fatalf("Load before mpv is up must not fail: %v", err)
 	}
 	data, err := os.ReadFile(playlistPath)
@@ -157,7 +170,7 @@ func TestEnsureDoesNotReloadWhenAlreadyCorrect(t *testing.T) {
 	fake := startFakeMPV(t, sock, playlistPath)
 
 	items := []Item{{Path: "/media/a.png", Type: "image"}}
-	if err := p.Load(items); err != nil {
+	if err := p.Load(Scene{Items: items}); err != nil {
 		t.Fatal(err)
 	}
 	p.ensureOnce()
@@ -177,7 +190,7 @@ func TestEnsureRecoversAfterMpvRestart(t *testing.T) {
 	p, sock, playlistPath := newTestMPV(t)
 	fake := startFakeMPV(t, sock, playlistPath)
 
-	if err := p.Load([]Item{{Path: "/media/a.png", Type: "image"}}); err != nil {
+	if err := p.Load(Scene{Items: []Item{{Path: "/media/a.png", Type: "image"}}}); err != nil {
 		t.Fatal(err)
 	}
 	p.ensureOnce()
@@ -200,11 +213,11 @@ func TestLoadEmptyStopsPlayback(t *testing.T) {
 	p, sock, playlistPath := newTestMPV(t)
 	fake := startFakeMPV(t, sock, playlistPath)
 
-	if err := p.Load([]Item{{Path: "/media/a.png", Type: "image"}}); err != nil {
+	if err := p.Load(Scene{Items: []Item{{Path: "/media/a.png", Type: "image"}}}); err != nil {
 		t.Fatal(err)
 	}
 	p.ensureOnce()
-	if err := p.Load(nil); err != nil {
+	if err := p.Load(Scene{}); err != nil {
 		t.Fatal(err)
 	}
 	if pl, _ := fake.state(); len(pl) != 0 {
@@ -246,7 +259,7 @@ func TestImageDurationComesFromManifest(t *testing.T) {
 			p, sock, playlistPath := newTestMPV(t)
 			p.imageDur = "30" // 模拟 agent.json 里的兜底值
 			fake := startFakeMPV(t, sock, playlistPath)
-			if err := p.Load(c.items); err != nil {
+			if err := p.Load(Scene{Items: c.items}); err != nil {
 				t.Fatal(err)
 			}
 			p.ensureOnce()
@@ -265,7 +278,7 @@ func TestImageDurationComesFromManifest(t *testing.T) {
 func TestImageDurationAppliedOnce(t *testing.T) {
 	p, sock, playlistPath := newTestMPV(t)
 	fake := startFakeMPV(t, sock, playlistPath)
-	if err := p.Load([]Item{{Path: "/m/a.png", Type: "image", Duration: 5}, {Path: "/m/b.mp4", Type: "video"}}); err != nil {
+	if err := p.Load(Scene{Items: []Item{{Path: "/m/a.png", Type: "image", Duration: 5}, {Path: "/m/b.mp4", Type: "video"}}}); err != nil {
 		t.Fatal(err)
 	}
 	p.ensureOnce()
@@ -280,5 +293,143 @@ func TestImageDurationAppliedOnce(t *testing.T) {
 	}
 	if fake.imageDuration() != "（未再下发）" {
 		t.Fatalf("时长未变时不应重复下发，实际又收到 %q", fake.imageDuration())
+	}
+}
+
+func (f *fakeMPV) prop(name string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.props[name]
+}
+
+func (f *fakeMPV) overlayCmds() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.overlays...)
+}
+
+func TestMarginRatios(t *testing.T) {
+	ovl := &Overlay{Path: "/c/o.bgra", W: 1440, H: 900}
+	cases := []struct {
+		name        string
+		scene       Scene
+		l, r, tp, b float64
+	}{
+		{"right-half", Scene{Overlay: ovl, Media: Rect{720, 0, 720, 900}, CanvasW: 1440, CanvasH: 900}, 0.5, 0, 0, 0},
+		{"left-half", Scene{Overlay: ovl, Media: Rect{0, 0, 720, 900}, CanvasW: 1440, CanvasH: 900}, 0, 0.5, 0, 0},
+		{"inset", Scene{Overlay: ovl, Media: Rect{360, 225, 720, 450}, CanvasW: 1440, CanvasH: 900}, 0.25, 0.25, 0.25, 0.25},
+		{"fullscreen", Scene{Media: Rect{0, 0, 720, 900}, CanvasW: 1440, CanvasH: 900}, 0, 0, 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			l, r, tp, b := marginRatios(c.scene)
+			if l != c.l || r != c.r || tp != c.tp || b != c.b {
+				t.Fatalf("留白比例 = %v/%v/%v/%v，期望 %v/%v/%v/%v", l, r, tp, b, c.l, c.r, c.tp, c.b)
+			}
+		})
+	}
+}
+
+// 模板叠加：媒体区留白、叠加层与 cover 都要真正下发给 mpv。
+func TestOverlayAppliedAndReappliedAfterRestart(t *testing.T) {
+	p, sock, playlistPath := newTestMPV(t)
+	fake := startFakeMPV(t, sock, playlistPath)
+
+	scene := Scene{
+		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
+		Overlay: &Overlay{Path: "/c/ovl.bgra", W: 1440, H: 900},
+		Media:   Rect{720, 0, 720, 900},
+		CanvasW: 1440, CanvasH: 900,
+	}
+	if err := p.Load(scene); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+
+	if got := fake.prop("video-margin-ratio-left"); got != "0.500000" {
+		t.Fatalf("左留白 = %q，期望 0.500000", got)
+	}
+	if got := fake.prop("video-margin-ratio-right"); got != "0.000000" {
+		t.Fatalf("右留白 = %q，期望 0.000000", got)
+	}
+	want := "overlay-add 0 0 0 /c/ovl.bgra 0 bgra 1440 900 5760"
+	if cmds := fake.overlayCmds(); len(cmds) != 1 || cmds[0] != want {
+		t.Fatalf("叠加层命令 = %v，期望 [%s]", cmds, want)
+	}
+
+	// 同一画面重复巡检不应反复下发
+	for i := 0; i < 3; i++ {
+		p.ensureOnce()
+	}
+	if cmds := fake.overlayCmds(); len(cmds) != 1 {
+		t.Fatalf("版面未变时不应重复下发，实际 %d 次", len(cmds))
+	}
+
+	// mpv 重启会丢掉叠加层（OSD 不跨进程存活），巡检必须重贴
+	p.setLoaded(false)
+	p.mu.Lock()
+	p.layoutApplied = false
+	p.mu.Unlock()
+	p.ensureOnce()
+	if cmds := fake.overlayCmds(); len(cmds) != 2 || cmds[1] != want {
+		t.Fatalf("mpv 重启后应重贴叠加层，实际 %v", cmds)
+	}
+}
+
+// 从“模板叠加”切回“整屏播放”必须撤掉叠加层并清零留白，否则画面永远停在右半边。
+func TestSwitchToFullscreenRemovesOverlay(t *testing.T) {
+	p, sock, playlistPath := newTestMPV(t)
+	fake := startFakeMPV(t, sock, playlistPath)
+
+	if err := p.Load(Scene{
+		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
+		Overlay: &Overlay{Path: "/c/ovl.bgra", W: 1440, H: 900},
+		Media:   Rect{720, 0, 720, 900},
+		CanvasW: 1440, CanvasH: 900,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+
+	if err := p.Load(Scene{Items: []Item{{Path: "/m/tpl.png", Type: "image", Duration: 10}}}); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+	if got := fake.prop("video-margin-ratio-left"); got != "0.000000" {
+		t.Fatalf("切回整屏后左留白 = %q，期望 0.000000", got)
+	}
+	cmds := fake.overlayCmds()
+	if len(cmds) != 2 || cmds[1] != "overlay-remove 0" {
+		t.Fatalf("切回整屏应撤掉叠加层，实际 %v", cmds)
+	}
+}
+
+// 只换播放列表、版面不变时，叠加层不该被重贴（重贴会在屏幕上闪一下）。
+func TestPlaylistChangeKeepsOverlay(t *testing.T) {
+	p, sock, playlistPath := newTestMPV(t)
+	fake := startFakeMPV(t, sock, playlistPath)
+
+	ovl := &Overlay{Path: "/c/ovl.bgra", W: 1440, H: 900}
+	base := Scene{Overlay: ovl, Media: Rect{720, 0, 720, 900}, CanvasW: 1440, CanvasH: 900}
+
+	first := base
+	first.Items = []Item{{Path: "/m/a.mp4", Type: "video"}}
+	if err := p.Load(first); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+
+	second := base
+	second.Items = []Item{{Path: "/m/a.mp4", Type: "video"}, {Path: "/m/b.mp4", Type: "video"}}
+	if err := p.Load(second); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+	p.ensureOnce()
+	if cmds := fake.overlayCmds(); len(cmds) != 1 {
+		t.Fatalf("播放列表变化不应重贴叠加层，实际 %d 次：%v", len(cmds), cmds)
+	}
+	if pl, _ := fake.state(); len(pl) != 2 {
+		t.Fatalf("新播放列表未生效：%v", pl)
 	}
 }
