@@ -1,4 +1,4 @@
-// Package manifest 定义播放清单的数据结构，并支持从设备媒体目录构建清单。
+// Package manifest 定义设备播放清单的数据结构，并负责从媒体目录构建播放条目。
 package manifest
 
 import (
@@ -16,14 +16,12 @@ import (
 
 // Item 是清单中的一个播放条目。
 type Item struct {
-	ID       string `json:"id"`
 	Type     string `json:"type"` // "image" | "video"
 	Name     string `json:"name"`
 	URL      string `json:"url"`
 	SHA256   string `json:"sha256"`
 	Size     int64  `json:"size"`
 	Duration int    `json:"duration"` // 秒；仅图片有效，视频为 0 表示播放至结束
-	Order    int    `json:"order"`
 }
 
 // Command 是随清单下发的运维指令。
@@ -77,7 +75,7 @@ var imageExts = map[string]bool{
 }
 
 var videoExts = map[string]bool{
-	".mp4": true, ".mkv": true, ".mov": true, ".avi": true, ".ts": true, ".webm": true,
+	".mp4": true, ".mkv": true, ".mov": true, ".avi": true, ".ts": true, ".webm": true, ".m4v": true,
 }
 
 // TypeOf 根据扩展名返回条目类型，不支持的类型返回空串。
@@ -133,18 +131,13 @@ func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
 	return sum, nil
 }
 
-// VersionOf 由条目列表 (name, sha256) 计算清单版本号：内容不变则版本稳定，
-// 与清单的生成方式（目录扫描/模板渲染/测试卡）无关。
-func VersionOf(items []Item) string {
-	return VersionWith(items, nil, nil)
-}
-
-// VersionWith 在条目之外把指令与叠加布局一并纳入版本号，保证它们出现/消失/变化都会触发设备刷新。
+// Version 由条目、指令与叠加布局计算清单版本号：内容不变则版本稳定（设备收到 304），
+// 任何一项出现/消失/变化都会让版本号变，触发设备刷新。
 //
 // 参与计算的不只是文件本身，还有影响播放行为的字段（类型、停留时长、媒体区位置）：
 // 只改停留时长或只改模板属性文字而媒体文件不变时版本号也必须变，
 // 否则设备一直收到 304，新设置永远到不了现场。
-func VersionWith(items []Item, cmds []Command, layout *Layout) string {
+func Version(items []Item, cmds []Command, layout *Layout) string {
 	h := sha256.New()
 	for _, it := range items {
 		fmt.Fprintf(h, "%s|%s|%s|%d\n", it.Name, it.SHA256, it.Type, it.Duration)
@@ -209,13 +202,11 @@ func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *
 			return nil, err
 		}
 		item := Item{
-			ID:     sum[:12],
 			Type:   TypeOf(name),
 			Name:   name,
 			URL:    "/media/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
 			SHA256: sum,
 			Size:   info.Size(),
-			Order:  len(items) + 1,
 		}
 		if item.Type == "image" {
 			item.Duration = imageDuration
@@ -223,17 +214,4 @@ func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *
 		items = append(items, item)
 	}
 	return items, nil
-}
-
-// BuildFromDir 扫描 dir 下的媒体文件（按文件名排序）构建清单。
-func BuildFromDir(dir, deviceID string, imageDuration int, cache *HashCache) (*Manifest, error) {
-	names, err := ListMedia(dir)
-	if err != nil {
-		return nil, err
-	}
-	items, err := BuildItems(dir, deviceID, names, imageDuration, cache)
-	if err != nil {
-		return nil, err
-	}
-	return &Manifest{Version: VersionOf(items), Items: items, Commands: []Command{}}, nil
 }

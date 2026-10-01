@@ -263,14 +263,14 @@ func TestImageDurationComesFromManifest(t *testing.T) {
 		{"single-image", []Item{{Path: "/m/a.png", Type: "image", Duration: 10}}, "inf",
 			"单张静态图用 inf，避免每 N 秒重载一次造成闪烁"},
 		{"image-and-video", []Item{{Path: "/m/a.png", Type: "image", Duration: 7}, {Path: "/m/b.mp4", Type: "video"}}, "7",
-			"多条目时取清单里的时长，而不是构造时传入的配置值 30"},
+			"多条目时取本份清单里的时长"},
 		{"video-only", []Item{{Path: "/m/a.mp4", Type: "video"}, {Path: "/m/b.mp4", Type: "video"}}, "30",
-			"纯视频列表里没有图片时长，保持兜底值"},
+			"纯视频列表里没有图片时长，保持现值"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			p, sock, playlistPath := newTestMPV(t)
-			p.imageDur = "30" // 模拟 agent.json 里的兜底值
+			p.imageDur = "30" // 模拟上一份清单留下的时长
 			fake := startFakeMPV(t, sock, playlistPath)
 			if err := p.Load(Scene{Items: c.items}); err != nil {
 				t.Fatal(err)

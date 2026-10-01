@@ -37,15 +37,15 @@ func newTestServer(t *testing.T) (*Server, string) {
 	// 默认按"没装 ffmpeg"跑，结果不依赖测试机环境；转码相关测试自己注入转码器。
 	s.encoder = nil
 	// 设备只有自注册这一条路径，测试里直接写进 store，省去逐个走注册接口。
-	addTestDevice(t, s, testDeviceID, testSecret, "客户A")
-	addTestDevice(t, s, "dev-002", "other-secret", "客户B")
+	addTestDevice(t, s, testDeviceID, testSecret)
+	addTestDevice(t, s, "dev-002", "other-secret")
 	return s, mediaRoot
 }
 
-func addTestDevice(t *testing.T, s *Server, id, secret, name string) {
+func addTestDevice(t *testing.T, s *Server, id, secret string) {
 	t.Helper()
 	err := s.store.Update(func(st *store.State) error {
-		st.Devices[id] = store.Device{ID: id, Secret: secret, Name: name, RegisteredAt: s.now()}
+		st.Devices[id] = store.Device{ID: id, Secret: secret, RegisteredAt: s.now()}
 		return nil
 	})
 	if err != nil {

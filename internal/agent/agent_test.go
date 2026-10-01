@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -19,9 +18,7 @@ import (
 
 const (
 	testDeviceID = "dev-001"
-	// 注册接口要求密钥不短于 32 字节（真实设备用 32 字节随机数的 hex）
-	testSecret = "0123456789abcdef0123456789abcdef"
-	testEnroll = "enroll-me"
+	testEnroll   = "enroll-me"
 )
 
 // rangeRecorder 记录媒体请求携带的 Range 头，用于断言续传确实发生。
@@ -53,18 +50,17 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(srv.Close)
 	rr := &rangeRecorder{Handler: srv.Handler()}
 	ts := httptest.NewServer(rr)
 	t.Cleanup(ts.Close)
-	// 设备只有自注册这一条路径，先把测试设备注册进去
-	registerTestDevice(t, ts.URL, testDeviceID, testSecret)
 
 	cfg := &Config{
-		ServerURL: ts.URL,
-		DeviceID:  testDeviceID,
-		Secret:    testSecret,
-		CacheDir:  t.TempDir(),
-		Player:    "null",
+		ServerURL:   ts.URL,
+		DeviceID:    testDeviceID,
+		EnrollToken: testEnroll,
+		CacheDir:    t.TempDir(),
+		Player:      "null",
 	}
 	if err := cfg.fillDefaults(); err != nil {
 		t.Fatal(err)
@@ -74,6 +70,13 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 	if err := os.MkdirAll(a.mediaDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// 设备只有自注册这一条路径：走真实的注册接口
+	if err := a.ResolveIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	devDir := filepath.Join(mediaRoot, testDeviceID)
 	if err := os.MkdirAll(devDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -81,20 +84,14 @@ func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecor
 	return a, p, srv, rr, devDir
 }
 
-// registerTestDevice 走真实的注册接口登记一台设备。
-func registerTestDevice(t *testing.T, baseURL, id, secret string) {
+// mediaItem 为设备媒体目录里的一个文件构建清单条目。
+func mediaItem(t *testing.T, devDir, name string) manifest.Item {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{
-		"device_id": id, "secret": secret, "enroll_token": testEnroll,
-	})
-	resp, err := http.Post(baseURL+"/api/v1/device/register", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
+	items, err := manifest.BuildItems(devDir, testDeviceID, []string{name}, 10, manifest.NewHashCache())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("build item %s: %v %+v", name, err, items)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		t.Fatalf("注册测试设备失败: %s", resp.Status)
-	}
+	return items[0]
 }
 
 func TestEndToEnd(t *testing.T) {
@@ -190,11 +187,7 @@ func TestDownloadResume(t *testing.T) {
 	content := strings.Repeat("0123456789", 1000) // 10KB
 	os.WriteFile(filepath.Join(devDir, "big.mp4"), []byte(content), 0o644)
 
-	m, err := manifest.BuildFromDir(devDir, testDeviceID, 10, manifest.NewHashCache())
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := m.Items[0]
+	item := mediaItem(t, devDir, "big.mp4")
 
 	// 预置半截 .part，模拟上次下载中断
 	dst := a.localPath(item)
@@ -223,11 +216,7 @@ func TestDownloadRejectsBadChecksum(t *testing.T) {
 	ctx := context.Background()
 
 	os.WriteFile(filepath.Join(devDir, "a.jpg"), []byte("real-content"), 0o644)
-	m, err := manifest.BuildFromDir(devDir, testDeviceID, 10, manifest.NewHashCache())
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := m.Items[0]
+	item := mediaItem(t, devDir, "a.jpg")
 	item.SHA256 = strings.Repeat("f", 64) // 篡改期望校验和
 
 	dst := filepath.Join(a.mediaDir(), "ffffffffffff_a.jpg")

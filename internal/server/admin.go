@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -29,7 +28,6 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/admin/info", s.adminRead(s.handleInfo))
 	mux.HandleFunc("GET /api/v1/admin/devices", s.adminRead(s.handleAdminDevices))
 	mux.HandleFunc("DELETE /api/v1/admin/devices/{id}", s.adminWrite(s.handleDeleteDevice))
-	mux.HandleFunc("GET /api/v1/admin/devices/{id}/attributes", s.adminRead(s.handleGetAttrs))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/attributes", s.adminWrite(s.handlePutAttrs))
 	mux.HandleFunc("POST /api/v1/admin/devices/{id}/test", s.adminWrite(s.handleTest))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/display", s.adminWrite(s.handlePutDisplay))
@@ -46,15 +44,13 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/admin/global", s.adminWrite(s.handlePutGlobal))
 	mux.HandleFunc("GET /api/v1/admin/schedules", s.adminRead(s.handleGetSchedules))
 	mux.HandleFunc("PUT /api/v1/admin/schedules", s.adminWrite(s.handlePutSchedules))
-	mux.HandleFunc("GET /api/v1/admin/uploads", s.adminRead(s.handleListUploads))
-	mux.HandleFunc("POST /api/v1/admin/uploads", s.adminWrite(s.handleUpload))
 	mux.HandleFunc("GET /api/v1/admin/firmware", s.adminRead(s.handleListFirmware))
 	mux.HandleFunc("POST /api/v1/admin/firmware", s.adminWrite(s.handleUploadFirmware))
 	mux.HandleFunc("DELETE /api/v1/admin/firmware/{version}", s.adminWrite(s.handleDeleteFirmware))
 	mux.HandleFunc("PUT /api/v1/admin/rollout", s.adminWrite(s.handleRollout))
 }
 
-// handleInfo 返回服务端能力，后台据此提示（例如没装 ffmpeg 时视频不会转码）。
+// handleInfo 返回服务端能力，后台据此提示（例如没装 ffmpeg 时不能上传视频）。
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	spec := transcode.DefaultSpec()
 	info := map[string]any{
@@ -114,8 +110,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-func (s *Server) pathDevice(w http.ResponseWriter, r *http.Request) (DeviceConfig, bool) {
-	dev, ok := s.deviceByID(r.PathValue("id"))
+func (s *Server) pathDevice(w http.ResponseWriter, r *http.Request) (store.Device, bool) {
+	dev, ok := s.store.Device(r.PathValue("id"))
 	if !ok {
 		http.Error(w, "unknown device", http.StatusNotFound)
 	}
@@ -128,40 +124,31 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	devices := s.allDevices()
 	statuses := make([]DeviceStatus, 0, len(devices))
-	s.mu.Lock()
 	for _, d := range devices {
-		st := DeviceStatus{ID: d.ID, Name: d.Name}
+		st := DeviceStatus{
+			ID:           d.ID,
+			Attrs:        s.store.Attrs(d.ID),
+			Display:      s.store.Display(d.ID),
+			AgentVersion: d.AgentVersion,
+		}
+		s.mu.Lock()
 		if seen, ok := s.lastSeen[d.ID]; ok {
-			seenCopy := seen
-			st.LastSeen = &seenCopy
-			st.Online = now.Sub(seen) <= OnlineWindow
 			hb := s.lastHB[d.ID]
-			st.Heartbeat = &hb
+			st.LastSeen, st.Heartbeat = &seen, &hb
+			st.Online = now.Sub(seen) <= OnlineWindow
 		}
+		s.mu.Unlock()
+		if until := s.store.TestUntil(d.ID); now.Before(until) {
+			st.TestUntil, st.ActiveSource = &until, "test"
+		} else if tpl, source, ok := s.resolveTemplate(d.ID, now); ok {
+			st.ActiveSource, st.ActiveTpl = source, tpl.ID
+		}
+		if u, ok := s.store.UpdateTarget(d.ID); ok {
+			st.UpdateTarget = &u
+		}
+		d.Secret = "" // 不向后台暴露密钥
+		st.HW = &d
 		statuses = append(statuses, st)
-	}
-	s.mu.Unlock()
-	for i := range statuses {
-		id := statuses[i].ID
-		statuses[i].Attrs = s.store.Attrs(id)
-		statuses[i].Display = s.store.Display(id)
-		statuses[i].AgentVersion = s.agentVersion(id)
-		if until := s.store.TestUntil(id); now.Before(until) {
-			u := until
-			statuses[i].TestUntil = &u
-			statuses[i].ActiveSource = "test"
-		} else if tpl, source, ok := s.resolveTemplate(id, now); ok {
-			statuses[i].ActiveSource, statuses[i].ActiveTpl = source, tpl.ID
-		} else {
-			statuses[i].ActiveSource = "playlist"
-		}
-		if u, ok := s.store.UpdateTarget(id); ok {
-			statuses[i].UpdateTarget = &u
-		}
-		if d, ok := s.store.Device(id); ok {
-			d.Secret = "" // 不向后台暴露密钥
-			statuses[i].HW = &d
-		}
 	}
 	writeJSON(w, statuses)
 }
@@ -192,14 +179,6 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	os.RemoveAll(filepath.Join(s.renderedDir(), dev.ID))
 	os.RemoveAll(s.deviceMediaDir(dev.ID))
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleGetAttrs(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
-	writeJSON(w, s.store.Attrs(dev.ID))
 }
 
 var attrKeyPattern = regexp.MustCompile(`^[\p{L}\p{N}_-]{1,32}$`)
@@ -430,7 +409,7 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePreview 渲染模板预览图。
-// ?device= 用某台设备的属性、绑定与左右对调设置；?mirror=1 单独预览对调后的版式。
+// ?device= 用某台设备的属性与左右对调设置；?mirror=1 单独预览对调后的版式。
 // 预览始终出整屏图（媒体区填自己的底色），这样在后台里能直接看到版式。
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	tpl, ok := s.store.Template(r.PathValue("id"))
@@ -439,17 +418,12 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	attrs := map[string]string{}
-	bindings := map[string]string{}
 	mirror := r.URL.Query().Get("mirror") == "1"
 	if devID := r.URL.Query().Get("device"); devID != "" {
 		attrs = s.store.Attrs(devID)
-		d := s.store.Display(devID)
-		mirror = mirror || d.Mirror
-		if d.TemplateID == tpl.ID {
-			bindings = d.Bindings
-		}
+		mirror = mirror || s.store.Display(devID).Mirror
 	}
-	rendered, err := s.renderer.Render(tpl, attrs, bindings, mirror, false)
+	rendered, err := s.renderer.Render(tpl, attrs, mirror, false)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -458,59 +432,4 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	if err := render.EncodePNG(w, rendered.Image); err != nil {
 		log.Printf("preview encode failed: %v", err)
 	}
-}
-
-// ---- 上传 ----
-
-var uploadNamePattern = regexp.MustCompile(`^[\p{L}\p{N}_.-]{1,128}\.(?i:png|jpe?g)$`)
-
-func (s *Server) handleListUploads(w http.ResponseWriter, r *http.Request) {
-	entries, err := os.ReadDir(s.uploadsDir())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	names := []string{}
-	for _, e := range entries {
-		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-			names = append(names, e.Name())
-		}
-	}
-	writeJSON(w, names)
-}
-
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, "bad multipart body", http.StatusBadRequest)
-		return
-	}
-	f, hdr, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "missing file field", http.StatusBadRequest)
-		return
-	}
-	defer f.Close()
-	name := filepath.Base(hdr.Filename)
-	if !uploadNamePattern.MatchString(name) {
-		http.Error(w, "文件名非法（仅支持 png/jpg，字母数字._-）", http.StatusBadRequest)
-		return
-	}
-	dst := filepath.Join(s.uploadsDir(), name)
-	out, err := os.Create(dst + ".tmp")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if _, err := io.Copy(out, io.LimitReader(f, 20<<20)); err != nil {
-		out.Close()
-		os.Remove(dst + ".tmp")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	out.Close()
-	if err := os.Rename(dst+".tmp", dst); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]string{"name": name})
 }

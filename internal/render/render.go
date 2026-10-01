@@ -1,5 +1,5 @@
-// Package render 在服务端把显示模板/测试卡合成为 1440×900 位图，
-// 使渲染结果作为普通图片走既有 manifest→下载→播放管线，设备端零改动。
+// Package render 在服务端把显示模板/测试卡合成为位图：模板的静态部分（属性、文字、底色）
+// 由服务端画，媒体区留给设备端播放（见 Render 的 overlayMode）。
 package render
 
 import (
@@ -7,16 +7,13 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/jpeg"
 	"image/png"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
@@ -25,15 +22,14 @@ import (
 	"github.com/izzln/content-edge-display/internal/store"
 )
 
-// Renderer 持有字体与上传目录。
+// Renderer 持有渲染用字体。
 type Renderer struct {
-	font       *opentype.Font
-	uploadsDir string
+	font *opentype.Font
 }
 
 // New 创建渲染器。fontPath 为空时退回内嵌的 Go Regular 字体
 // （仅覆盖拉丁字符，中文会显示为方框——生产环境必须配置 CJK 字体）。
-func New(fontPath, uploadsDir string) (*Renderer, error) {
+func New(fontPath string) (*Renderer, error) {
 	data := goregular.TTF
 	if fontPath != "" {
 		b, err := os.ReadFile(fontPath)
@@ -46,7 +42,7 @@ func New(fontPath, uploadsDir string) (*Renderer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("font_path: 解析字体失败: %w", err)
 	}
-	return &Renderer{font: f, uploadsDir: uploadsDir}, nil
+	return &Renderer{font: f}, nil
 }
 
 // Rendered 是一次模板渲染的产物。
@@ -56,7 +52,7 @@ type Rendered struct {
 	HasMedia    bool
 }
 
-// Render 按模板 + 设备属性 + 区域绑定合成一张图。
+// Render 按模板 + 设备属性合成一张图。
 //
 // mirror 为真时所有区域左右对调（属性在左还是在右，用同一个模板即可覆盖两种设备）。
 //
@@ -64,7 +60,7 @@ type Rendered struct {
 //   - true：留全透明，作为叠加图交给设备端贴在视频之上（Go 的 image.RGBA 本身是预乘 alpha，
 //     正是 mpv overlay-add 需要的格式）
 //   - false：填上自己的底色，得到一张整屏静态图——用于模板没有媒体区、或媒体区还没有内容的情形
-func (r *Renderer) Render(tpl store.Template, attrs, bindings map[string]string, mirror, overlayMode bool) (*Rendered, error) {
+func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, overlayMode bool) (*Rendered, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
 	out := &Rendered{Image: canvas}
 	fill(canvas, canvas.Bounds(), parseColor(tpl.Background))
@@ -102,23 +98,13 @@ func (r *Renderer) Render(tpl store.Template, attrs, bindings map[string]string,
 			if err := r.drawText(canvas, rect, reg.Key, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
 				return nil, err
 			}
-		case store.RegionImage:
-			name := bindings[reg.ID]
-			if name == "" {
-				continue // 未绑定内容的图片区域留区域底色
-			}
-			img, err := r.loadUpload(name)
-			if err != nil {
-				return nil, fmt.Errorf("region %q: %w", reg.ID, err)
-			}
-			drawCover(canvas, rect, img)
 		}
 	}
 	return out, nil
 }
 
-// RenderTestCard 生成现场定位用的测试卡：纯色底 + 大号“测试” + 设备信息。
-func (r *Renderer) RenderTestCard(w, h int, deviceID, deviceName string, attrs map[string]string, until time.Time) (*image.RGBA, error) {
+// RenderTestCard 生成现场定位用的测试卡：纯色底 + 大号“测试” + 设备编号与属性。
+func (r *Renderer) RenderTestCard(w, h int, deviceID string, attrs map[string]string, until time.Time) (*image.RGBA, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, w, h))
 	fill(canvas, canvas.Bounds(), color.RGBA{0x00, 0x66, 0xCC, 0xFF})
 
@@ -127,7 +113,7 @@ func (r *Renderer) RenderTestCard(w, h int, deviceID, deviceName string, attrs m
 		size int
 	}{
 		{"测 试", h / 4},
-		{deviceName + "  (" + deviceID + ")", h / 12},
+		{deviceID, h / 12},
 	}
 	var attrLine []string
 	for k, v := range attrs {
@@ -167,25 +153,6 @@ func EncodePNG(w io.Writer, img image.Image) error {
 	return png.Encode(w, img)
 }
 
-func (r *Renderer) loadUpload(name string) (image.Image, error) {
-	if name != filepath.Base(name) || strings.HasPrefix(name, ".") {
-		return nil, fmt.Errorf("非法文件名 %q", name)
-	}
-	f, err := os.Open(filepath.Join(r.uploadsDir, name))
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".png":
-		return png.Decode(f)
-	case ".jpg", ".jpeg":
-		return jpeg.Decode(f)
-	default:
-		return nil, fmt.Errorf("不支持的图片格式 %q", name)
-	}
-}
-
 // drawText 在 rect 内绘制单行文字（水平按 align，垂直居中）。
 func (r *Renderer) drawText(dst *image.RGBA, rect image.Rectangle, text string, size int, c color.Color, align string) error {
 	face, err := opentype.NewFace(r.font, &opentype.FaceOptions{
@@ -212,27 +179,6 @@ func (r *Renderer) drawText(dst *image.RGBA, rect image.Rectangle, text string, 
 	d.Dot = fixed.P(x, baseline)
 	d.DrawString(text)
 	return nil
-}
-
-// drawCover 让图片撑满 rect：按较大的那个缩放比取源图中央的一块，超出的部分裁掉，
-// 不留黑边（等同 CSS 的 object-fit: cover）。设备端播放媒体区内容时用的 --panscan=1 是同样的效果。
-func drawCover(dst *image.RGBA, rect image.Rectangle, src image.Image) {
-	sb := src.Bounds()
-	if sb.Dx() == 0 || sb.Dy() == 0 || rect.Empty() {
-		return
-	}
-	// 需要用到的源图尺寸：以 rect 的宽高比为准，从源图中央裁一块
-	srcW, srcH := sb.Dx(), sb.Dy()
-	wantW, wantH := srcW, srcH
-	if srcW*rect.Dy() > rect.Dx()*srcH {
-		wantW = srcH * rect.Dx() / rect.Dy() // 源图更宽：按高撑满，左右各裁掉一部分
-	} else {
-		wantH = srcW * rect.Dy() / rect.Dx() // 源图更高：按宽撑满，上下各裁掉一部分
-	}
-	sx := sb.Min.X + (srcW-wantW)/2
-	sy := sb.Min.Y + (srcH-wantH)/2
-	crop := image.Rect(sx, sy, sx+wantW, sy+wantH)
-	xdraw.CatmullRom.Scale(dst, rect, src, crop, draw.Over, nil)
 }
 
 func fill(dst *image.RGBA, rect image.Rectangle, c color.Color) {

@@ -23,15 +23,12 @@ import (
 //
 // 图片上传后在服务端缩到画布尺寸以内（transcode.ShrinkImage），设备永远只解 1440×900 的图，
 // 所以原图可以直接用手机拍的；像素上限只是防止服务端被超大图（解压炸弹）拖垮。
-// 视频限 500MB；装了 ffmpeg 时一律转码成设备吃得消的 H.264，没装时只收 H.264（见 mp4.go）。
+// 视频限 500MB，一律转码成设备吃得消的 H.264（见 transcode 包）。
 const (
 	maxImageUploadBytes = 20 << 20
 	maxImagePixels      = 50_000_000
 	maxVideoUploadBytes = 500 << 20
 )
-
-// 转码时接受的视频容器（产物统一为 mp4）。不转码时只接受 mp4/mov，因为只有它们能做编码校验。
-var transcodableExts = map[string]bool{".mp4": true, ".mov": true, ".mkv": true, ".webm": true, ".avi": true, ".m4v": true}
 
 // mediaNamePattern 限制上传文件名（后缀另行按类型校验）。
 var mediaNamePattern = regexp.MustCompile(`^[\p{L}\p{N}_ .-]{1,128}$`)
@@ -49,36 +46,40 @@ type MediaFile struct {
 
 const mediaReady = "ready"
 
-// mediaList 返回设备当前生效的播放列表（顺序即播放顺序）。
-// 以 state 里记录的顺序为准；顺序缺失时（例如文件是直接拷进目录的）按文件名排。
-func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
-	dir := s.deviceMediaDir(deviceID)
-	onDisk, err := manifest.ListMedia(dir)
+// playlist 返回设备媒体区的播放顺序（只含已就绪、确实在磁盘上的文件）。
+//
+// 这是唯一的顺序来源，后台列表与设备清单都用它，保证"后台看到的"就是"设备在放的"：
+// 先按 state 里记录的顺序（后台上传/拖拽排序写入），再把目录里有、记录里没有的文件
+// （运营方直接拷进 media_root 的）按文件名追加在后面。
+func (s *Server) playlist(deviceID string) ([]string, error) {
+	onDisk, err := manifest.ListMedia(s.deviceMediaDir(deviceID))
 	if err != nil {
 		return nil, err
 	}
-	present := map[string]bool{}
+	present := make(map[string]bool, len(onDisk))
 	for _, n := range onDisk {
 		present[n] = true
 	}
-	out := []MediaFile{}
-	add := func(name string) {
-		info, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			return
-		}
-		out = append(out, MediaFile{Name: name, Type: manifest.TypeOf(name), Size: info.Size(), Status: mediaReady})
-	}
-	seen := map[string]bool{}
-	for _, name := range s.store.Display(deviceID).Playlist {
-		if present[name] && !seen[name] {
-			seen[name] = true
-			add(name)
+	out := make([]string, 0, len(onDisk))
+	for _, n := range append(s.store.Display(deviceID).Playlist, onDisk...) {
+		if present[n] {
+			out = append(out, n)
+			delete(present, n) // 去重
 		}
 	}
-	for _, name := range onDisk {
-		if !seen[name] {
-			add(name)
+	return out, nil
+}
+
+// mediaList 返回后台展示用的播放列表：就绪文件（顺序即播放顺序）+ 转码中/失败的任务。
+func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
+	names, err := s.playlist(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MediaFile, 0, len(names))
+	for _, name := range names {
+		if info, err := os.Stat(filepath.Join(s.deviceMediaDir(deviceID), name)); err == nil {
+			out = append(out, MediaFile{Name: name, Type: manifest.TypeOf(name), Size: info.Size(), Status: mediaReady})
 		}
 	}
 	for _, j := range s.jobs.snapshot(deviceID) {
@@ -96,13 +97,31 @@ func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
 func (s *Server) setPlaylist(deviceID string, names []string) error {
 	return s.store.Update(func(st *store.State) error {
 		d := st.Displays[deviceID]
-		if d.Mode == "" {
-			d.Mode = store.ModeGlobal
-		}
 		d.Playlist = names
 		st.Displays[deviceID] = d
 		return nil
 	})
+}
+
+// appendPlaylist 把文件按给定顺序追加到设备播放顺序末尾（上传完成、转码完成时用）。
+// 调用时这些文件已经落盘，playlist() 会把它们当成"目录里有、记录里没有"的文件按名字排进去，
+// 所以先剔掉再追加，才能保持上传顺序。
+func (s *Server) appendPlaylist(deviceID string, names ...string) error {
+	current, err := s.playlist(deviceID)
+	if err != nil {
+		return err
+	}
+	adding := make(map[string]bool, len(names))
+	for _, n := range names {
+		adding[n] = true
+	}
+	order := make([]string, 0, len(current)+len(names))
+	for _, n := range current {
+		if !adding[n] {
+			order = append(order, n)
+		}
+	}
+	return s.setPlaylist(deviceID, append(order, names...))
 }
 
 func (s *Server) handleListDeviceMedia(w http.ResponseWriter, r *http.Request) {
@@ -181,14 +200,7 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 	}
 
 	if len(accepted) > 0 {
-		order := make([]string, 0, len(existing)+len(accepted))
-		for _, f := range existing {
-			if f.Status == mediaReady {
-				order = append(order, f.Name)
-			}
-		}
-		order = append(order, accepted...)
-		if err := s.setPlaylist(dev.ID, order); err != nil {
+		if err := s.appendPlaylist(dev.ID, accepted...); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -201,45 +213,36 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"accepted": accepted, "transcoding": transcoding, "rejected": rejected, "playlist": files})
 }
 
-// saveUploadedMedia 把一个上传分片落盘并校验/归一化。
+// saveUploadedMedia 把一个上传分片落盘并归一化。
 // 返回最终文件名、是否进入了转码队列，或面向使用者的拒收原因。
 //
 //   - 图片：校验能解码，过大的缩到画布尺寸以内，立即就绪；
-//   - 视频 + 有 ffmpeg：原片放进暂存区排队转码，产物名统一为 .mp4；
-//   - 视频 + 没有 ffmpeg：只能原样用，所以必须是 H.264 的 mp4/mov。
+//   - 视频：原片放进暂存区排队转码，产物名统一为 .mp4。没有 ffmpeg 就不收视频——
+//     未转码的原片码率过高，会让设备过热关机，宁可当场拒绝。
 func (s *Server) saveUploadedMedia(deviceID, dir string, part *multipart.Part, taken map[string]bool) (string, bool, string) {
 	name := filepath.Base(part.FileName())
 	if !mediaNamePattern.MatchString(name) {
 		return "", false, "文件名非法（仅支持字母、数字、空格和 . _ -，最长 128 字符）"
 	}
-	kind := manifest.TypeOf(name)
-	ext := strings.ToLower(filepath.Ext(name))
-	limit := int64(maxImageUploadBytes)
-	transcodeIt := false
-	switch kind {
+	isVideo := false
+	switch manifest.TypeOf(name) {
 	case "image":
-		if ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
+		if ext := strings.ToLower(filepath.Ext(name)); ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
 			return "", false, "图片仅支持 png/jpg"
 		}
 	case "video":
-		limit = maxVideoUploadBytes
-		switch {
-		case s.encoder != nil && transcodableExts[ext]:
-			transcodeIt = true
-			name = transcode.OutputName(name)
-		case s.encoder != nil:
-			return "", false, "视频仅支持 mp4/mov/mkv/webm/avi"
-		case ext != ".mp4" && ext != ".mov":
-			return "", false, "服务端未安装 ffmpeg，无法转码：视频仅支持 H.264 编码的 mp4/mov"
+		if s.encoder == nil {
+			return "", false, "服务端未安装 ffmpeg，暂不能上传视频（未转码的视频会让设备过热）"
 		}
+		isVideo, name = true, transcode.OutputName(name)
 	default:
-		return "", false, "不支持的文件类型（图片 png/jpg，视频 mp4/mov 等）"
+		return "", false, "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等）"
 	}
-
 	name = uniqueName(name, taken)
-	stageDir := dir
-	if transcodeIt {
-		stageDir = filepath.Join(s.incomingDir(), deviceID)
+
+	limit, stageDir := int64(maxImageUploadBytes), dir
+	if isVideo {
+		limit, stageDir = maxVideoUploadBytes, filepath.Join(s.incomingDir(), deviceID)
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
 			return "", false, err.Error()
 		}
@@ -252,63 +255,49 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part *multipart.Part, t
 	// 多读 1 字节：读得出来说明超限了。
 	n, err := io.Copy(out, io.LimitReader(part, limit+1))
 	out.Close()
-	cleanup := func() { os.Remove(tmp) }
-	if err != nil {
-		cleanup()
-		return "", false, "写入失败：" + err.Error()
+	fail := func(reason string) (string, bool, string) {
+		os.Remove(tmp)
+		return "", false, reason
 	}
-	if n > limit {
-		cleanup()
-		return "", false, fmt.Sprintf("文件超过上限 %dMB", limit>>20)
+	switch {
+	case err != nil:
+		return fail("写入失败：" + err.Error())
+	case n > limit:
+		return fail(fmt.Sprintf("文件超过上限 %dMB", limit>>20))
 	}
 
-	if transcodeIt {
+	if isVideo {
 		// 编码不用查：转码会统一成 H.264。是不是真视频交给 ffmpeg 判断，失败会显示在列表里。
 		s.jobs.add(&transcodeJob{deviceID: deviceID, name: name, src: tmp, status: jobQueued})
 		return name, true, ""
 	}
-	if reason := validateMediaFile(tmp, kind); reason != "" {
-		cleanup()
-		return "", false, reason
+	if reason := checkImage(tmp); reason != "" {
+		return fail(reason)
 	}
-	if kind == "image" {
-		// 文件头能读不代表整张图完好（截断的文件过得了 DecodeConfig），完整解码在这一步才发生
-		if _, err := transcode.ShrinkImage(tmp, canvasW, canvasH); err != nil {
-			cleanup()
-			return "", false, "图片无法解码（文件损坏或不完整）"
-		}
+	// 文件头能读不代表整张图完好（截断的文件过得了 DecodeConfig），完整解码在这一步才发生
+	if _, err := transcode.ShrinkImage(tmp, canvasW, canvasH); err != nil {
+		return fail("图片无法解码（文件损坏或不完整）")
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		cleanup()
-		return "", false, err.Error()
+		return fail(err.Error())
 	}
 	return name, false, ""
 }
 
-// validateMediaFile 校验已落盘文件的内容：图片限像素，视频限编码。
-func validateMediaFile(path, kind string) string {
+// checkImage 在完整解码之前先读文件头：挡住伪装成图片的文件与超大图（解压炸弹）。
+func checkImage(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return err.Error()
 	}
 	defer f.Close()
-	if kind == "image" {
-		cfg, _, err := image.DecodeConfig(f)
-		if err != nil {
-			return "图片无法解码（文件损坏或不是真正的 png/jpg）"
-		}
-		if cfg.Width*cfg.Height > maxImagePixels {
-			return fmt.Sprintf("图片 %d×%d 像素过大（上限约 %d 万像素），请先缩小再上传",
-				cfg.Width, cfg.Height, maxImagePixels/10000)
-		}
-		return ""
-	}
-	info, err := f.Stat()
+	cfg, _, err := image.DecodeConfig(f)
 	if err != nil {
-		return err.Error()
+		return "图片无法解码（文件损坏或不是真正的 png/jpg）"
 	}
-	if err := checkVideoPlayable(f, info.Size()); err != nil {
-		return err.Error()
+	if cfg.Width*cfg.Height > maxImagePixels {
+		return fmt.Sprintf("图片 %d×%d 像素过大（上限约 %d 万像素），请先缩小再上传",
+			cfg.Width, cfg.Height, maxImagePixels/10000)
 	}
 	return ""
 }

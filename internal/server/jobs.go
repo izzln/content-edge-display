@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
 )
 
@@ -196,15 +195,7 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 		return
 	}
 	// 完成：追加到播放列表末尾，然后从队列里摘掉
-	if err := s.store.Update(func(st *store.State) error {
-		d := st.Displays[j.deviceID]
-		if d.Mode == "" {
-			d.Mode = store.ModeGlobal
-		}
-		d.Playlist = append(d.Playlist, j.name)
-		st.Displays[j.deviceID] = d
-		return nil
-	}); err != nil {
+	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
 		log.Printf("transcode %s/%s: update playlist failed: %v", j.deviceID, j.name, err)
 	}
 	s.jobs.drop(j)

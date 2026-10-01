@@ -24,7 +24,7 @@ apt install -y fonts-noto-cjk
 cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /srv/display/fonts/
 
 # 视频转码：上传的视频统一转成 1440×900 以内、≤4Mbps、30fps 的 H.264。
-# 不装也能跑，但视频会原样下发——高码率原片会让设备过热、降频甚至自动关机。
+# 不装的话后台不能上传视频（未转码的原片码率过高，会让设备过热关机）。
 apt install -y ffmpeg
 
 #   server.json 里的 admin_token / enroll_token 已由 make 生成填好；
@@ -46,7 +46,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   server.json         配置
   media/<设备ID>/     该设备要播的图片与视频（后台上传，也可直接拷进来）
   fonts/              渲染用字体
-  data/               服务端状态：state.json、uploads/、firmware/、rendered/
+  data/               服务端状态：state.json、firmware/、rendered/、incoming/（待转码原片）
 ```
 
 管理后台：浏览器打开 `http://<服务器>:8080/admin`，输入 `admin_token`。

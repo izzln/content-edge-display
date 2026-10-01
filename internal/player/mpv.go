@@ -46,7 +46,7 @@ type MPV struct {
 	desired    Scene
 	imageDur   string // mpv --image-display-duration 的值：秒数或 "inf"；收到清单前为空
 	loaded     bool   // 最近一次巡检是否确认 mpv 已加载期望列表（仅用于控制日志噪音）
-	durApplied bool   // 本轮是否已把图片时长同步给 mpv
+	appliedDur string // 已同步给 mpv 的图片时长；与 imageDur 不同即需要（重新）下发
 	// 已同步给 mpv 的版面指纹（留白比例 + 叠加图 + 输出分辨率）。
 	// 指纹里带上分辨率，显示屏换了模式也能自动重贴一张匹配的叠加图。
 	appliedLayout string
@@ -147,7 +147,7 @@ func (p *MPV) supervise(ctx context.Context) {
 		// 让巡检重新确认一次。
 		p.setLoaded(false)
 		p.mu.Lock()
-		p.durApplied, p.appliedLayout = false, ""
+		p.appliedDur, p.appliedLayout = "", ""
 		p.mu.Unlock()
 		p.signal()
 		select {
@@ -267,10 +267,10 @@ func (p *MPV) applyLayout(want Scene) {
 	}
 }
 
-// applyImageDuration 把期望的图片展示时长同步给运行中的 mpv（每轮只做一次）。
+// applyImageDuration 把期望的图片展示时长同步给运行中的 mpv（值没变就不重复下发）。
 func (p *MPV) applyImageDuration() {
 	p.mu.Lock()
-	dur, done := p.imageDur, p.durApplied
+	dur, done := p.imageDur, p.imageDur == p.appliedDur
 	p.mu.Unlock()
 	if done || dur == "" {
 		return
@@ -279,7 +279,7 @@ func (p *MPV) applyImageDuration() {
 		return // mpv 未就绪，下个周期再试
 	}
 	p.mu.Lock()
-	p.durApplied = true
+	p.appliedDur = dur
 	p.mu.Unlock()
 	log.Printf("player(mpv): image-display-duration = %s", dur)
 }
@@ -357,8 +357,8 @@ func (p *MPV) Load(scene Scene) error {
 	p.desired = scene
 	p.desired.Items = append([]Item(nil), items...)
 	p.loaded = false
-	if dur := imageDurationFor(items); dur != "" && dur != p.imageDur {
-		p.imageDur, p.durApplied = dur, false
+	if dur := imageDurationFor(items); dur != "" {
+		p.imageDur = dur
 	}
 	p.mu.Unlock()
 

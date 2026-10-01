@@ -312,7 +312,7 @@ func TestGlobalTemplateAndSchedules(t *testing.T) {
 	var m2 manifest.Manifest
 	json.Unmarshal(other.Body.Bytes(), &m2)
 	if len(m2.Items) != 1 || m2.Items[0].SHA256 != global.Items[0].SHA256 {
-		t.Fatal("second device should render same global template (no bindings/attrs)")
+		t.Fatal("second device should render same global template (no attrs)")
 	}
 
 	// 不同设备属性不同 → 渲染图不同

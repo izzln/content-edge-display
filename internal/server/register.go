@@ -62,7 +62,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		d := existing
 		if !ok {
-			d = store.Device{ID: req.DeviceID, Secret: req.Secret, Name: req.DeviceID, RegisteredAt: s.now()}
+			d = store.Device{ID: req.DeviceID, Secret: req.Secret, RegisteredAt: s.now()}
 			created = true
 		}
 		d.Hostname, d.HWSerial, d.MAC, d.IP, d.AgentVersion = req.Hostname, req.HWSerial, req.MAC, req.IP, req.AgentVersion

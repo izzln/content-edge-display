@@ -98,7 +98,7 @@ func TestVideoUploadIsTranscodedInBackground(t *testing.T) {
 
 	res := parseUpload(t, uploadMedia(t, h, testDeviceID,
 		upload{"a.jpg", tinyPNG(t)},
-		upload{"hevc.mkv", mp4Fixture("hvc1")}, // 不转码时会被拒；转码时照收
+		upload{"hevc.mkv", fakeVideo}, // 任何容器/编码都照收，反正会被转成 H.264
 	))
 	if strings.Join(res.Accepted, ",") != "a.jpg" {
 		t.Fatalf("图片应立即就绪，得到 %v", res.Accepted)
@@ -167,7 +167,7 @@ func TestDeleteWhileTranscodingCancels(t *testing.T) {
 	enc := &fakeEncoder{block: make(chan struct{}), started: make(chan struct{})}
 	s.encoder = enc
 
-	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"long.mp4", mp4Fixture("avc1")}))
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"long.mp4", fakeVideo}))
 	<-enc.started
 	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/"+testDeviceID+"/media/long.mp4", nil), http.StatusOK)
 	time.Sleep(100 * time.Millisecond) // 给工作协程收尾的时间
@@ -243,11 +243,8 @@ func TestRealFFmpegEndToEnd(t *testing.T) {
 		}
 		return ok && f.Status == mediaReady
 	})
-	out := filepath.Join(s.deviceMediaDir(testDeviceID), "hot.mp4")
-	fh, _ := os.Open(out)
-	defer fh.Close()
-	fi, _ := fh.Stat()
-	if err := checkVideoPlayable(fh, fi.Size()); err != nil {
-		t.Fatalf("转码产物应当是设备能硬解的 H.264：%v", err)
+	out, _ := exec.Command("ffmpeg", "-hide_banner", "-i", filepath.Join(s.deviceMediaDir(testDeviceID), "hot.mp4")).CombinedOutput()
+	if !strings.Contains(string(out), "Video: h264") {
+		t.Fatalf("转码产物应当是设备能硬解的 H.264：\n%s", out)
 	}
 }

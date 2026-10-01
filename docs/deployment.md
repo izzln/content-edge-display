@@ -74,9 +74,9 @@ systemctl daemon-reload && systemctl enable --now display-server
 /srv/display/
   display-server      二进制
   server.json         配置
-  media/<设备ID>/     目录轮播模式要播的图片与视频（运营方放）
+  media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
   fonts/              渲染用字体
-  data/               服务端状态：state.json、uploads/、firmware/、rendered/（首次启动自动创建）
+  data/               服务端状态：state.json、firmware/、rendered/、incoming/（首次启动自动创建）
 ```
 
 **配置里的相对路径按 `server.json` 所在目录解析**，与进程工作目录无关——systemd 启动服务时
@@ -304,8 +304,8 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
 
 服务端需要装 `ffmpeg`（`apt install ffmpeg`，或在 `server.json` 里用 `ffmpeg_path` 指定）。
-**没装时**视频不转码、只做编码校验（非 H.264 拒收），管理后台顶部会醒目提示——这种状态下
-高码率原片会原样下发，生产环境不要这样跑。
+**没装时不能上传视频**（图片照常），管理后台顶部会醒目提示。未转码的原片码率控制不住，
+下发到设备就是过热隐患，所以宁可当场拒收。
 
 **模板**：至多有一个"播放内容"区域（mpv 只能把视频放进一个矩形）。
 只剩一个模板时不能删除——系统始终需要一个全局默认模板；删掉当前的全局模板时，
@@ -313,7 +313,7 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 
 ### 5.2 现场定位
 
-**设备**页每行【测试】→ 选 1/5/15 分钟：该屏全屏显示"测试"卡片（含设备名与属性），到期自动恢复。
+**设备**页每行【测试】→ 选 1/5/15 分钟：该屏全屏显示"测试"卡片（含设备编号与属性），到期自动恢复。
 这条路径与正常内容走同一套分发管线，因此测试成功本身就验证了整条链路。
 
 ### 5.3 程序 OTA
@@ -352,9 +352,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 所以新增设备端配置项时，务必让"缺省值即可用"——否则这批设备就得逐台登录。
 
-**播放能力现状**：图片与视频都已支持（H.264 MP4 等，见 `internal/manifest` 的扩展名表），
-目录轮播模式下图文混排、视频播完自动切下一条、列表循环都已实测可用；视频不需要任何升级。
-模板渲染的是静态图，因此"模板里嵌视频"目前不支持，那需要服务端配合，不是仅升级代理能做到的。
+**播放能力现状**：模板媒体区里图文混排、视频播完自动切下一条、列表循环都已实测可用。
 
 ## 6. 服务端升级与数据迁移
 
@@ -364,10 +362,9 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 | 路径 | 内容 | 要不要保留 |
 |---|---|---|
 | `data/state.json` | 设备（含自注册设备的密钥）、属性、模板、时段、全局设置、固件元数据、更新目标 | **必须** |
-| `data/uploads/` | 后台上传的图片 | **必须** |
 | `data/firmware/` | 上传的代理程序 | 建议（否则待下发的更新目标会失效） |
 | `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
-| `media/` | 目录轮播模式的内容 | **必须** |
+| `media/` | 各设备的播放内容 | **必须** |
 | `server.json` | 配置（含两个口令） | **必须**。另外把 `.secrets/tokens.env` 也备份到构建机之外 |
 
 ### 6.1 原地升级

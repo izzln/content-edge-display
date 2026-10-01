@@ -41,13 +41,12 @@ type Agent struct {
 	verified       bool // 本次运行是否已确认过版本（首个成功心跳后）
 }
 
-// New 创建代理；identity 为空时在 Run 中解析。
+// New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
 	return &Agent{
 		cfg:            cfg,
 		player:         p,
 		http:           &http.Client{Timeout: 10 * time.Minute}, // 覆盖大文件下载
-		identity:       Identity{DeviceID: cfg.DeviceID, Secret: cfg.Secret},
 		startedAt:      time.Now(),
 		updateFailedAt: map[string]time.Time{},
 	}
@@ -83,10 +82,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	sdNotify("READY=1")
 
 	// 自注册（幂等）：成功前不进入正常轮询，但已在播放缓存内容且持续喂狗。
-	if a.cfg.EnrollToken != "" {
-		if err := a.registerLoop(ctx); err != nil {
-			return err
-		}
+	if err := a.registerLoop(ctx); err != nil {
+		return err
 	}
 
 	pollTimer := time.NewTimer(0)

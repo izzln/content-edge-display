@@ -131,21 +131,20 @@ document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
   for (const t of ["devices", "templates", "firmware"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
 });
 
-let devices = [], templates = [], global = {}, schedules = [], firmware = [], uploads = [], info = {};
+let devices = [], templates = [], global = {}, schedules = [], firmware = [], info = {};
 const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
 const tplById = id => templates.find(t => t.id === id);
-const SOURCE = { test: "测试中", override: "设备覆盖", schedule: "时段", global: "全局", playlist: "目录轮播" };
+const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段", global: "全局" };
 
 const arr = v => Array.isArray(v) ? v : [];
 async function refresh() {
   try {
-    const [d, t, g, s, f, u, i] = await Promise.all([
+    const [d, t, g, s, f, i] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
-      api("/api/v1/admin/schedules"), api("/api/v1/admin/firmware"), api("/api/v1/admin/uploads"),
-      api("/api/v1/admin/info")]);
+      api("/api/v1/admin/schedules"), api("/api/v1/admin/firmware"), api("/api/v1/admin/info")]);
     // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
-    [devices, templates, global, schedules, firmware, uploads, info] =
-      [arr(d), arr(t), g || {}, arr(s), arr(f), arr(u), i || {}];
+    [devices, templates, global, schedules, firmware, info] =
+      [arr(d), arr(t), g || {}, arr(s), arr(f), i || {}];
   } catch { return; }
   try {
     renderDevices(); renderTemplates(); renderSchedules(); renderFirmware();
@@ -180,8 +179,8 @@ function renderDevices() {
        <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
     : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
   if (!info.transcode) {
-    $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端没有找到 ffmpeg，上传的视频<b>不会转码</b>：
-      高码率原片会让设备过热、降频甚至自动关机。请在服务器上 <code>apt install ffmpeg</code>
+    $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端没有找到 ffmpeg，暂时<b>不能上传视频</b>
+      （未转码的原片码率过高，会让设备过热关机）。请在服务器上 <code>apt install ffmpeg</code>
       （或在 server.json 里配置 <code>ffmpeg_path</code>）后重启服务端。</div>`;
   }
   const rows = devices.map(d => {
@@ -203,7 +202,7 @@ function renderDevices() {
     const hw = d.hw ? `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>` : "";
     return `<tr>
       <td>${st}</td>
-      <td><b>${esc(d.name)}</b><div class="muted">${esc(d.id)}</div>${hw}${ver}</td>
+      <td><b>${esc(d.id)}</b>${hw}${ver}</td>
       <td>${attrs}</td>
       <td>${show}</td>
       <td>
@@ -268,7 +267,7 @@ async function contentDialog(id) {
   plDirty = false;
   const own = d.display.mode === "template";
   const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
-  modal(`<h2>内容 — ${esc(d.name)} <span class="muted">${esc(d.id)}</span></h2>
+  modal(`<h2>内容 — ${esc(d.id)}</h2>
     <div class="row"><label><input type="radio" name="mode" value="global" ${own ? "" : "checked"} onchange="onModeChange()">
         跟随全局模板<span class="muted">（${esc(tplById(global.template_id)?.name || "未设置")}）</span></label></div>
     <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
@@ -306,7 +305,7 @@ async function copyGlobalTemplate() {
   renderContentBody(currentDeviceID());
 }
 
-// renderContentBody 画出与当前所选模板匹配的内容区：媒体区 → 播放列表；image 区域 → 图片绑定。
+// renderContentBody 画出与当前所选模板匹配的内容区：有媒体区才显示播放列表。
 function renderContentBody(id) {
   const box = $("#contentBody");
   if (!box) return;
@@ -324,23 +323,10 @@ function renderContentBody(id) {
   } else {
     html = `<div class="row"><b>播放内容</b><span class="muted">按顺序循环播放；图片停留 ${esc(tpl.image_duration_s)} 秒（写在模板里），视频播完即切</span></div>
       <div class="row"><input type="file" id="plFiles" multiple
-          accept=".png,.jpg,.jpeg,.mp4,.mov${info.transcode ? ",.mkv,.webm,.avi,.m4v" : ""}">
+          accept=".png,.jpg,.jpeg${info.transcode ? ",.mp4,.mov,.mkv,.webm,.avi,.m4v" : ""}">
         <button class="primary" onclick="uploadDeviceMedia('${esc(id)}')">上传</button></div>
       <p class="muted">${uploadHint()}</p>
       <div id="plBox"></div>`;
-  }
-  // 静态图片区域（如 logo）由服务端合成进画面，与播放列表无关
-  const imgRegions = (tpl?.regions || []).filter(r => r.type === "image");
-  if (imgRegions.length) {
-    window._bindings = { ...(devices.find(x => x.id === id).display.bindings || {}) };
-    html += `<div class="row" style="margin-top:12px"><b>固定图片区域</b><span class="muted">由服务端合成进画面（如 logo）</span></div>` +
-      imgRegions.map(r => `<div class="row">区域 <b>${esc(r.id)}</b>
-        <select onchange="window._bindings['${esc(r.id)}']=this.value"><option value="">（未绑定）</option>
-        ${uploads.map(u => `<option value="${esc(u)}" ${window._bindings[r.id] === u ? "selected" : ""}>${esc(u)}</option>`).join("")}</select></div>`).join("") +
-      `<div class="row"><input type="file" id="upFile" accept=".png,.jpg,.jpeg">
-        <button onclick="doUpload(() => renderContentBody('${esc(id)}'))">上传图片</button></div>`;
-  } else {
-    window._bindings = {};
   }
   box.innerHTML = html;
   renderPlaylist(id);
@@ -354,8 +340,7 @@ function uploadHint() {
       （${v.max_w}×${v.max_h} 以内、${v.max_fps}fps、码率 ≤ ${(v.max_bitrate_k / 1000).toFixed(0)}Mbps、静音），
       转码在后台进行，完成后自动加入播放列表。`;
   }
-  return img + ` 视频 mp4/mov，不超过 500MB，<b>编码必须是 H.264</b>（服务端未装 ffmpeg，不能转码：
-    H.265 会被拒收，高码率原片会让设备过热）。视频一律静音播放。`;
+  return img + ` <b>暂不能上传视频</b>：服务端未安装 ffmpeg，未转码的视频会让设备过热。`;
 }
 
 const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
@@ -480,25 +465,16 @@ async function deleteMedia(id, name) {
 
 async function saveContent(id) {
   const mode = document.querySelector('input[name=mode]:checked').value;
-  const body = { mode, mirror: $("#mirrorChk").checked, bindings: {} };
+  const body = { mode, mirror: $("#mirrorChk").checked };
   if (mode === "template") {
     body.template_id = $("#ovSel").value;
     if (!body.template_id) { toast("请选择模板"); return; }
   }
-  for (const [k, v] of Object.entries(window._bindings || {})) if (v) body.bindings[k] = v;
   await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
   if (plDirty) await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) });
   toast("已保存"); closeModal(); refresh();
 }
 
-async function doUpload(after) {
-  const f = $("#upFile").files[0];
-  if (!f) { toast("请先选择文件"); return; }
-  const fd = new FormData(); fd.append("file", f);
-  const r = await api("/api/v1/admin/uploads", { method: "POST", body: fd });
-  if (!uploads.includes(r.name)) uploads.push(r.name);
-  toast("已上传 " + r.name); if (after) after();
-}
 async function previewDevice(id) {
   const d = devices.find(x => x.id === id);
   const tid = d.active_template || effectiveTplID(d);
@@ -514,7 +490,7 @@ async function showPreview(url, target) {
 }
 
 // ================= 模板 / 全局 / 时段 =================
-const REGION_LABEL = { attribute: "属性", text: "文字", image: "固定图片", media: "播放内容" };
+const REGION_LABEL = { attribute: "属性", text: "文字", media: "播放内容" };
 function renderTemplates() {
   $("#globalSel").innerHTML =
     templates.map(t => `<option value="${esc(t.id)}" ${global.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -589,7 +565,7 @@ function editTemplateJSON(id) {
       { id: "attr", x: 0, y: 0, w: 720, h: 900, type: "attribute", key: "room", font_size: 160, color: "#FFFFFF", bg: "#1E3A8A", align: "center" },
       { id: "media", x: 720, y: 0, w: 720, h: 900, type: "media" }] };
   modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2><textarea id="tplJSON">${esc(JSON.stringify(sample, null, 2))}</textarea>
-    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、image（服务端合成的固定图片）、
+    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、
       media（设备播放的图片/视频，每个模板至多一个）。</p>
     <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button></div>`);
 }
@@ -654,7 +630,7 @@ async function deleteFirmware(v) {
   await api(`/api/v1/admin/firmware/${v}`, { method: "DELETE" }); toast("已删除"); refresh();
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.name)} <span class="muted">${esc(d.id)} · 当前 ${esc(d.agent_version || "?")}</span></label>`).join("");
+  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>
