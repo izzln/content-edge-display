@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -38,17 +39,23 @@ type Agent struct {
 	failures  int
 
 	updateFailedAt map[string]time.Time
-	verified       bool // 本次运行是否已确认过版本（首个成功心跳后）
+	verified       bool         // 本次运行是否已确认过版本（首个成功心跳后）
+	clock          *serverClock // 签名用的时间以服务端为准，见 clock.go
 }
 
 // New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
+	clock := newServerClock()
 	return &Agent{
-		cfg:            cfg,
-		player:         p,
-		http:           &http.Client{Timeout: 10 * time.Minute}, // 覆盖大文件下载
+		cfg:    cfg,
+		player: p,
+		http: &http.Client{
+			Timeout:   10 * time.Minute, // 覆盖大文件下载
+			Transport: clockTransport{base: http.DefaultTransport, clock: clock},
+		},
 		startedAt:      time.Now(),
 		updateFailedAt: map[string]time.Time{},
+		clock:          clock,
 	}
 }
 
@@ -106,6 +113,12 @@ func (a *Agent) Run(ctx context.Context) error {
 			switch {
 			case errors.Is(err, ErrRestartForUpdate):
 				return err
+			case errors.Is(err, errUnknownDevice):
+				// 服务端没有这台设备了（运营方在后台删了它）：重新注册，而不是一直 401 下去
+				log.Printf("agent: %v; re-registering", err)
+				if err := a.registerLoop(ctx); err != nil {
+					return err
+				}
 			case err != nil:
 				a.failures++
 				log.Printf("agent: poll failed (attempt %d): %v", a.failures, err)
@@ -161,6 +174,22 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 			delay *= 2
 		}
 	}
+}
+
+// errUnknownDevice 表示服务端没有这台设备的记录（被后台删除了），需要重新注册。
+var errUnknownDevice = errors.New("server does not know this device")
+
+// statusError 把非预期的响应变成错误，带上服务端给出的原因（401 时说明是时钟、密钥还是设备已删除）。
+func statusError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	msg := strings.TrimSpace(string(body))
+	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "unknown device") {
+		return fmt.Errorf("%w (%s)", errUnknownDevice, msg)
+	}
+	if msg == "" {
+		return fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	return fmt.Errorf("unexpected status %s: %s", resp.Status, msg)
 }
 
 // errKeyConflict 表示服务端已有同编号、不同密钥的设备记录。
@@ -229,7 +258,7 @@ func (a *Agent) newRequest(ctx context.Context, method, urlPath string, body io.
 	if err != nil {
 		return nil, err
 	}
-	ts := sign.Now()
+	ts := strconv.FormatInt(a.clock.Now().Unix(), 10)
 	req.Header.Set(sign.HeaderDeviceID, a.identity.DeviceID)
 	req.Header.Set(sign.HeaderTimestamp, ts)
 	req.Header.Set(sign.HeaderSign, sign.Sign(a.identity.Secret, ts, method, req.URL.Path))
@@ -257,7 +286,7 @@ func (a *Agent) PollOnce(ctx context.Context) (bool, error) {
 		return false, nil
 	case http.StatusOK:
 	default:
-		return false, fmt.Errorf("manifest: unexpected status %s", resp.Status)
+		return false, fmt.Errorf("manifest: %w", statusError(resp))
 	}
 
 	var m manifest.Manifest
@@ -416,10 +445,10 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("heartbeat: unexpected status %s", resp.Status)
+		return fmt.Errorf("heartbeat: %w", statusError(resp))
 	}
+	io.Copy(io.Discard, resp.Body)
 	if !a.verified {
 		a.verified = true
 		a.commitUpdate()

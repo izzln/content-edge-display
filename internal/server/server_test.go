@@ -226,3 +226,35 @@ func TestAdminTokenRequired(t *testing.T) {
 		t.Fatalf("expected 200 with token, got %d", w.Code)
 	}
 }
+
+// 401 要说明原因：时钟偏差、密钥不对、设备不存在的处理办法完全不同。
+func TestAuthFailureExplainsWhy(t *testing.T) {
+	s, _ := newTestServer(t)
+	h := s.Handler()
+	get := func(r *http.Request) string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", w.Code)
+		}
+		return w.Body.String()
+	}
+
+	if body := get(signedRequestAt(time.Now().Add(-2*time.Hour), "GET", "/api/v1/device/manifest", nil)); !strings.Contains(body, "clock skew") || !strings.Contains(body, "server time") {
+		t.Fatalf("时钟偏差应说明两边时间：%s", body)
+	}
+	r := signedRequest("GET", "/api/v1/device/manifest", nil)
+	r.Header.Set(sign.HeaderSign, sign.Sign("wrong-key", r.Header.Get(sign.HeaderTimestamp), "GET", "/api/v1/device/manifest"))
+	if body := get(r); !strings.Contains(body, "bad signature") {
+		t.Fatalf("密钥不对应说明：%s", body)
+	}
+	r = signedRequest("GET", "/api/v1/device/manifest", nil)
+	r.Header.Set(sign.HeaderDeviceID, "deleted-device")
+	if body := get(r); !strings.Contains(body, "unknown device") {
+		t.Fatalf("设备不存在应说明（设备端据此自动重新注册）：%s", body)
+	}
+	// 下载接口同样
+	if body := get(signedRequestAt(time.Now().Add(time.Hour), "GET", "/media/"+testDeviceID+"/a.jpg", nil)); !strings.Contains(body, "clock skew") {
+		t.Fatalf("下载接口也应说明原因：%s", body)
+	}
+}

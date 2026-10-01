@@ -61,7 +61,7 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 	case http.StatusOK: // 服务器不认续传或从头下载
 		f, err = os.Create(part)
 	default:
-		return fmt.Errorf("unexpected status %s", resp.Status)
+		return statusError(resp)
 	}
 	if err != nil {
 		return err

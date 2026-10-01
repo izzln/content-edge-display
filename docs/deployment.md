@@ -242,6 +242,31 @@ mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -
 密钥在首启随机生成，只存在于设备与服务端两处；`enroll_token` 仅用于首次注册。
 同 ID 不同密钥的注册会被拒绝（409），防止冒名顶替。
 
+#### 注册成功，但轮询/心跳报 401 unauthorized
+
+签名请求带时间戳，服务端只认与自己相差 ±5 分钟以内的（防重放），注册请求不签名所以不受影响。
+服务端日志（`journalctl -u display-server | grep auth:`）和设备日志都会写明原因：
+
+| 原因 | 说明 | 处理 |
+|---|---|---|
+| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 新版代理已自动按服务端时间签名，不再受影响（见下） |
+| `bad signature` | 设备密钥与服务端登记的不一致 | 见下一节"另一把密钥" |
+| `unknown device` | 设备在后台被删除了 | 新版代理会自动重新注册 |
+
+新版代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不再依赖设备时钟**；
+偏差超过 1 分钟会在日志里提示一次。
+
+**旧版代理的设备**收不到 OTA（OTA 本身也要签名轮询），先在设备上按服务端时间校一次钟，再从后台下发新版本：
+
+```sh
+date -u -s "$(curl -sI http://<服务器>:9000/admin | sed -n 's/^[Dd]ate: //p')"
+systemctl restart display-agent
+```
+
+想让设备日志时间也准，可在服务器上跑一个 NTP 服务（如 `apt install chrony`，`/etc/chrony/chrony.conf`
+加 `allow 192.168.0.0/16` 和 `local stratum 10`），设备的 `/etc/systemd/timesyncd.conf` 写 `NTP=<服务器IP>`。
+这只影响日志时间，不影响播放与认证。
+
 #### 设备报"在服务端登记的是另一把密钥"
 
 说明设备手上的密钥与服务端记录的不一样，通常是 `/var/lib/display-agent/identity.json` 丢了：
