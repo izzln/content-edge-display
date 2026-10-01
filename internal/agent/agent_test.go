@@ -298,31 +298,20 @@ func TestLayoutBecomesOverlayScene(t *testing.T) {
 	if sc.Media != (player.Rect{X: 720, Y: 0, W: 720, H: 900}) {
 		t.Fatalf("媒体区应是右半屏，得到 %+v", sc.Media)
 	}
-	// 叠加层必须是解好的 BGRA 原始像素：w*h*4 字节，mpv 直接 mmap 用
-	if sc.Overlay.W != 1440 || sc.Overlay.H != 900 {
-		t.Fatalf("叠加层尺寸错误：%dx%d", sc.Overlay.W, sc.Overlay.H)
-	}
-	fi, err := os.Stat(sc.Overlay.Path)
+	// 叠加图下载下来即可；按实际输出分辨率光栅化是播放器的事（屏幕未必按画布尺寸输出）
+	fi, err := os.Stat(sc.Overlay.PNG)
 	if err != nil {
-		t.Fatalf("叠加层数据文件不存在：%v", err)
+		t.Fatalf("叠加图没有下载下来：%v", err)
 	}
-	if want := int64(sc.Overlay.W * sc.Overlay.H * 4); fi.Size() != want {
-		t.Fatalf("叠加层数据 %d 字节，期望 %d", fi.Size(), want)
-	}
-	// 媒体区那块必须是全透明的，否则视频透不出来
-	raw, err := os.ReadFile(sc.Overlay.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	center := ((sc.Media.Y+sc.Media.H/2)*sc.Overlay.W + sc.Media.X + sc.Media.W/2) * 4
-	if raw[center+3] != 0 {
-		t.Fatalf("媒体区中心的 alpha = %d，应为 0（全透明）", raw[center+3])
-	}
-	if left := ((450)*sc.Overlay.W + 100) * 4; raw[left+3] != 0xFF {
-		t.Fatalf("属性区的 alpha = %d，应为 255（完全不透明）", raw[left+3])
+	if fi.Size() == 0 {
+		t.Fatal("叠加图是空文件")
 	}
 
-	// 缓存清理不能顺手把叠加图和它的解码产物删掉，否则每次巡检都要重下重解
+	// 缓存清理不能顺手把叠加图和它的光栅化产物删掉，否则每次巡检都要重下重做
+	derived := sc.Overlay.PNG + ".1920x1080.bgra"
+	if err := os.WriteFile(derived, []byte("raw"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(a.currentPath())
 	if err != nil {
 		t.Fatal(err)
@@ -332,10 +321,19 @@ func TestLayoutBecomesOverlayScene(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.cleanup(&cur)
-	for _, path := range []string{sc.Overlay.Path, strings.TrimSuffix(sc.Overlay.Path, overlaySuffix)} {
+	for _, path := range []string{sc.Overlay.PNG, derived} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("清理时误删了仍被引用的文件 %s：%v", filepath.Base(path), err)
 		}
+	}
+	// 不再被引用的派生文件要清掉
+	stale := filepath.Join(a.mediaDir(), "deadbeef_old.png.1440x900.bgra")
+	if err := os.WriteFile(stale, []byte("raw"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.cleanup(&cur)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("不再被引用的派生文件应当被清理")
 	}
 
 	// 断网重启：从本地缓存恢复时叠加层也要一起恢复

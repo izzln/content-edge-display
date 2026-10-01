@@ -16,6 +16,7 @@ import (
 
 	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/store"
+	"github.com/izzln/content-edge-display/internal/transcode"
 	"github.com/izzln/content-edge-display/internal/web"
 )
 
@@ -25,6 +26,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin", s.handleAdminUI)
 	mux.HandleFunc("GET /admin/{$}", s.handleAdminUI)
 
+	mux.HandleFunc("GET /api/v1/admin/info", s.adminRead(s.handleInfo))
 	mux.HandleFunc("GET /api/v1/admin/devices", s.adminRead(s.handleAdminDevices))
 	mux.HandleFunc("DELETE /api/v1/admin/devices/{id}", s.adminWrite(s.handleDeleteDevice))
 	mux.HandleFunc("GET /api/v1/admin/devices/{id}/attributes", s.adminRead(s.handleGetAttrs))
@@ -50,6 +52,22 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/firmware", s.adminWrite(s.handleUploadFirmware))
 	mux.HandleFunc("DELETE /api/v1/admin/firmware/{version}", s.adminWrite(s.handleDeleteFirmware))
 	mux.HandleFunc("PUT /api/v1/admin/rollout", s.adminWrite(s.handleRollout))
+}
+
+// handleInfo 返回服务端能力，后台据此提示（例如没装 ffmpeg 时视频不会转码）。
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	spec := transcode.DefaultSpec()
+	info := map[string]any{
+		"transcode": s.encoder != nil,
+		"video_spec": map[string]int{
+			"max_w": spec.MaxW, "max_h": spec.MaxH, "max_fps": spec.MaxFPS,
+			"bitrate_k": spec.BitrateK, "max_bitrate_k": spec.MaxBitrateK,
+		},
+	}
+	if s.encoder != nil {
+		info["ffmpeg"] = s.encoder.Version()
+	}
+	writeJSON(w, info)
 }
 
 func (s *Server) handleAdminUI(w http.ResponseWriter, r *http.Request) {
@@ -170,6 +188,7 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastSeen, dev.ID)
 	delete(s.lastHB, dev.ID)
 	s.mu.Unlock()
+	s.jobs.removeDevice(dev.ID)
 	os.RemoveAll(filepath.Join(s.renderedDir(), dev.ID))
 	os.RemoveAll(s.deviceMediaDir(dev.ID))
 	w.WriteHeader(http.StatusNoContent)

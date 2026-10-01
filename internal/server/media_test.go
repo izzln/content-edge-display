@@ -63,6 +63,11 @@ func tinyPNG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
 	img.SetRGBA(0, 0, color.RGBA{0xFF, 0, 0, 0xFF})
+	return encodePNG(t, img)
+}
+
+func encodePNG(t *testing.T, img image.Image) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
@@ -97,8 +102,9 @@ func uploadMedia(t *testing.T, h http.Handler, deviceID string, files ...upload)
 }
 
 type uploadResult struct {
-	Accepted []string `json:"accepted"`
-	Rejected []struct {
+	Accepted    []string `json:"accepted"`
+	Transcoding []string `json:"transcoding"`
+	Rejected    []struct {
 		Name   string `json:"name"`
 		Reason string `json:"reason"`
 	} `json:"rejected"`
@@ -160,7 +166,8 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 		upload{"promo.jpg", tinyPNG(t)}, // 后缀是 jpg 但内容是 PNG：解码器认内容，应当通过
 		upload{"clip.mp4", mp4Fixture("avc1")},
 		upload{"hevc.mp4", mp4Fixture("hvc1")},
-		upload{"huge.png", pngHeaderFixture(4000, 3100)},
+		upload{"huge.png", pngHeaderFixture(8000, 7000)},    // 5600 万像素，超过服务端上限
+		upload{"truncated.png", pngHeaderFixture(800, 600)}, // 只有文件头，内容被截断
 		upload{"notes.txt", []byte("hello")},
 		upload{"broken.png", []byte("not a png at all")},
 	))
@@ -172,10 +179,11 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 		reasons[r.Name] = r.Reason
 	}
 	for name, want := range map[string]string{
-		"hevc.mp4":   "H.264",
-		"huge.png":   "像素过大",
-		"notes.txt":  "不支持的文件类型",
-		"broken.png": "无法解码",
+		"hevc.mp4":      "H.264",
+		"huge.png":      "像素过大",
+		"notes.txt":     "不支持的文件类型",
+		"broken.png":    "无法解码",
+		"truncated.png": "无法解码",
 	} {
 		if !strings.Contains(reasons[name], want) {
 			t.Errorf("%s 的拒收原因应包含 %q，得到 %q", name, want, reasons[name])
@@ -183,7 +191,7 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 	}
 	// 被拒的文件不能留在目录里
 	w := do(t, h, adminReq("GET", dev, nil), http.StatusOK)
-	for _, bad := range []string{"hevc.mp4", "huge.png", "notes.txt", "broken.png"} {
+	for _, bad := range []string{"hevc.mp4", "huge.png", "notes.txt", "broken.png", "truncated.png"} {
 		if strings.Contains(w.Body.String(), bad) {
 			t.Errorf("被拒的 %s 不该出现在播放列表里：%s", bad, w.Body.String())
 		}

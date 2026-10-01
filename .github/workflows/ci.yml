@@ -36,6 +36,10 @@ jobs:
             exit 1
           fi
 
+      # 转码测试需要真实 ffmpeg（含 libx264/libx265）；没装时那些用例会跳过，所以这里显式装上
+      - name: 安装 ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
       - run: go vet ./...
       - run: go test ./...
 

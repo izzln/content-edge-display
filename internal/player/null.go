@@ -36,6 +36,8 @@ func (p *Null) Scene() Scene {
 	return p.scene
 }
 
+func (p *Null) Stats() Stats { return Stats{} }
+
 func (p *Null) NowPlaying() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

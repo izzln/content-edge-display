@@ -3,6 +3,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/sign"
 	"github.com/izzln/content-edge-display/internal/store"
+	"github.com/izzln/content-edge-display/internal/transcode"
 )
 
 // OnlineWindow 内有心跳视为设备在线。
@@ -50,6 +52,9 @@ type Config struct {
 	AdminToken  string `json:"admin_token"`
 	EnrollToken string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
 	Timezone    string `json:"timezone"`     // 时段计划时区，默认系统时区
+	// FFmpegPath 指定 ffmpeg；留空在 PATH 里找。找不到时视频不转码，只做编码校验
+	// （非 H.264 拒收），后台会醒目提示——高码率原片会让设备过热，生产环境应装 ffmpeg。
+	FFmpegPath string `json:"ffmpeg_path,omitempty"`
 }
 
 // resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
@@ -111,6 +116,12 @@ type Heartbeat struct {
 	Playing    string `json:"playing"`
 	PlayerVer  string `json:"player_ver"`
 	IP         string `json:"ip,omitempty"`
+	// HWDec 是设备端 mpv 实际使用的硬解方式；"no" = 软解（H3 上带不动 1440×900，
+	// 会卡顿发热甚至过热关机），空串 = 问不到（如 null 播放器）。
+	HWDec string `json:"hwdec,omitempty"`
+	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
+	OutputW int `json:"output_w,omitempty"`
+	OutputH int `json:"output_h,omitempty"`
 }
 
 // DeviceStatus 是管理接口返回的设备状态。
@@ -142,6 +153,10 @@ type Server struct {
 	lastSeen map[string]time.Time
 	lastHB   map[string]Heartbeat
 
+	encoder videoEncoder // nil 表示没有 ffmpeg：视频只校验不转码
+	jobs    *jobQueue
+	stop    context.CancelFunc
+
 	now func() time.Time // 测试注入
 }
 
@@ -167,7 +182,9 @@ func New(cfg *Config) (*Server, error) {
 		now:      time.Now,
 	}
 	// 首次启动时把需要的目录都建出来（media_root 也在内：设备媒体文件放这里）。
-	for _, dir := range []string{cfg.MediaRoot, s.uploadsDir(), s.renderedDir(), s.firmwareDir()} {
+	// incoming/ 是待转码原片的暂存区：转码任务只在内存里，重启后它们已无人认领，清掉。
+	os.RemoveAll(s.incomingDir())
+	for _, dir := range []string{cfg.MediaRoot, s.uploadsDir(), s.renderedDir(), s.firmwareDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
@@ -182,7 +199,26 @@ func New(cfg *Config) (*Server, error) {
 	if err := s.seedDefaults(); err != nil {
 		return nil, err
 	}
+
+	s.jobs = newJobQueue()
+	if enc := transcode.Find(cfg.FFmpegPath); enc != nil {
+		s.encoder = enc
+		log.Printf("视频转码已启用：%s", enc.Version())
+	} else {
+		log.Printf("warning: 未找到 ffmpeg，上传的视频将不转码、只校验编码。高码率原片会让设备过热，" +
+			"生产环境请安装 ffmpeg（apt install ffmpeg）或在 server.json 里配置 ffmpeg_path")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.stop = cancel
+	go s.runTranscoder(ctx)
 	return s, nil
+}
+
+// Close 停止后台转码协程（正在跑的 ffmpeg 会被杀掉）。
+func (s *Server) Close() {
+	if s.stop != nil {
+		s.stop()
+	}
 }
 
 // seedDefaults 首次启动时播种一个可用的左右分屏模板并设为全局默认；
@@ -531,8 +567,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			log.Printf("heartbeat: persist device %s failed: %v", dev.ID, err)
 		}
 	}
-	log.Printf("heartbeat device=%s version=%s agent=%s uptime=%ds disk_free=%dMB playing=%q",
-		dev.ID, hb.Version, hb.PlayerVer, hb.UptimeS, hb.DiskFreeMB, hb.Playing)
+	log.Printf("heartbeat device=%s version=%s agent=%s uptime=%ds disk_free=%dMB temp=%dC hwdec=%s out=%dx%d playing=%q",
+		dev.ID, hb.Version, hb.PlayerVer, hb.UptimeS, hb.DiskFreeMB, hb.TempC,
+		hb.HWDec, hb.OutputW, hb.OutputH, hb.Playing)
 	w.WriteHeader(http.StatusNoContent)
 }
 

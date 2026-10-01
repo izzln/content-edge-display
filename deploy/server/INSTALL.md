@@ -23,6 +23,10 @@ cp server.json /srv/display/
 apt install -y fonts-noto-cjk
 cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /srv/display/fonts/
 
+# 视频转码：上传的视频统一转成 1440×900 以内、≤4Mbps、30fps 的 H.264。
+# 不装也能跑，但视频会原样下发——高码率原片会让设备过热、降频甚至自动关机。
+apt install -y ffmpeg
+
 #   server.json 里的 admin_token / enroll_token 已由 make 生成填好；
 #   若是从 GitHub Releases 下载的包，里面是占位值 change-me，服务端会拒绝启动，
 #   需在构建机上执行 make tokens 生成后替换。

@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,12 +19,13 @@ import (
 
 // fakeMPV 是一个最小的 mpv JSON IPC 桩：支持 get_property playlist / loadlist / stop。
 type fakeMPV struct {
-	mu        sync.Mutex
-	playlist  []string
-	loadlists int
-	imageDur  string            // 最近一次 set_property image-display-duration 的值
-	props     map[string]string // 最近一次 set_property 的其它属性值
-	overlays  []string          // 收到的 overlay-add / overlay-remove 命令（原样拼接）
+	mu         sync.Mutex
+	playlist   []string
+	loadlists  int
+	imageDur   string            // 最近一次 set_property image-display-duration 的值
+	props      map[string]string // 最近一次 set_property 的其它属性值
+	osdW, osdH int               // mpv 的实际输出分辨率（0 表示用默认 1440x900）
+	overlays   []string          // 收到的 overlay-add / overlay-remove 命令（原样拼接）
 
 	ln net.Listener
 }
@@ -63,6 +67,15 @@ func (f *fakeMPV) serve(conn net.Conn, playlistPath string) {
 
 		switch name {
 		case "get_property":
+			if prop, _ := req.Command[1].(string); prop == "osd-dimensions" {
+				f.mu.Lock()
+				w, h := f.osdW, f.osdH
+				f.mu.Unlock()
+				if w == 0 {
+					w, h = 1440, 900 // 默认按画布尺寸输出
+				}
+				resp["data"] = map[string]any{"w": float64(w), "h": float64(h)}
+			}
 			if prop, _ := req.Command[1].(string); prop == "playlist" {
 				f.mu.Lock()
 				entries := make([]any, 0, len(f.playlist))
@@ -135,7 +148,7 @@ func newTestMPV(t *testing.T) (*MPV, string, string) {
 	dir := t.TempDir() // 短路径：unix socket 有长度限制
 	sock := filepath.Join(dir, "mpv.sock")
 	playlist := filepath.Join(dir, "playlist.m3u")
-	return NewMPV(sock, playlist, 10, nil), sock, playlist
+	return NewMPV(sock, playlist, nil), sock, playlist
 }
 
 // 回归测试：代理启动时 mpv 的 IPC 尚未就绪（Load 必然失败），
@@ -296,6 +309,27 @@ func TestImageDurationAppliedOnce(t *testing.T) {
 	}
 }
 
+// overlayPNG 造一张 w×h 的叠加图：左半不透明、右半（媒体区）全透明。
+func overlayPNG(t *testing.T, dir string, w, h int) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w/2; x++ {
+			img.SetRGBA(x, y, color.RGBA{0x1E, 0x3A, 0x8A, 0xFF})
+		}
+	}
+	path := filepath.Join(dir, "ovl.png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func (f *fakeMPV) prop(name string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -309,7 +343,7 @@ func (f *fakeMPV) overlayCmds() []string {
 }
 
 func TestMarginRatios(t *testing.T) {
-	ovl := &Overlay{Path: "/c/o.bgra", W: 1440, H: 900}
+	ovl := &Overlay{PNG: "/c/o.png"}
 	cases := []struct {
 		name        string
 		scene       Scene
@@ -334,10 +368,11 @@ func TestMarginRatios(t *testing.T) {
 func TestOverlayAppliedAndReappliedAfterRestart(t *testing.T) {
 	p, sock, playlistPath := newTestMPV(t)
 	fake := startFakeMPV(t, sock, playlistPath)
+	pngPath := overlayPNG(t, filepath.Dir(playlistPath), 1440, 900)
 
 	scene := Scene{
 		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
-		Overlay: &Overlay{Path: "/c/ovl.bgra", W: 1440, H: 900},
+		Overlay: &Overlay{PNG: pngPath},
 		Media:   Rect{720, 0, 720, 900},
 		CanvasW: 1440, CanvasH: 900,
 	}
@@ -352,7 +387,7 @@ func TestOverlayAppliedAndReappliedAfterRestart(t *testing.T) {
 	if got := fake.prop("video-margin-ratio-right"); got != "0.000000" {
 		t.Fatalf("右留白 = %q，期望 0.000000", got)
 	}
-	want := "overlay-add 0 0 0 /c/ovl.bgra 0 bgra 1440 900 5760"
+	want := fmt.Sprintf("overlay-add 0 0 0 %s.1440x900.bgra 0 bgra 1440 900 5760", pngPath)
 	if cmds := fake.overlayCmds(); len(cmds) != 1 || cmds[0] != want {
 		t.Fatalf("叠加层命令 = %v，期望 [%s]", cmds, want)
 	}
@@ -368,11 +403,66 @@ func TestOverlayAppliedAndReappliedAfterRestart(t *testing.T) {
 	// mpv 重启会丢掉叠加层（OSD 不跨进程存活），巡检必须重贴
 	p.setLoaded(false)
 	p.mu.Lock()
-	p.layoutApplied = false
+	p.appliedLayout = ""
 	p.mu.Unlock()
 	p.ensureOnce()
 	if cmds := fake.overlayCmds(); len(cmds) != 2 || cmds[1] != want {
 		t.Fatalf("mpv 重启后应重贴叠加层，实际 %v", cmds)
+	}
+}
+
+// 回归：显示屏实际输出分辨率不等于模板画布时（面板 EDID 报 1920×1080、内核没吃下
+// video= 参数、换了块屏），叠加图必须按实际输出分辨率重做，否则整个画面错位。
+func TestOverlayRasterizedToActualOutputSize(t *testing.T) {
+	p, sock, playlistPath := newTestMPV(t)
+	fake := startFakeMPV(t, sock, playlistPath)
+	fake.mu.Lock()
+	fake.osdW, fake.osdH = 1920, 1080 // 屏幕实际按 1080p 输出
+	fake.mu.Unlock()
+	pngPath := overlayPNG(t, filepath.Dir(playlistPath), 1440, 900)
+
+	scene := Scene{
+		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
+		Overlay: &Overlay{PNG: pngPath},
+		Media:   Rect{720, 0, 720, 900},
+		CanvasW: 1440, CanvasH: 900,
+	}
+	if err := p.Load(scene); err != nil {
+		t.Fatal(err)
+	}
+	p.ensureOnce()
+
+	want := fmt.Sprintf("overlay-add 0 0 0 %s.1920x1080.bgra 0 bgra 1920 1080 7680", pngPath)
+	if cmds := fake.overlayCmds(); len(cmds) != 1 || cmds[0] != want {
+		t.Fatalf("叠加层应按实际输出分辨率下发，得到 %v\n期望 [%s]", cmds, want)
+	}
+	// 留白是比例，与分辨率无关，仍然是半屏
+	if got := fake.prop("video-margin-ratio-left"); got != "0.500000" {
+		t.Fatalf("左留白 = %q，期望 0.500000", got)
+	}
+	// 落盘的原始像素必须正好是 1920×1080×4，且媒体区仍然透明
+	raw, err := os.ReadFile(pngPath + ".1920x1080.bgra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1920*1080*4 {
+		t.Fatalf("光栅化结果 %d 字节，期望 %d", len(raw), 1920*1080*4)
+	}
+	if a := raw[(540*1920+1440)*4+3]; a != 0 {
+		t.Fatalf("媒体区（右半）alpha = %d，应为 0（全透明）", a)
+	}
+	if a := raw[(540*1920+200)*4+3]; a != 0xFF {
+		t.Fatalf("属性区（左半）alpha = %d，应为 255", a)
+	}
+
+	// 分辨率变了要重做一张，而不是继续用旧的
+	fake.mu.Lock()
+	fake.osdW, fake.osdH = 1440, 900
+	fake.mu.Unlock()
+	p.ensureOnce()
+	cmds := fake.overlayCmds()
+	if len(cmds) != 2 || !strings.Contains(cmds[1], "1440x900.bgra 0 bgra 1440 900") {
+		t.Fatalf("输出分辨率变化后应重做叠加图，实际 %v", cmds)
 	}
 }
 
@@ -383,7 +473,7 @@ func TestSwitchToFullscreenRemovesOverlay(t *testing.T) {
 
 	if err := p.Load(Scene{
 		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
-		Overlay: &Overlay{Path: "/c/ovl.bgra", W: 1440, H: 900},
+		Overlay: &Overlay{PNG: overlayPNG(t, filepath.Dir(playlistPath), 1440, 900)},
 		Media:   Rect{720, 0, 720, 900},
 		CanvasW: 1440, CanvasH: 900,
 	}); err != nil {
@@ -409,7 +499,7 @@ func TestPlaylistChangeKeepsOverlay(t *testing.T) {
 	p, sock, playlistPath := newTestMPV(t)
 	fake := startFakeMPV(t, sock, playlistPath)
 
-	ovl := &Overlay{Path: "/c/ovl.bgra", W: 1440, H: 900}
+	ovl := &Overlay{PNG: overlayPNG(t, filepath.Dir(playlistPath), 1440, 900)}
 	base := Scene{Overlay: ovl, Media: Rect{720, 0, 720, 900}, CanvasW: 1440, CanvasH: 900}
 
 	first := base
