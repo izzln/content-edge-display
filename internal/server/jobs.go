@@ -172,12 +172,13 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 	defer os.Remove(j.src)
 
 	start := time.Now()
-	total := s.encoder.Duration(jctx, j.src)
+	enc := s.videoEncoder() // 任务只在有转码器时入队，转码器一旦可用就不会再变回 nil
+	total := enc.Duration(jctx, j.src)
 	dir := s.deviceMediaDir(j.deviceID)
 	dst := filepath.Join(dir, j.name)
 	err := os.MkdirAll(dir, 0o755)
 	if err == nil {
-		err = s.encoder.Video(jctx, j.src, dst, transcode.DefaultSpec(), func(sec float64) {
+		err = enc.Video(jctx, j.src, dst, transcode.DefaultSpec(), func(sec float64) {
 			if total > 0 {
 				p := int(sec * 100 / total)
 				s.jobs.update(j, func(j *transcodeJob) { j.progress = min(p, 99) })

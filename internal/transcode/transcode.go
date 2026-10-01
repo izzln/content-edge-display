@@ -11,6 +11,7 @@ package transcode
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -18,6 +19,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -69,25 +71,44 @@ type Encoder struct {
 	fpsMax  bool // ffmpeg 是否支持 -fpsmax（5.1 起）
 }
 
-// Find 定位 ffmpeg：bin 为空时在 PATH 里找。找不到返回 nil（调用方据此退化为只校验不转码）。
-func Find(bin string) *Encoder {
+// Find 定位并试运行 ffmpeg：bin 为空时在 PATH 里找。不可用时返回的错误说明了具体原因。
+//
+// "明明装了却说找不到"几乎都是运行环境不同：服务端由 systemd 以 display 用户启动，
+// PATH 只有 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin，没有登录 shell 里的
+// /snap/bin、~/bin、/opt/…；装在 /root 下的文件 display 用户也读不了；snap 版 ffmpeg
+// 要往 $HOME/snap 写数据，系统用户没有家目录会直接失败。所以错误里带上实际 PATH 与运行用户。
+func Find(bin string) (*Encoder, error) {
 	if bin == "" {
 		bin = "ffmpeg"
 	}
 	path, err := exec.LookPath(bin)
 	if err != nil {
-		return nil
+		if errors.Is(err, exec.ErrNotFound) && !strings.ContainsRune(bin, os.PathSeparator) {
+			return nil, fmt.Errorf("在 PATH 里找不到 %s（服务进程的 PATH=%s，运行用户 %s）", bin, os.Getenv("PATH"), currentUser())
+		}
+		return nil, fmt.Errorf("%s 不可用（运行用户 %s）：%v", bin, currentUser(), err)
 	}
-	e := &Encoder{bin: path}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "-hide_banner", "-version").Output()
+	out, err := exec.CommandContext(ctx, path, "-hide_banner", "-version").CombinedOutput()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("找到了 %s，但以用户 %s 运行失败（%v）：%s", path, currentUser(), err, firstLine(out))
 	}
-	e.version = strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	e := &Encoder{bin: path, version: firstLine(out)}
 	e.fpsMax = e.supportsFPSMax()
-	return e
+	return e, nil
+}
+
+func firstLine(b []byte) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	return line
+}
+
+func currentUser() string {
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return strconv.Itoa(os.Getuid())
 }
 
 // supportsFPSMax 试跑一帧看 -fpsmax 认不认。老版本 ffmpeg（< 5.1）没有这个选项，

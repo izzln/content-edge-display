@@ -55,14 +55,18 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	spec := transcode.DefaultSpec()
 	info := map[string]any{
-		"transcode": s.encoder != nil,
+		"transcode": false,
 		"video_spec": map[string]int{
 			"max_w": spec.MaxW, "max_h": spec.MaxH, "max_fps": spec.MaxFPS,
 			"bitrate_k": spec.BitrateK, "max_bitrate_k": spec.MaxBitrateK,
 		},
 	}
-	if s.encoder != nil {
-		info["ffmpeg"] = s.encoder.Version()
+	if enc := s.videoEncoder(); enc != nil {
+		info["transcode"], info["ffmpeg"] = true, enc.Version()
+	} else {
+		s.encMu.Lock()
+		info["ffmpeg_error"] = s.encoderErr
+		s.encMu.Unlock()
 	}
 	writeJSON(w, info)
 }

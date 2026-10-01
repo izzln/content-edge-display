@@ -33,6 +33,7 @@ apt install -y ffmpeg
 #   media/ data/ 会在首次启动时自动创建
 
 useradd -r -s /usr/sbin/nologin display 2>/dev/null || true
+sudo -u display ffmpeg -version | head -1   # 必须以服务的运行用户能跑通（见下方说明）
 chown -R display:display /srv/display
 install -m 0644 display-server.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now display-server
@@ -48,6 +49,14 @@ systemctl daemon-reload && systemctl enable --now display-server
   fonts/              渲染用字体
   data/               服务端状态：state.json、firmware/、rendered/、incoming/（待转码原片）
 ```
+
+> **"明明装了 ffmpeg，后台却说不可用"**：服务由 systemd 以 `display` 用户启动，PATH 只有
+> `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`，**不是你登录 shell 的环境**。常见原因：
+> snap 版 ffmpeg（在 `/snap/bin`，且系统用户没有家目录会运行失败）、装在 `/root` 或某个家目录下
+> （`display` 用户无权读取）、装在 `/opt/...` 等不在上述 PATH 里的位置。
+> 后台顶部和服务日志（`journalctl -u display-server`）会写明具体原因。推荐用 `apt install ffmpeg`
+> （装到 `/usr/bin`）；装在别处就在 `server.json` 里写 `"ffmpeg_path": "/绝对路径/ffmpeg"`，
+> 并确认 `sudo -u display /绝对路径/ffmpeg -version` 能跑通。装好后约 30 秒内自动生效，无需重启服务端。
 
 管理后台：浏览器打开 `http://<服务器>:9000/admin`，输入 `admin_token`。
 
