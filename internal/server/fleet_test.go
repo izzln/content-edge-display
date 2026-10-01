@@ -363,3 +363,52 @@ func TestGlobalTemplateAndSchedules(t *testing.T) {
 	}
 	_ = s
 }
+
+// 设备丢了身份文件（重装/换卡）后会用同编号、新密钥注册：服务端拒绝，但把请求记下来，
+// 运营方核对后一键接受，设备的属性与播放列表都保留，不用删设备重来。
+func TestRekeyRequestAcceptAndIgnore(t *testing.T) {
+	s, h := newEnrollTestServer(t)
+	oldKey, newKey := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", oldKey, enrollToken)), http.StatusCreated)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/scr-0017/attributes", map[string]string{"room": "302"}), http.StatusOK)
+
+	// 没有待确认请求时不能"接受"
+	do(t, h, adminReq("POST", "/api/v1/admin/devices/scr-0017/rekey", map[string]bool{"accept": true}), http.StatusConflict)
+
+	// 新密钥注册：被拒，但请求被记下（后台可见，不含密钥本身）
+	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", newKey, enrollToken)), http.StatusConflict)
+	w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
+	if strings.Contains(w.Body.String(), newKey) || strings.Contains(w.Body.String(), oldKey) {
+		t.Fatal("设备列表不得泄露密钥")
+	}
+	var statuses []DeviceStatus
+	json.Unmarshal(w.Body.Bytes(), &statuses)
+	var rk *store.RekeyRequest
+	for _, st := range statuses {
+		if st.ID == "scr-0017" && st.HW != nil {
+			rk = st.HW.Rekey
+		}
+	}
+	if rk == nil || rk.Fingerprint != keyFingerprint(newKey) || rk.Hostname != "scr-0017" {
+		t.Fatalf("后台应能看到待确认的换密钥请求：%+v", rk)
+	}
+	// 未接受前：旧密钥照常可用，新密钥不行
+	do(t, h, signedAs("scr-0017", oldKey, "GET", "/api/v1/device/manifest"), http.StatusOK)
+	do(t, h, signedAs("scr-0017", newKey, "GET", "/api/v1/device/manifest"), http.StatusUnauthorized)
+
+	// 忽略：请求消失，什么都不变
+	do(t, h, adminReq("POST", "/api/v1/admin/devices/scr-0017/rekey", map[string]bool{"accept": false}), http.StatusNoContent)
+	if d, _ := s.store.Device("scr-0017"); d.Rekey != nil || d.Secret != oldKey {
+		t.Fatalf("忽略后应保持原样：%+v", d)
+	}
+
+	// 再来一次并接受：新密钥生效、旧密钥作废、属性保留，设备重试注册得到 200
+	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", newKey, enrollToken)), http.StatusConflict)
+	do(t, h, adminReq("POST", "/api/v1/admin/devices/scr-0017/rekey", map[string]bool{"accept": true}), http.StatusNoContent)
+	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", newKey, enrollToken)), http.StatusOK)
+	do(t, h, signedAs("scr-0017", newKey, "GET", "/api/v1/device/manifest"), http.StatusOK)
+	do(t, h, signedAs("scr-0017", oldKey, "GET", "/api/v1/device/manifest"), http.StatusUnauthorized)
+	if s.store.Attrs("scr-0017")["room"] != "302" {
+		t.Fatal("接受新密钥后设备属性应保留")
+	}
+}

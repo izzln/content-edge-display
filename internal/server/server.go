@@ -77,7 +77,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	if cfg.Listen == "" {
-		cfg.Listen = ":8080"
+		cfg.Listen = ":9000"
 	}
 	if cfg.MediaRoot == "" {
 		cfg.MediaRoot = "data/media"

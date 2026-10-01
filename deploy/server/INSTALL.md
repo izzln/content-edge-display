@@ -49,7 +49,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   data/               服务端状态：state.json、firmware/、rendered/、incoming/（待转码原片）
 ```
 
-管理后台：浏览器打开 `http://<服务器>:8080/admin`，输入 `admin_token`。
+管理后台：浏览器打开 `http://<服务器>:9000/admin`，输入 `admin_token`。
 
 > 偏好 FHS 布局（二进制 `/usr/local/bin`、配置 `/etc`、数据 `/var/lib`）也可以：
 > 在 server.json 里写绝对路径，并相应改 `display-server.service` 的 ExecStart。

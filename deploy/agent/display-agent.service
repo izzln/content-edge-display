@@ -17,10 +17,14 @@ RestartSec=5
 # 更新时代理主动退出(码 0)，也要重启；连续崩溃不触发 start limit（由 rollback-check 兜底）
 StartLimitIntervalSec=0
 RuntimeDirectory=display-agent
+RuntimeDirectoryMode=0700
 StateDirectory=display-agent
 # mpv 需要访问 DRM/GPU 设备; root 运行最简单(M1), M4 阶段再收紧为专用用户
 User=root
 Environment=HOME=/root
+# mpv（经 libwayland/EGL 探测）要求 XDG_RUNTIME_DIR 指向一个存在的目录，否则每次启动都报
+# "XDG_RUNTIME_DIR is invalid or not set"。系统服务没有登录会话，所以指向本服务自己的运行目录。
+Environment=XDG_RUNTIME_DIR=/run/display-agent
 
 [Install]
 WantedBy=multi-user.target

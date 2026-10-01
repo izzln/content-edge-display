@@ -1,5 +1,5 @@
 {
-  "listen": ":8080",
+  "listen": ":9000",
   "media_root": "media",
   "data_dir": "data",
   "font_path": "fonts/NotoSansCJK-Regular.ttc",

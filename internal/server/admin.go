@@ -30,6 +30,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/admin/devices/{id}", s.adminWrite(s.handleDeleteDevice))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/attributes", s.adminWrite(s.handlePutAttrs))
 	mux.HandleFunc("POST /api/v1/admin/devices/{id}/test", s.adminWrite(s.handleTest))
+	mux.HandleFunc("POST /api/v1/admin/devices/{id}/rekey", s.adminWrite(s.handleRekey))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/display", s.adminWrite(s.handlePutDisplay))
 	mux.HandleFunc("GET /api/v1/admin/devices/{id}/media", s.adminRead(s.handleListDeviceMedia))
 	mux.HandleFunc("POST /api/v1/admin/devices/{id}/media", s.adminWrite(s.handleUploadDeviceMedia))
@@ -147,6 +148,11 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 			st.UpdateTarget = &u
 		}
 		d.Secret = "" // 不向后台暴露密钥
+		if d.Rekey != nil {
+			rk := *d.Rekey
+			rk.Secret = ""
+			d.Rekey = &rk
+		}
 		st.HW = &d
 		statuses = append(statuses, st)
 	}

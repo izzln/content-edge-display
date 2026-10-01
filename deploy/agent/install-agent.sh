@@ -2,7 +2,7 @@
 # 在 Orange Pi One (Armbian) 上安装 display-agent（OTA 布局）。
 #
 # 用法（在设备上以 root 运行，同目录需有 display-agent-armv7、display-agent.service、rollback-check.sh）:
-#   SERVER_URL=http://display.lan:8080 ./install-agent.sh
+#   SERVER_URL=http://display.lan:9000 ./install-agent.sh
 # 注册口令默认取同目录的 enroll-token（make package 时写入），也可用 ENROLL_TOKEN= 覆盖。
 # 显示模式默认 1440x900@60，可用 HDMI_MODE= 改；EDID 里没有该模式时用 HDMI_FORCE=e 强制。
 #
@@ -15,7 +15,7 @@
 #   /usr/local/lib/display-agent/rollback-check.sh          (ExecStartPre)
 #   /etc/display-agent/agent.json
 set -eu
-: "${SERVER_URL:?需要 SERVER_URL，如 http://display.lan:8080（建议用域名而非 IP：server_url 写死在设备上，OTA 改不了）}"
+: "${SERVER_URL:?需要 SERVER_URL，如 http://display.lan:9000（建议用域名而非 IP：server_url 写死在设备上，OTA 改不了）}"
 BIN="${BIN:-./display-agent-armv7}"
 INSTALL_DIR=/usr/local/lib/display-agent
 HERE=$(cd "$(dirname "$0")" && pwd)

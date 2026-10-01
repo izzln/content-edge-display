@@ -2,15 +2,18 @@ package agent
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Identity 是设备的持久化身份。
@@ -36,42 +39,91 @@ var hostnameIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
 // loadOrCreateIdentity 解析设备身份。编号优先级：
 // 配置文件显式 device_id > cache_dir/identity.json > 主机名（非默认值）> SoC 序列号/MAC 派生；
 // 密钥首次随机生成。两者持久化到 identity.json，重启/重试不变。
+//
+// 这个文件丢了或读不出来，设备就会用**同一个编号、新的密钥**去注册，服务端会当成冒名顶替
+// 拒绝（409）。所以：写入要落盘（fsync）；读不出来时不悄悄重建，而是把坏文件留作现场证据、
+// 大声报出来——新密钥要运营方在后台确认后才生效。
 func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
-	path := filepath.Join(cfg.CacheDir, "identity.json")
+	path := identityPath(cfg)
 	var id Identity
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &id)
+	switch data, err := os.ReadFile(path); {
+	case err == nil:
+		if err := json.Unmarshal(data, &id); err != nil || id.Secret == "" {
+			bad := fmt.Sprintf("%s.bad-%d", path, time.Now().Unix())
+			os.Rename(path, bad)
+			log.Printf("agent: WARNING %s 内容无效（%v），已另存为 %s 并生成新身份；"+
+				"服务端会拒绝新密钥，需在管理后台对该设备点「接受新密钥」", path, err, bad)
+			id = Identity{}
+		}
+	case os.IsNotExist(err):
+	default:
+		// 读不了（权限、IO 错误）不是"没有"：此时重建只会得到一个服务端不认的新密钥
+		return Identity{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	changed := false
 
-	if cfg.DeviceID != "" {
-		id.DeviceID = cfg.DeviceID
+	changed := false
+	if cfg.DeviceID != "" && cfg.DeviceID != id.DeviceID {
+		id.DeviceID, changed = cfg.DeviceID, true
 	} else if id.DeviceID == "" {
-		id.DeviceID = deriveDeviceID(hw)
-		changed = true
+		id.DeviceID, changed = deriveDeviceID(hw), true
 	}
 	if id.Secret == "" {
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
 			return Identity{}, err
 		}
-		id.Secret = hex.EncodeToString(b)
-		changed = true
+		id.Secret, changed = hex.EncodeToString(b), true
+		log.Printf("agent: 生成新身份 device_id=%s key=%s（%s）", id.DeviceID, id.Fingerprint(), path)
+	} else {
+		log.Printf("agent: 使用已有身份 device_id=%s key=%s（%s）", id.DeviceID, id.Fingerprint(), path)
 	}
-
 	if changed {
 		if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
 			return Identity{}, err
 		}
 		data, _ := json.MarshalIndent(id, "", "  ")
-		if err := os.WriteFile(path+".tmp", data, 0o600); err != nil {
-			return Identity{}, err
-		}
-		if err := os.Rename(path+".tmp", path); err != nil {
+		if err := writeFileSync(path, data, 0o600); err != nil {
 			return Identity{}, err
 		}
 	}
 	return id, nil
+}
+
+func identityPath(cfg *Config) string { return filepath.Join(cfg.CacheDir, "identity.json") }
+
+// Fingerprint 返回密钥指纹（sha256 前 8 位），用于日志与后台核对，不暴露密钥本身。
+func (id Identity) Fingerprint() string {
+	sum := sha256.Sum256([]byte(id.Secret))
+	return hex.EncodeToString(sum[:4])
+}
+
+// writeFileSync 原子且持久地写文件：写临时文件 → fsync → 改名 → fsync 目录。
+// 只 rename 不 fsync 的话，首次注册后不久断电，文件可能是空的或根本不存在。
+func writeFileSync(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 // deriveDeviceID 从主机名或硬件序列号派生设备编号。

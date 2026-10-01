@@ -141,3 +141,17 @@ func TestLoadConfigRejectsPlaceholderAndMissingTokens(t *testing.T) {
 		t.Fatalf("正常配置不应报错：%v", err)
 	}
 }
+
+func TestLoadConfigDefaultListenPort(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "server.json")
+	if err := os.WriteFile(p, []byte(`{"admin_token":"6DOTtuXB","enroll_token":"G2o4MrHY"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Listen != ":9000" {
+		t.Fatalf("默认监听端口应为 :9000，得到 %q", cfg.Listen)
+	}
+}

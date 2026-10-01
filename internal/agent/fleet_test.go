@@ -228,3 +228,100 @@ func TestApplyUpdateIgnoredWhenNotInstalled(t *testing.T) {
 		t.Fatalf("update without install layout should be ignored: %v", err)
 	}
 }
+
+// 身份文件损坏时不能悄悄换一把新密钥了事：坏文件留作证据，日志里说清楚要去后台接受新密钥。
+func TestIdentityCorruptFileIsKeptAndReported(t *testing.T) {
+	cfg := &Config{CacheDir: t.TempDir()}
+	path := filepath.Join(cfg.CacheDir, "identity.json")
+	os.WriteFile(path, []byte("{truncated"), 0o600)
+	id, err := loadOrCreateIdentity(cfg, HardwareInfo{Hostname: "scr-0017"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.DeviceID != "scr-0017" || len(id.Secret) != 64 {
+		t.Fatalf("应生成新身份：%+v", id)
+	}
+	bad, _ := filepath.Glob(path + ".bad-*")
+	if len(bad) != 1 {
+		t.Fatalf("坏文件应另存一份留作现场证据，得到 %v", bad)
+	}
+}
+
+// 读不了（不是"不存在"）时不能重建：那只会得到一把服务端不认的新密钥。
+func TestIdentityUnreadableIsAnError(t *testing.T) {
+	cfg := &Config{CacheDir: t.TempDir()}
+	os.Mkdir(filepath.Join(cfg.CacheDir, "identity.json"), 0o755) // 读它会报 EISDIR
+	if _, err := loadOrCreateIdentity(cfg, HardwareInfo{Hostname: "scr-0017"}); err == nil {
+		t.Fatal("身份文件读不了时应报错，而不是生成新密钥")
+	}
+}
+
+// 同一个缓存目录只允许一个代理进程（两个进程首次启动会各生成一把密钥、互相覆盖）。
+func TestCacheDirLockIsExclusive(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := lockCacheDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockCacheDir(dir); err == nil || !strings.Contains(err.Error(), "另一个 display-agent") {
+		t.Fatalf("第二个进程应被拒绝：%v", err)
+	}
+	unlock()
+	unlock2, err := lockCacheDir(dir)
+	if err != nil {
+		t.Fatalf("释放后应能再次加锁：%v", err)
+	}
+	unlock2()
+}
+
+// 相对路径按配置文件目录解析：否则 systemd（工作目录 /）与手工试跑会用到两份 identity.json。
+func TestLoadConfigResolvesRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent.json")
+	os.WriteFile(p, []byte(`{"server_url":"http://x","enroll_token":"t","cache_dir":"cache","mpv_socket":"run/mpv.sock"}`), 0o644)
+	t.Chdir(t.TempDir())
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CacheDir != filepath.Join(dir, "cache") || cfg.MpvSocket != filepath.Join(dir, "run/mpv.sock") {
+		t.Fatalf("相对路径应按配置文件目录解析：cache=%s sock=%s", cfg.CacheDir, cfg.MpvSocket)
+	}
+}
+
+// 端到端：设备丢了身份文件 → 用新密钥注册被拒 → 运营方在后台接受 → 设备重新注册成功。
+func TestLostIdentityRecoversAfterAdminAccepts(t *testing.T) {
+	a, srv, h := newEnrollEnv(t)
+	ctx := context.Background()
+	if err := a.ResolveIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = srv
+
+	// 身份文件丢了（重装系统 / 换卡 / 误删）
+	os.Remove(identityPath(a.cfg))
+	if err := a.ResolveIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	err := a.Register(ctx)
+	if !errors.Is(err, errKeyConflict) || !strings.Contains(err.Error(), a.identity.Fingerprint()) {
+		t.Fatalf("应报密钥冲突并给出本机指纹：%v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/admin/devices/"+a.DeviceID()+"/rekey", strings.NewReader(`{"accept":true}`))
+	req.Header.Set("X-Admin-Token", "admin")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("接受新密钥失败：%d %s", w.Code, w.Body.String())
+	}
+	if err := a.Register(ctx); err != nil {
+		t.Fatalf("接受后设备应能重新注册：%v", err)
+	}
+	if _, err := a.PollOnce(ctx); err != nil {
+		t.Fatalf("重新注册后应能正常拉取清单：%v", err)
+	}
+}
