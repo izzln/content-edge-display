@@ -79,11 +79,25 @@ type Device struct {
 	ID           string    `json:"id"`
 	Secret       string    `json:"secret"`
 	RegisteredAt time.Time `json:"registered_at"`
-	Hostname     string    `json:"hostname,omitempty"`
-	HWSerial     string    `json:"hw_serial,omitempty"`
-	MAC          string    `json:"mac,omitempty"`
-	IP           string    `json:"ip,omitempty"`
-	AgentVersion string    `json:"agent_version,omitempty"`
+	// Rekey 是"同编号、新密钥"的注册请求，等运营方在后台确认。设备丢了身份文件（重装、换卡）
+	// 就会这样；也可能是另一台机器撞了编号或有人冒充，所以不自动接受。
+	Rekey        *RekeyRequest `json:"rekey,omitempty"`
+	Hostname     string        `json:"hostname,omitempty"`
+	HWSerial     string        `json:"hw_serial,omitempty"`
+	MAC          string        `json:"mac,omitempty"`
+	IP           string        `json:"ip,omitempty"`
+	AgentVersion string        `json:"agent_version,omitempty"`
+}
+
+// RekeyRequest 是一次待确认的换密钥注册请求，附带请求方信息供运营方核对。
+type RekeyRequest struct {
+	Secret      string    `json:"secret,omitempty"` // 后台接口返回时清空
+	Fingerprint string    `json:"fingerprint"`      // 密钥指纹，与设备日志里的 key= 对照
+	At          time.Time `json:"at"`
+	IP          string    `json:"ip,omitempty"`
+	Hostname    string    `json:"hostname,omitempty"`
+	HWSerial    string    `json:"hw_serial,omitempty"`
+	MAC         string    `json:"mac,omitempty"`
 }
 
 // Firmware 是已上传的设备端程序版本。

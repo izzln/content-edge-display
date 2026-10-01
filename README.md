@@ -53,7 +53,7 @@ make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖，并�
 #    模板中文渲染需 CJK 字体：apt install fonts-noto-cjk 并设置 font_path
 #    视频转码需 ffmpeg：apt install ffmpeg（不装视频不转码，高码率原片会让设备过热）
 
-# 2. 管理后台：浏览器打开 http://<服务器>:8080/admin （输入 admin_token）
+# 2. 管理后台：浏览器打开 http://<服务器>:9000/admin （输入 admin_token）
 #    首启已自动建好"左右分屏"模板并设为全局默认，直接在 设备 → 内容 里为每台设备
 #    上传要播的图片/视频即可（视频自动转码；属性在左还是在右用"左右对调"开关切换）
 

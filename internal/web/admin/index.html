@@ -200,9 +200,13 @@ function renderDevices() {
     }
     ver += "</div>";
     const hw = d.hw ? `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>` : "";
+    const rk = d.hw && d.hw.rekey;
+    const rekey = rk ? `<div class="bad-note">⚠ 收到用<b>新密钥</b>的注册请求（key ${esc(rk.fingerprint)}，
+        ${esc(rk.hostname || "?")} ${esc(rk.ip || "")}，${esc(fmtTime(rk.at))}），设备在用缓存内容播放、暂时收不到更新。
+        <div class="row" style="margin:6px 0 0"><button class="primary sm" onclick="rekeyDialog('${esc(d.id)}')">核对并处理</button></div></div>` : "";
     return `<tr>
       <td>${st}</td>
-      <td><b>${esc(d.id)}</b>${hw}${ver}</td>
+      <td><b>${esc(d.id)}</b>${hw}${ver}${rekey}</td>
       <td>${attrs}</td>
       <td>${show}</td>
       <td>
@@ -228,6 +232,31 @@ function testDialog(id) {
 async function doTest(id, secs) {
   await api(`/api/v1/admin/devices/${id}/test`, { method: "POST", ...J({ duration_s: secs }) });
   toast(secs > 0 ? "已下发测试屏" : "已取消测试"); closeModal(); refresh();
+}
+// rekeyDialog 处理"同编号、新密钥"的注册请求。设备丢了身份文件（重装系统、换 SD 卡、
+// 手工删了 /var/lib/display-agent）就会这样；也可能是另一台机器撞了编号或有人冒充，
+// 所以要人核对：设备日志里会打印 key=xxxx，与这里的指纹一致才是本机。
+function rekeyDialog(id) {
+  const d = devices.find(x => x.id === id), rk = d.hw.rekey, cur = d.hw;
+  modal(`<h2>换密钥请求 — ${esc(id)}</h2>
+    <table>
+      <tr><th></th><th>当前登记</th><th>新请求</th></tr>
+      <tr><td>主机名</td><td>${esc(cur.hostname || "-")}</td><td>${esc(rk.hostname || "-")}</td></tr>
+      <tr><td>IP</td><td>${esc(cur.ip || "-")}</td><td>${esc(rk.ip || "-")}</td></tr>
+      <tr><td>硬件序列号</td><td>${esc(cur.hw_serial || "-")}</td><td>${esc(rk.hw_serial || "-")}</td></tr>
+      <tr><td>MAC</td><td>${esc(cur.mac || "-")}</td><td>${esc(rk.mac || "-")}</td></tr>
+      <tr><td>密钥指纹</td><td class="muted">—</td><td><b>${esc(rk.fingerprint)}</b></td></tr>
+    </table>
+    <p>硬件序列号 / MAC 与当前登记一致、且设备日志（<code>journalctl -u display-agent</code>）里的
+      <code>key=</code> 与上面的指纹相同，就是这台设备自己丢了身份文件，可以放心接受：属性、播放列表等配置都会保留。</p>
+    <p class="muted">不一致则可能是另一台机器撞了编号（给其中一台改主机名）或有人冒充，请忽略。</p>
+    <div class="actions"><button onclick="closeModal()">取消</button>
+      <button class="danger" onclick="doRekey('${esc(id)}', false)">忽略</button>
+      <button class="primary" onclick="doRekey('${esc(id)}', true)">接受新密钥</button></div>`);
+}
+async function doRekey(id, accept) {
+  await api(`/api/v1/admin/devices/${id}/rekey`, { method: "POST", ...J({ accept }) });
+  toast(accept ? "已接受：设备一分钟内会重新注册成功" : "已忽略"); closeModal(); refresh();
 }
 async function deleteDevice(id) {
   if (!confirm(`删除设备 ${id}？其属性/图片绑定/更新目标一并删除；设备若仍在线会重新自注册（新密钥）。`)) return;

@@ -24,7 +24,7 @@ SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
 # 2. 安装代理（注册口令默认取包内 enroll-token，无需手工填）
 #    server_url 写死在设备上、OTA 改不了，所以请用域名而不是 IP
 #    每次执行都会重写 /etc/display-agent/agent.json；装完**不会**自动设为开机自启
-SERVER_URL=http://display.lan:8080 ./install-agent.sh
+SERVER_URL=http://display.lan:9000 ./install-agent.sh
 
 # 3. 重启让 HDMI 模式生效，然后手工起一次看效果
 reboot

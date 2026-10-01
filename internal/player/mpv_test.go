@@ -523,3 +523,32 @@ func TestPlaylistChangeKeepsOverlay(t *testing.T) {
 		t.Fatalf("新播放列表未生效：%v", pl)
 	}
 }
+
+// systemd 系统服务没有 XDG_RUNTIME_DIR，mpv 每次启动都会报 "XDG_RUNTIME_DIR is invalid or not set"；
+// 缺失或无效时要补成运行目录，已有效时不能覆盖。
+func TestMpvEnvProvidesRuntimeDir(t *testing.T) {
+	runDir := t.TempDir()
+	lookup := func(env []string) string {
+		v := ""
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "XDG_RUNTIME_DIR=") {
+				v = strings.TrimPrefix(kv, "XDG_RUNTIME_DIR=") // 后出现的生效
+			}
+		}
+		return v
+	}
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	os.Unsetenv("XDG_RUNTIME_DIR")
+	if got := lookup(mpvEnv(runDir)); got != runDir {
+		t.Fatalf("未设置时应补成 %s，得到 %q", runDir, got)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(runDir, "no-such"))
+	if got := lookup(mpvEnv(runDir)); got != runDir {
+		t.Fatalf("指向不存在的目录时应改成 %s，得到 %q", runDir, got)
+	}
+	valid := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", valid)
+	if got := lookup(mpvEnv(runDir)); got != valid {
+		t.Fatalf("已有效时不应覆盖，得到 %q", got)
+	}
+}

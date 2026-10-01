@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -40,6 +41,18 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if err := cfg.fillDefaults(); err != nil {
 		return nil, err
+	}
+	// 相对路径按配置文件所在目录解析，而不是进程工作目录：systemd 下工作目录是 /，
+	// 手工在别的目录试跑时又是另一个——cache_dir 一变，identity.json 就是另一份，
+	// 设备会拿新密钥去注册而被服务端拒绝。
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range []*string{&cfg.CacheDir, &cfg.InstallDir, &cfg.MpvSocket} {
+		if *p != "" && !filepath.IsAbs(*p) {
+			*p = filepath.Join(base, *p)
+		}
 	}
 	return &cfg, nil
 }

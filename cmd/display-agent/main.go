@@ -33,7 +33,8 @@ func main() {
 	var p player.Player
 	switch cfg.Player {
 	case "mpv":
-		if err := os.MkdirAll(filepath.Dir(cfg.MpvSocket), 0o755); err != nil {
+		// 这个目录同时作为 mpv 的 XDG_RUNTIME_DIR，规范要求仅属主可访问
+		if err := os.MkdirAll(filepath.Dir(cfg.MpvSocket), 0o700); err != nil {
 			log.Fatalf("create mpv socket dir: %v", err)
 		}
 		// 输出模式放在前面，mpv_extra_args 里若另有 --drm-mode 以后者为准（mpv 取最后一次出现的值）

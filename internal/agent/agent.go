@@ -67,6 +67,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := os.MkdirAll(a.mediaDir(), 0o755); err != nil {
 		return err
 	}
+	unlock, err := lockCacheDir(a.cfg.CacheDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := a.ResolveIdentity(); err != nil {
 		return err
 	}
@@ -133,12 +138,17 @@ func (a *Agent) ResolveIdentity() error {
 }
 
 // registerLoop 向服务端自注册，失败指数退避重试直到成功或 ctx 取消。
+// 期间一直在播放本地缓存，并持续喂狗。
 func (a *Agent) registerLoop(ctx context.Context) error {
 	delay := 5 * time.Second
 	for {
 		err := a.Register(ctx)
 		if err == nil {
 			return nil
+		}
+		// 密钥冲突要等运营方在后台点「接受新密钥」，点完应尽快生效，所以最多 1 分钟重试一次
+		if errors.Is(err, errKeyConflict) && delay > time.Minute {
+			delay = time.Minute
 		}
 		log.Printf("agent: register failed: %v (retry in %s)", err, delay)
 		sdNotify("WATCHDOG=1")
@@ -152,6 +162,9 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 		}
 	}
 }
+
+// errKeyConflict 表示服务端已有同编号、不同密钥的设备记录。
+var errKeyConflict = errors.New("key conflict")
 
 // Register 发送一次注册请求（幂等）。
 func (a *Agent) Register(ctx context.Context) error {
@@ -180,13 +193,19 @@ func (a *Agent) Register(ctx context.Context) error {
 	defer resp.Body.Close()
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	switch resp.StatusCode {
-	case http.StatusOK, http.StatusCreated:
-		if resp.StatusCode == http.StatusCreated {
-			log.Printf("agent: registered as new device %s", a.identity.DeviceID)
-		}
+	case http.StatusCreated:
+		log.Printf("agent: registered as new device %s", a.identity.DeviceID)
+		return nil
+	case http.StatusOK:
+		log.Printf("agent: registration confirmed for device %s", a.identity.DeviceID)
 		return nil
 	case http.StatusConflict:
-		return fmt.Errorf("device id %s 已被其他密钥注册，请管理员在后台删除该设备后重试", a.identity.DeviceID)
+		// 本机密钥与服务端记录不符：要么 identity.json 丢过（重装系统、换卡、手工删除），
+		// 要么另一台机器用了同一个编号。设备已把新密钥报给服务端，后台会显示待确认。
+		return fmt.Errorf("%w: device_id=%s 在服务端登记的是另一把密钥（本机 key=%s，身份文件 %s）。"+
+			"若确为本机（重装/换卡/身份文件丢失），请在管理后台该设备上点「接受新密钥」；"+
+			"若是另一台机器撞了编号，请给其中一台改主机名", errKeyConflict,
+			a.identity.DeviceID, a.identity.Fingerprint(), identityPath(a.cfg))
 	default:
 		return fmt.Errorf("register: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}

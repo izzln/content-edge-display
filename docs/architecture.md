@@ -224,7 +224,8 @@ NotoSansCJK），未配置时退回内嵌拉丁字体，中文会显示为方框
 
 - **同一母镜像**烧所有设备；编号优先级：显式配置 > 主机名（Armbian Imager 自定义 hostname）> SoC 序列号后 8 位（`opi-xxxxxxxx`）；
   密钥首启随机生成并持久化，凭母镜像内的 `enroll_token` 向服务端 `POST /api/v1/device/register` 自注册，后台立即可见并随心跳在线；
-  同 ID 不同密钥的注册被拒（409），防冒名；
+  同 ID 不同密钥的注册被拒（409），防冒名；该请求记为"待确认"，运营方核对后可在后台接受新密钥
+  （设备丢了身份文件时用，配置全部保留），不自动接受——`enroll_token` 烧在每台设备里，自动接受等于谁都能冒充；
 - **程序 OTA**（更新的是代理二进制，不是 OS）：后台上传版本 → 立即/定时下发（定时由服务端判定，设备无需可信时钟）→
   清单 `commands` 携带 `update{version,url,sha256,size}` → 设备断点续传下载、校验、`current` 符号链接原子切换、退出由 systemd 拉起 →
   首个心跳成功确认；`rollback-check.sh`（ExecStartPre）在新版本连续 3 次启动失败后自动回滚到 `previous`；

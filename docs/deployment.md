@@ -100,7 +100,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 
 图片停留时长不在这里配置——它是版式的一部分，写在模板里，在管理后台改。
 
-管理后台：浏览器打开 `http://<服务器>:8080/admin`，首次访问输入 `admin_token`。
+管理后台：浏览器打开 `http://<服务器>:9000/admin`，首次访问输入 `admin_token`。
 
 ### 2.1 两个口令从哪来
 
@@ -132,7 +132,7 @@ make tokens     # 查看当前口令；文件不存在时生成
 没有"在配置里登记设备"这回事——设备一律凭 `enroll_token` 自注册，信息写进
 `data_dir/state.json`：首次上电时自己确定编号、生成随机密钥、向服务端注册，
 随后出现在后台设备列表里。同一编号用不同密钥再注册会被拒（409），
-防止冒名顶替。详见 4.1。
+防止冒名顶替；这种请求会显示在后台该设备上，核对无误可一键「接受新密钥」。详见 4.1。
 
 ## 3. 设备端：单台部署（样机、调试、也是制作母镜像的第一步）
 
@@ -177,7 +177,7 @@ scp bin/display-agent-*-armv7.tar.gz root@<设备IP>:/root/
 # 设备上（root）
 tar xzf display-agent-*-armv7.tar.gz && cd display-agent-*/
 SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
-SERVER_URL=http://display.lan:8080 ./install-agent.sh   # 注册口令取包内 enroll-token
+SERVER_URL=http://display.lan:9000 ./install-agent.sh   # 注册口令取包内 enroll-token
 reboot                                                  # 让 HDMI 模式生效
 systemctl start display-agent
 journalctl -u display-agent -n 20     # 应看到注册成功
@@ -241,6 +241,28 @@ mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -
 
 密钥在首启随机生成，只存在于设备与服务端两处；`enroll_token` 仅用于首次注册。
 同 ID 不同密钥的注册会被拒绝（409），防止冒名顶替。
+
+#### 设备报"在服务端登记的是另一把密钥"
+
+说明设备手上的密钥与服务端记录的不一样，通常是 `/var/lib/display-agent/identity.json` 丢了：
+重装系统、换了 SD 卡、手工删过这个目录、或者母镜像清理后没在后台删掉样机。设备会继续播放
+本地缓存，同时把新密钥报给服务端。
+
+处理：管理后台该设备上会出现红色提示 →【核对并处理】→ 对照硬件序列号 / MAC，以及设备日志里
+`agent: 生成新身份 … key=xxxxxxxx` 的指纹 → 一致就点**接受新密钥**。设备一分钟内重新注册成功，
+**属性、播放列表、专属模板都保留**（不要用"删除设备"来解决，那会把这些配置一起删掉）。
+不一致说明是另一台机器撞了编号（给其中一台改主机名）或有人冒充，点忽略。
+
+设备日志里每次启动都会打印身份来源，便于判断：
+
+```
+agent: 使用已有身份 device_id=scr-0017 key=a80470cb（/var/lib/display-agent/identity.json）   # 正常
+agent: 生成新身份 device_id=scr-0017 key=d9e2ca41（…）                                         # 首次启动，或身份文件丢了
+```
+
+代理已做的防护：身份文件写入后 fsync（防断电丢失）；文件损坏时另存为 `identity.json.bad-<时间>`
+留作证据而不是悄悄覆盖；同一缓存目录只允许一个代理进程（服务在跑时再手工启动一个会直接报错退出）；
+`agent.json` 里的相对路径按配置文件所在目录解析（不会因为启动方式不同而用到两份身份文件）。
 
 ### 4.2 制作母镜像
 
@@ -391,7 +413,7 @@ tar czf display-backup.tar.gz -C /srv display
 
 > **搬迁前务必确认一件事**：设备端 `agent.json` 里的 `server_url` 是写死在每台设备上的，
 > OTA 只替换二进制、改不了它。服务器换 IP 就意味着要逐台 SSH。
-> 所以**从一开始就用域名而不是 IP**（例如 `http://display.lan:8080`），
+> 所以**从一开始就用域名而不是 IP**（例如 `http://display.lan:9000`），
 > 搬迁时只改 DNS 指向即可，设备无感。
 
 ### 6.3 定期备份
@@ -408,7 +430,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 |---|---|
 | 分辨率 / 硬解 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示"硬解 xxx"、1440×900、温度正常 |
 | 开机自启 | `systemctl is-enabled display-agent` 为 enabled（安装脚本不会自动 enable） |
-| 网络连通 | `curl -sI http://<服务器>:8080` 有响应 |
+| 网络连通 | `curl -sI http://<服务器>:9000` 有响应 |
 | 代理运行 | `systemctl status display-agent` active (running) |
 | 软看门狗 | `systemctl show display-agent -p WatchdogTimestamp` 持续更新 |
 | 播放验证 | 后台点【测试】，2 分钟内屏幕出现测试卡 |
