@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,13 +41,12 @@ type Agent struct {
 	verified       bool // 本次运行是否已确认过版本（首个成功心跳后）
 }
 
-// New 创建代理；identity 为空时在 Run 中解析。
+// New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
 	return &Agent{
 		cfg:            cfg,
 		player:         p,
 		http:           &http.Client{Timeout: 10 * time.Minute}, // 覆盖大文件下载
-		identity:       Identity{DeviceID: cfg.DeviceID, Secret: cfg.Secret},
 		startedAt:      time.Now(),
 		updateFailedAt: map[string]time.Time{},
 	}
@@ -82,10 +82,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	sdNotify("READY=1")
 
 	// 自注册（幂等）：成功前不进入正常轮询，但已在播放缓存内容且持续喂狗。
-	if a.cfg.EnrollToken != "" {
-		if err := a.registerLoop(ctx); err != nil {
-			return err
-		}
+	if err := a.registerLoop(ctx); err != nil {
+		return err
 	}
 
 	pollTimer := time.NewTimer(0)
@@ -319,14 +317,10 @@ func (a *Agent) apply(m *manifest.Manifest) error {
 		})
 	}
 	if l := m.Layout; l != nil {
-		// 叠加层解码失败不该让屏幕黑掉：退化为整屏播放，比没有画面好。
-		if ovl, err := prepareOverlay(a.localPath(l.Overlay)); err != nil {
-			log.Printf("agent: overlay unusable (%v), falling back to fullscreen playback", err)
-		} else {
-			scene.Overlay = ovl
-			scene.Media = player.Rect{X: l.Media.X, Y: l.Media.Y, W: l.Media.W, H: l.Media.H}
-			scene.CanvasW, scene.CanvasH = l.CanvasW, l.CanvasH
-		}
+		// 叠加图只给路径：真正贴图时要按 mpv 的实际输出分辨率光栅化，那是播放器的事。
+		scene.Overlay = &player.Overlay{PNG: a.localPath(l.Overlay)}
+		scene.Media = player.Rect{X: l.Media.X, Y: l.Media.Y, W: l.Media.W, H: l.Media.H}
+		scene.CanvasW, scene.CanvasH = l.CanvasW, l.CanvasH
 	}
 	if err := a.player.Load(scene); err != nil {
 		return err
@@ -353,30 +347,30 @@ func (a *Agent) cleanup(m *manifest.Manifest) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		// 被引用的文件、仍被引用条目正在续传的 .part 文件、
-		// 以及叠加图解码出来的 .bgra 都保留。
-		if referenced[name] {
-			continue
-		}
-		if base, ok := trimSuffix(name, ".part"); ok && referenced[base] {
-			continue
-		}
-		if base, ok := trimSuffix(name, overlaySuffix); ok && referenced[base] {
+		// 保留：被引用的文件本身、它正在续传的 .part、以及由它派生出来的文件
+		// （叠加图按输出分辨率光栅化出的 <名字>.<宽>x<高>.bgra）。
+		if referenced[name] || derivedFromReferenced(name, referenced) {
 			continue
 		}
 		_ = os.Remove(filepath.Join(a.mediaDir(), name))
 	}
 }
 
-func trimSuffix(s, suffix string) (string, bool) {
-	if len(s) > len(suffix) && s[len(s)-len(suffix):] == suffix {
-		return s[:len(s)-len(suffix)], true
+// derivedFromReferenced 判断 name 是否由某个仍被引用的文件派生而来。
+// 派生文件一律是“源文件名 + . + 后缀”：续传中的 a.png.part、
+// 叠加图按输出分辨率光栅化出的 a.png.1920x1080.bgra。
+func derivedFromReferenced(name string, referenced map[string]bool) bool {
+	for i := len(name) - 1; i > 0; i-- {
+		if name[i] == '.' && referenced[name[:i]] {
+			return true
+		}
 	}
-	return s, false
+	return false
 }
 
 // Heartbeat 上报一次心跳；本次运行首个成功心跳会确认当前版本（清除 pending-verify）。
 func (a *Agent) Heartbeat(ctx context.Context) error {
+	stats := a.player.Stats()
 	hb := map[string]any{
 		"version":      a.version,
 		"uptime":       uptimeSeconds(a.startedAt),
@@ -384,6 +378,10 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 		"playing":      a.player.NowPlaying(),
 		"player_ver":   Version,
 		"ip":           localIP(a.cfg.ServerURL),
+		"temp_c":       socTempC(),
+		"hwdec":        stats.HWDec,
+		"output_w":     stats.OutputW,
+		"output_h":     stats.OutputH,
 	}
 	body, err := json.Marshal(hb)
 	if err != nil {
@@ -419,6 +417,30 @@ func uptimeSeconds(startedAt time.Time) int64 {
 		}
 	}
 	return int64(time.Since(startedAt).Seconds())
+}
+
+// socTempC 读取 SoC 温度（摄氏度），读不到返回 0。
+// H3 在软解或高码率视频下很容易过热——Armbian 默认 85°C 触发降频、更高会直接关机，
+// 所以温度要能在后台看到，而不是等现场发现屏幕黑了。
+func socTempC() int {
+	for _, p := range []string{
+		"/sys/class/thermal/thermal_zone0/temp",
+		"/sys/devices/virtual/thermal/thermal_zone0/temp",
+	} {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var milli int
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &milli); err != nil {
+			continue
+		}
+		if milli > 1000 { // 多数平台是毫摄氏度
+			return milli / 1000
+		}
+		return milli
+	}
+	return 0
 }
 
 func diskFreeMB(dir string) int64 {

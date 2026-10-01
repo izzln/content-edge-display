@@ -14,42 +14,61 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
-func TestBuildFromDir(t *testing.T) {
+// buildDir 按目录里的文件（文件名顺序）构建条目。
+func buildDir(t *testing.T, dir string, cache *HashCache) []Item {
+	t.Helper()
+	names, err := ListMedia(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := BuildItems(dir, "d", names, 10, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}
+
+func TestListMediaSkipsJunk(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "b_video.mp4", "video-bytes")
 	writeFile(t, dir, "a_image.jpg", "image-bytes")
 	writeFile(t, dir, "notes.txt", "ignored")
-	writeFile(t, dir, ".hidden.jpg", "ignored")
-	writeFile(t, dir, "c.mp4.part", "ignored")
-
-	m, err := BuildFromDir(dir, "dev-001", 10, NewHashCache())
+	writeFile(t, dir, ".hidden.jpg", "ignored") // 转码半成品等隐藏文件
+	writeFile(t, dir, "c.mp4.part", "ignored")  // 上传中
+	names, err := ListMedia(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Items) != 2 {
-		t.Fatalf("expected 2 items, got %d: %+v", len(m.Items), m.Items)
+	if len(names) != 2 || names[0] != "a_image.jpg" || names[1] != "b_video.mp4" {
+		t.Fatalf("got %v", names)
 	}
-	if m.Items[0].Name != "a_image.jpg" || m.Items[1].Name != "b_video.mp4" {
-		t.Fatalf("wrong order: %+v", m.Items)
+	if names, err := ListMedia(filepath.Join(dir, "no-such")); err != nil || len(names) != 0 {
+		t.Fatalf("目录不存在应视为空：%v %v", names, err)
 	}
-	img, vid := m.Items[0], m.Items[1]
-	if img.Type != "image" || img.Duration != 10 {
-		t.Fatalf("image item wrong: %+v", img)
+}
+
+func TestBuildItemsFollowsGivenOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.jpg", "image-bytes")
+	writeFile(t, dir, "b.mp4", "video-bytes")
+
+	// 按给定顺序；已不存在的、非法的名字跳过而不是让整份清单失败
+	items, err := BuildItems(dir, "dev-001", []string{"b.mp4", "gone.jpg", "../x.jpg", "a.jpg"}, 7, NewHashCache())
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(items) != 2 || items[0].Name != "b.mp4" || items[1].Name != "a.jpg" {
+		t.Fatalf("got %+v", items)
+	}
+	vid, img := items[0], items[1]
 	if vid.Type != "video" || vid.Duration != 0 {
-		t.Fatalf("video item wrong: %+v", vid)
+		t.Fatalf("视频不带停留时长：%+v", vid)
 	}
-	if img.URL != "/media/dev-001/a_image.jpg" {
-		t.Fatalf("wrong url: %s", img.URL)
+	if img.Type != "image" || img.Duration != 7 {
+		t.Fatalf("图片带上给定的停留时长：%+v", img)
 	}
-	if len(img.SHA256) != 64 || img.ID != img.SHA256[:12] {
-		t.Fatalf("bad sha/id: %+v", img)
-	}
-	if img.Size != int64(len("image-bytes")) {
-		t.Fatalf("bad size: %d", img.Size)
-	}
-	if img.Order != 1 || vid.Order != 2 {
-		t.Fatalf("bad order fields: %+v", m.Items)
+	if img.URL != "/media/dev-001/a.jpg" || len(img.SHA256) != 64 || img.Size != int64(len("image-bytes")) {
+		t.Fatalf("条目字段错误：%+v", img)
 	}
 }
 
@@ -58,25 +77,15 @@ func TestVersionStableAndChanges(t *testing.T) {
 	cache := NewHashCache()
 	writeFile(t, dir, "a.jpg", "aaa")
 
-	m1, err := BuildFromDir(dir, "d", 10, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m2, err := BuildFromDir(dir, "d", 10, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m1.Version != m2.Version {
-		t.Fatalf("version not stable: %s vs %s", m1.Version, m2.Version)
+	v1 := Version(buildDir(t, dir, cache), nil, nil)
+	if v2 := Version(buildDir(t, dir, cache), nil, nil); v1 != v2 {
+		t.Fatalf("version not stable: %s vs %s", v1, v2)
 	}
 
 	// 新增文件 → 版本变化
 	writeFile(t, dir, "b.mp4", "bbb")
-	m3, err := BuildFromDir(dir, "d", 10, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m3.Version == m1.Version {
+	v3 := Version(buildDir(t, dir, cache), nil, nil)
+	if v3 == v1 {
 		t.Fatal("version unchanged after adding a file")
 	}
 
@@ -86,21 +95,39 @@ func TestVersionStableAndChanges(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(dir, "a.jpg"), future, future); err != nil {
 		t.Fatal(err)
 	}
-	m4, err := BuildFromDir(dir, "d", 10, cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m4.Version == m3.Version {
+	items := buildDir(t, dir, cache)
+	v4 := Version(items, nil, nil)
+	if v4 == v3 {
 		t.Fatal("version unchanged after modifying a file")
+	}
+
+	// 只改停留时长、只加指令、只改叠加布局 —— 都必须改变版本号，否则设备一直收到 304
+	items[0].Duration++
+	if Version(items, nil, nil) == v4 {
+		t.Fatal("停留时长变化必须改变版本号")
+	}
+	items[0].Duration--
+	if Version(items, []Command{{Type: "update", Version: "2"}}, nil) == v4 {
+		t.Fatal("指令出现必须改变版本号")
+	}
+	l := &Layout{CanvasW: 1440, CanvasH: 900, Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}
+	withLayout := Version(items, nil, l)
+	if withLayout == v4 {
+		t.Fatal("叠加布局出现必须改变版本号")
+	}
+	l.Media.X = 0
+	if Version(items, nil, l) == withLayout {
+		t.Fatal("媒体区位置变化必须改变版本号")
 	}
 }
 
-func TestEmptyOrMissingDir(t *testing.T) {
-	m, err := BuildFromDir(filepath.Join(t.TempDir(), "no-such"), "d", 10, NewHashCache())
-	if err != nil {
-		t.Fatal(err)
+func TestDownloadsIncludeOverlay(t *testing.T) {
+	m := &Manifest{Items: []Item{{Name: "a.mp4"}}}
+	if len(m.Downloads()) != 1 {
+		t.Fatal("没有叠加布局时只下载播放条目")
 	}
-	if len(m.Items) != 0 || m.Version == "" {
-		t.Fatalf("unexpected manifest: %+v", m)
+	m.Layout = &Layout{Overlay: Item{Name: "ovl.png"}}
+	if d := m.Downloads(); len(d) != 2 || d[1].Name != "ovl.png" {
+		t.Fatalf("有叠加布局时还要下载叠加图：%+v", d)
 	}
 }

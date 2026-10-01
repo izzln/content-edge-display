@@ -13,11 +13,12 @@ type Item struct {
 // Rect 是画布上的一个矩形（像素）。
 type Rect struct{ X, Y, W, H int }
 
-// Overlay 是贴在画面之上的模板叠加层：一块解码好的 BGRA 原始像素
-// （mpv 的 overlay-add 只吃原始像素，不认 PNG）。
+// Overlay 是贴在画面之上的模板叠加层：服务端渲染好的整屏 PNG，媒体区是透明的。
+//
+// 这里只给路径，不给尺寸：真正贴图时要按 mpv 的实际输出分辨率重新光栅化
+// （显示屏真实输出不一定等于模板画布尺寸），这件事只有播放器知道。
 type Overlay struct {
-	Path string // BGRA 数据文件路径，w*h*4 字节
-	W, H int
+	PNG string // 本地 PNG 路径
 }
 
 // Scene 是设备当前应呈现的完整画面。
@@ -41,4 +42,18 @@ type Player interface {
 	Load(scene Scene) error
 	// NowPlaying 返回当前播放条目的本地路径，未知时为空串。
 	NowPlaying() string
+	// Stats 返回随心跳上报的播放器运行状态（如实际解码方式、输出分辨率）。
+	// 问不到的项留空，不影响心跳。
+	Stats() Stats
+}
+
+// Stats 是播放器的运行状态，用于后台观察现场是否正常。
+type Stats struct {
+	// HWDec 是 mpv 实际使用的硬解方式；"no" 表示退化成了软解。
+	// H3 软解 1440×900 带不动，会卡顿、发热甚至过热关机，所以这一项要能在后台看到。
+	HWDec string `json:"hwdec,omitempty"`
+	// OutputW/H 是显示屏实际输出分辨率。与模板画布不一致时叠加图会被缩放，
+	// 对不上通常说明内核没吃下 video= 参数或换了块屏。
+	OutputW int `json:"output_w,omitempty"`
+	OutputH int `json:"output_h,omitempty"`
 }

@@ -23,9 +23,12 @@ const DefaultImageDurationS = 10
 const (
 	RegionAttribute = "attribute" // 显示设备属性值
 	RegionText      = "text"      // 静态文字
-	RegionImage     = "image"     // 静态图片（如 logo），由服务端合成进画面
 	RegionMedia     = "media"     // 播放列表区：图片/视频由设备端播放，每个模板至多一个
 )
+
+// regionImageLegacy 是早期版本的"静态图片区"：每台设备绑定一张上传图、由服务端合成进画面。
+// 媒体区（播放列表）完全覆盖了它的用途，已删除；旧 state.json 加载时迁移为媒体区。
+const regionImageLegacy = "image"
 
 // Template 是运营方定义的显示模板（画布 + 若干区域）。
 type Template struct {
@@ -65,18 +68,16 @@ type Region struct {
 
 // DisplayConfig 是一台设备的显示配置。
 type DisplayConfig struct {
-	Mode       string            `json:"mode"`                  // ""/"global" 跟随全局模板 | "template" 用本设备专属模板
-	TemplateID string            `json:"template_id,omitempty"` // Mode=template 时指向专属模板
-	Mirror     bool              `json:"mirror,omitempty"`      // 左右对调：属性在左还是在右，一个全局模板即可覆盖两种设备
-	Playlist   []string          `json:"playlist,omitempty"`    // 媒体区播放顺序，文件位于 media_root/<设备>/
-	Bindings   map[string]string `json:"bindings,omitempty"`    // 静态 image 区域 -> uploads/ 里的文件名
+	Mode       string   `json:"mode"`                  // "global" 跟随全局模板 | "template" 用本设备专属模板
+	TemplateID string   `json:"template_id,omitempty"` // Mode=template 时指向专属模板
+	Mirror     bool     `json:"mirror,omitempty"`      // 左右对调：属性在左还是在右，一个全局模板即可覆盖两种设备
+	Playlist   []string `json:"playlist,omitempty"`    // 媒体区播放顺序，文件位于 media_root/<设备>/
 }
 
-// Device 是自注册设备（静态配置的设备在 server.json 中，不在此处）。
+// Device 是自注册设备。设备编号就是它的名字（后台不提供改名）。
 type Device struct {
 	ID           string    `json:"id"`
 	Secret       string    `json:"secret"`
-	Name         string    `json:"name"`
 	RegisteredAt time.Time `json:"registered_at"`
 	Hostname     string    `json:"hostname,omitempty"`
 	HWSerial     string    `json:"hw_serial,omitempty"`
@@ -177,7 +178,36 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	st.s.init()
+	st.s.migrate()
 	return st, nil
+}
+
+// migrate 把旧版本 state.json 里已废弃的结构就地转换（内存里转，下次写盘时落地）：
+//   - 静态图片区（image）→ 媒体区：模板还没有媒体区时，第一个 image 区改成媒体区，其余删掉；
+//   - 显示模式 "playlist"（目录轮播，已删除）→ 跟随全局模板。
+func (s *State) migrate() {
+	for id, t := range s.Templates {
+		_, hasMedia := t.MediaRegion()
+		kept := t.Regions[:0]
+		for _, r := range t.Regions {
+			if r.Type == regionImageLegacy {
+				if hasMedia {
+					continue
+				}
+				r.Type, hasMedia = RegionMedia, true
+			}
+			kept = append(kept, r)
+		}
+		t.Regions = kept
+		s.Templates[id] = t
+	}
+	for id, d := range s.Displays {
+		if d.Mode != ModeTemplate {
+			d.Mode = ModeGlobal
+			d.TemplateID = ""
+		}
+		s.Displays[id] = d
+	}
 }
 
 // View 在读锁下访问状态；fn 内不得修改或保留 State 引用之外的可变数据。
@@ -231,14 +261,9 @@ func (st *Store) Display(deviceID string) DisplayConfig {
 	var d DisplayConfig
 	st.View(func(s *State) {
 		d = s.Displays[deviceID]
-		b := map[string]string{}
-		for k, v := range d.Bindings {
-			b[k] = v
-		}
-		d.Bindings = b
 		d.Playlist = append([]string(nil), d.Playlist...)
 	})
-	if d.Mode == "" {
+	if d.Mode != ModeTemplate {
 		d.Mode = ModeGlobal
 	}
 	return d
@@ -425,7 +450,7 @@ func ValidateTemplate(t *Template) error {
 		}
 		seen[r.ID] = true
 		switch r.Type {
-		case RegionAttribute, RegionText, RegionImage:
+		case RegionAttribute, RegionText:
 		case RegionMedia:
 			media++
 			if media > 1 {
@@ -470,7 +495,7 @@ const (
 	ModeTemplate = "template" // 用本设备专属模板
 )
 
-// ValidateDisplay 校验显示配置引用的模板与区域绑定。
+// ValidateDisplay 校验显示配置引用的模板。
 func ValidateDisplay(d *DisplayConfig, getTemplate func(string) (Template, bool)) error {
 	switch d.Mode {
 	case "", ModeGlobal:
@@ -481,18 +506,8 @@ func ValidateDisplay(d *DisplayConfig, getTemplate func(string) (Template, bool)
 	default:
 		return fmt.Errorf("display: 未知模式 %q", d.Mode)
 	}
-	t, ok := getTemplate(d.TemplateID)
-	if !ok {
+	if _, ok := getTemplate(d.TemplateID); !ok {
 		return fmt.Errorf("display: 模板 %q 不存在", d.TemplateID)
-	}
-	regionIDs := map[string]bool{}
-	for _, r := range t.Regions {
-		regionIDs[r.ID] = true
-	}
-	for rid := range d.Bindings {
-		if !regionIDs[rid] {
-			return fmt.Errorf("display: 绑定了不存在的区域 %q", rid)
-		}
 	}
 	return nil
 }

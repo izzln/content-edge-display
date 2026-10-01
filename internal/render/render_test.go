@@ -5,26 +5,11 @@ import (
 	"crypto/sha256"
 	"image"
 	"image/color"
-	"image/png"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/store"
 )
-
-// testTemplate: 左半属性 + 右半静态图片（不含媒体区）。
-func testTemplate() store.Template {
-	t := store.Template{ID: "t1", Regions: []store.Region{
-		{ID: "left", X: 0, Y: 0, W: 720, H: 900, Type: store.RegionAttribute, Key: "room", Bg: "#1E3A8A"},
-		{ID: "right", X: 720, Y: 0, W: 720, H: 900, Type: store.RegionImage},
-	}}
-	if err := store.ValidateTemplate(&t); err != nil {
-		panic(err)
-	}
-	return t
-}
 
 // mediaTemplate: 左半属性 + 右半媒体区（播放列表）。
 func mediaTemplate() store.Template {
@@ -47,109 +32,66 @@ func encode(t *testing.T, img image.Image) []byte {
 	return buf.Bytes()
 }
 
-// writePNG 写一张 w×h 的纯色图到 dir/name。
-func writePNG(t *testing.T, dir, name string, w, h int, c color.RGBA) {
+func newRenderer(t *testing.T) *Renderer {
 	t.Helper()
-	src := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			src.SetRGBA(x, y, c)
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, src); err != nil {
+	r, err := New("")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return r
 }
 
 func TestRenderDeterministicAndAttrSensitive(t *testing.T) {
-	r, err := New("", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
+	r := newRenderer(t)
+	tpl := mediaTemplate()
+	render := func(room string) *Rendered {
+		out, err := r.Render(tpl, map[string]string{"room": room}, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
 	}
-	tpl := testTemplate()
 
-	one, err := r.Render(tpl, map[string]string{"room": "302"}, nil, false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	one := render("302")
 	if got := one.Image.Bounds(); got.Dx() != 1440 || got.Dy() != 900 {
 		t.Fatalf("wrong canvas size: %v", got)
 	}
-	if one.HasMedia {
-		t.Fatal("模板没有媒体区，HasMedia 应为 false")
+	if sha256.Sum256(encode(t, one.Image)) != sha256.Sum256(encode(t, render("302").Image)) {
+		t.Fatal("same input should render identical output（版本号稳定依赖于此）")
 	}
-	two, err := r.Render(tpl, map[string]string{"room": "302"}, nil, false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sha256.Sum256(encode(t, one.Image)) != sha256.Sum256(encode(t, two.Image)) {
-		t.Fatal("same input should render identical output")
-	}
-	three, err := r.Render(tpl, map[string]string{"room": "999"}, nil, false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sha256.Sum256(encode(t, one.Image)) == sha256.Sum256(encode(t, three.Image)) {
+	if sha256.Sum256(encode(t, one.Image)) == sha256.Sum256(encode(t, render("999").Image)) {
 		t.Fatal("attribute change must change output")
 	}
-	// 区域底色确实画上了
 	if c := one.Image.RGBAAt(360, 10); c != (color.RGBA{0x1E, 0x3A, 0x8A, 0xFF}) {
 		t.Fatalf("left region bg wrong: %+v", c)
 	}
 }
 
-func TestRenderImageRegionCover(t *testing.T) {
-	uploads := t.TempDir()
-	// 源图比区域扁得多（100×50 对 720×900）：cover 必须按宽撑满并裁掉上下，
-	// 区域四角都应被填满，不留底色。
-	writePNG(t, uploads, "red.png", 100, 50, color.RGBA{0xFF, 0, 0, 0xFF})
-
-	r, err := New("", uploads)
+func TestRenderWithoutMediaRegion(t *testing.T) {
+	tpl := store.Template{ID: "t", Regions: []store.Region{
+		{ID: "txt", X: 0, Y: 0, W: 1440, H: 900, Type: store.RegionText, Key: "欢迎"},
+	}}
+	if err := store.ValidateTemplate(&tpl); err != nil {
+		t.Fatal(err)
+	}
+	out, err := newRenderer(t).Render(tpl, nil, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := r.Render(testTemplate(), nil, map[string]string{"right": "red.png"}, false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	red := func(x, y int) bool {
-		c := out.Image.RGBAAt(x, y)
-		return c.R > 0xF0 && c.G < 0x20 && c.B < 0x20
-	}
-	for _, p := range []image.Point{
-		{720 + 360, 450}, // 中心
-		{721, 1},         // 左上
-		{1438, 1},        // 右上
-		{721, 898},       // 左下
-		{1438, 898},      // 右下
-	} {
-		if !red(p.X, p.Y) {
-			t.Fatalf("cover 未铺满区域，(%d,%d) = %+v", p.X, p.Y, out.Image.RGBAAt(p.X, p.Y))
-		}
-	}
-
-	// 路径穿越防护
-	if _, err := r.Render(testTemplate(), nil, map[string]string{"right": "../red.png"}, false, false); err == nil {
-		t.Fatal("path traversal in binding accepted")
+	if out.HasMedia {
+		t.Fatal("模板没有媒体区，HasMedia 应为 false")
 	}
 }
 
 func TestRenderMirror(t *testing.T) {
-	r, err := New("", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newRenderer(t)
 	tpl := mediaTemplate()
 
-	plain, err := r.Render(tpl, map[string]string{"room": "302"}, nil, false, true)
+	plain, err := r.Render(tpl, map[string]string{"room": "302"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	flipped, err := r.Render(tpl, map[string]string{"room": "302"}, nil, true, true)
+	flipped, err := r.Render(tpl, map[string]string{"room": "302"}, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,13 +111,10 @@ func TestRenderMirror(t *testing.T) {
 }
 
 func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
-	r, err := New("", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newRenderer(t)
 	tpl := mediaTemplate()
 
-	overlay, err := r.Render(tpl, map[string]string{"room": "302"}, nil, false, true)
+	overlay, err := r.Render(tpl, map[string]string{"room": "302"}, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +133,7 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 	}
 
 	// 整屏图：媒体区填自己的底色（媒体区没内容时用这张，不会黑屏）
-	full, err := r.Render(tpl, map[string]string{"room": "302"}, nil, false, false)
+	full, err := r.Render(tpl, map[string]string{"room": "302"}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,12 +143,9 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 }
 
 func TestRenderTestCard(t *testing.T) {
-	r, err := New("", t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newRenderer(t)
 	until := time.Now().Add(5 * time.Minute)
-	img, err := r.RenderTestCard(1440, 900, "dev-001", "客户A", map[string]string{"room": "302"}, until)
+	img, err := r.RenderTestCard(1440, 900, "dev-001", map[string]string{"room": "302"}, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,14 +157,14 @@ func TestRenderTestCard(t *testing.T) {
 		t.Fatalf("test card bg wrong: %+v", c)
 	}
 	// 同输入两次渲染字节一致（保证清单版本稳定）
-	img2, _ := r.RenderTestCard(1440, 900, "dev-001", "客户A", map[string]string{"room": "302"}, until)
+	img2, _ := r.RenderTestCard(1440, 900, "dev-001", map[string]string{"room": "302"}, until)
 	if sha256.Sum256(encode(t, img)) != sha256.Sum256(encode(t, img2)) {
 		t.Fatal("test card render not deterministic")
 	}
 }
 
 func TestNewBadFontPath(t *testing.T) {
-	if _, err := New("/no/such/font.ttf", t.TempDir()); err == nil {
+	if _, err := New("/no/such/font.ttf"); err == nil {
 		t.Fatal("expected error for missing font file")
 	}
 }

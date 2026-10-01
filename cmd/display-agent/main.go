@@ -36,9 +36,9 @@ func main() {
 		if err := os.MkdirAll(filepath.Dir(cfg.MpvSocket), 0o755); err != nil {
 			log.Fatalf("create mpv socket dir: %v", err)
 		}
-		p = player.NewMPV(cfg.MpvSocket,
-			filepath.Join(cfg.CacheDir, "playlist.m3u"),
-			cfg.ImageDurationS, cfg.MpvExtraArgs)
+		// 输出模式放在前面，mpv_extra_args 里若另有 --drm-mode 以后者为准（mpv 取最后一次出现的值）
+		args := append(agent.DRMModeArgs(cfg.DisplayMode), cfg.MpvExtraArgs...)
+		p = player.NewMPV(cfg.MpvSocket, filepath.Join(cfg.CacheDir, "playlist.m3u"), args)
 	case "null":
 		p = player.NewNull()
 	}

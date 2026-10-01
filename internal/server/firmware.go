@@ -73,7 +73,7 @@ func (s *Server) updateCommand(deviceID string, now time.Time) (manifest.Command
 	if !ok || now.Before(target.NotBefore) {
 		return manifest.Command{}, false
 	}
-	if s.agentVersion(deviceID) == target.Version {
+	if dev, _ := s.store.Device(deviceID); dev.AgentVersion == target.Version {
 		return manifest.Command{}, false
 	}
 	fw, ok := s.store.FirmwareByVersion(target.Version)
@@ -87,21 +87,6 @@ func (s *Server) updateCommand(deviceID string, now time.Time) (manifest.Command
 		SHA256:  fw.SHA256,
 		Size:    fw.Size,
 	}, true
-}
-
-// handleFirmwareDownload 设备侧下载固件（签名认证 + Range 续传）。
-func (s *Server) handleFirmwareDownload(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authenticate(r); err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	name := r.PathValue("file")
-	if name == "" || strings.HasPrefix(name, ".") ||
-		strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		http.Error(w, "bad file name", http.StatusBadRequest)
-		return
-	}
-	http.ServeFile(w, r, filepath.Join(s.firmwareDir(), name))
 }
 
 // ---- 管理接口 ----
@@ -232,7 +217,7 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for _, id := range targets {
-			if _, ok := s.deviceByID(id); !ok {
+			if _, ok := s.store.Device(id); !ok {
 				http.Error(w, "未知设备 "+id, http.StatusBadRequest)
 				return
 			}

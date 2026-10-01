@@ -74,9 +74,9 @@ systemctl daemon-reload && systemctl enable --now display-server
 /srv/display/
   display-server      二进制
   server.json         配置
-  media/<设备ID>/     目录轮播模式要播的图片与视频（运营方放）
+  media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
   fonts/              渲染用字体
-  data/               服务端状态：state.json、uploads/、firmware/、rendered/（首次启动自动创建）
+  data/               服务端状态：state.json、firmware/、rendered/、incoming/（首次启动自动创建）
 ```
 
 **配置里的相对路径按 `server.json` 所在目录解析**，与进程工作目录无关——systemd 启动服务时
@@ -94,6 +94,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
 | `timezone` | 时段计划所用时区，默认取系统时区 |
+| `ffmpeg_path` | 可选，ffmpeg 路径；留空在 PATH 里找。找不到时视频不转码（见 5.1） |
 
 `media_root` 与 `data_dir` 及其子目录在服务端启动时自动创建，不用手工 mkdir。
 
@@ -146,17 +147,26 @@ make tokens     # 查看当前口令；文件不存在时生成
 
 ### 3.2 固定 HDMI 输出为 1440×900 并禁用息屏
 
-编辑 `/boot/armbianEnv.txt`（`install-agent.sh` 会自动追加，手工部署时可自己加）：
+面板的 EDID 往往把 1920×1080 报成首选模式，**要在两个地方都指定**，`install-agent.sh` 会一并写好：
 
-```
-extraargs=video=HDMI-A-1:1440x900@60 consoleblank=0
-```
+| 位置 | 内容 | 管什么 |
+|---|---|---|
+| `/boot/armbianEnv.txt` 的 `extraargs` | `video=HDMI-A-1:1440x900@60 consoleblank=0` | 内核控制台的输出模式；`consoleblank=0` 禁用息屏 |
+| `/etc/display-agent/agent.json` | `"display_mode": "1440x900@60"` | 传给 mpv 的 `--drm-mode` |
 
-- `video=HDMI-A-1:1440x900@60`：内核 KMS 强制输出该模式，**不依赖显示器 EDID**
-  （廉价 HDMI 驱动板的 EDID 常不可靠，强制指定最稳）；
-- `consoleblank=0`：禁用控制台自动息屏。
+只改第一处是不够的：**mpv 走 DRM 输出时默认用 EDID 的首选模式（`--drm-mode=preferred`），
+不理会内核的 `video=` 参数**，于是控制台是 1440×900、一播放内容又变回 1080p。
+代理只在显示屏确实提供该模式时才传 `--drm-mode`——mpv 找不到指定模式会初始化失败、黑屏，
+宁可按首选模式输出也不能黑。
 
-重启后 `cat /sys/class/drm/card*-HDMI-A-1/modes` 首行应为 `1440x900`。
+驱动板 EDID 里压根没有 1440×900 时，内核会忽略 `video=`，该模式也不会出现在可用列表里。
+这时加 `,e` 强制输出：`HDMI_FORCE=e ./install-agent.sh`（即 `video=HDMI-A-1:1440x900@60,e`）。
+
+改完要**重启**，然后运行 `/usr/local/lib/display-agent/check-display.sh` 确认（见 3.4）。
+
+> 即便最终输出分辨率与模板画布不一致，画面也不会错位：设备端会按 mpv 的实际输出分辨率
+> 重新缩放叠加图（媒体区的位置本来就是按比例算的）。只是非等比时属性文字会有轻微形变，
+> 所以仍应把输出模式配对。
 
 ### 3.3 安装 mpv 与代理
 
@@ -168,16 +178,51 @@ scp bin/display-agent-*-armv7.tar.gz root@<设备IP>:/root/
 tar xzf display-agent-*-armv7.tar.gz && cd display-agent-*/
 SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
 SERVER_URL=http://display.lan:8080 ./install-agent.sh   # 注册口令取包内 enroll-token
+reboot                                                  # 让 HDMI 模式生效
 systemctl start display-agent
 journalctl -u display-agent -n 20     # 应看到注册成功
+/usr/local/lib/display-agent/check-display.sh            # 见 3.4
+systemctl enable display-agent        # 确认无误后再设为开机自启
 ```
+
+`install-agent.sh` 的两个行为要知道：
+
+- **每次运行都会重写** `/etc/display-agent/agent.json`（改服务端地址重跑一遍即可，不用先删文件）。
+  设备编号与密钥在 `/var/lib/display-agent/identity.json`，不受影响；
+- **装完不会 enable 服务**，要人工确认画面无误后自己 `systemctl enable display-agent`。
+  做母镜像时别忘了这一步，否则烧出来的设备开机不播放（见 4.2）。
 
 设备会自动注册并出现在管理后台（在线），编号规则见 4.1。
 
 mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/etc/display-agent/agent.json`
-的 `mpv_extra_args` 中加 `["--vo=gpu", "--gpu-context=drm"]`。H3 的硬解（Cedrus/v4l2）
-视内核版本而定，`--hwdec=auto-safe` 不可用时自动回退软解——1440×900 的 H.264 软解 H3 也够用，
-但投放视频仍建议控制在 **H.264 / ≤1440×900 / ≤30fps**。
+的 `mpv_extra_args` 中加 `["--vo=gpu", "--gpu-context=drm"]`。
+
+### 3.4 确认分辨率、硬件解码与温度
+
+```sh
+/usr/local/lib/display-agent/check-display.sh
+```
+
+逐项检查并给出处理办法，有问题时退出码为 1：
+
+| 项 | 怎么判断 | 不对时的现场表现 |
+|---|---|---|
+| 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 首行 | 控制台分辨率不对 |
+| mpv 输出分辨率 | mpv 属性 `osd-dimensions` | 内容画面与模板对不上（已自动缩放，但会形变） |
+| 硬件解码 | mpv 属性 `hwdec-current`：`no` 即软解 | 卡顿、发热，严重时过热关机 |
+| SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
+
+后三项也随心跳上报，**管理后台设备列表里直接能看到**：软解与 80°C 以上标红，
+输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台在软解或过热。
+
+要手工确认 mpv 的解码方式，也可以在设备上直接播一段：
+
+```sh
+systemctl stop display-agent
+mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -iE "hwdec|Using hardware"
+# 期望看到类似 "Using hardware decoding (v4l2m2m-copy)" 或 drm 相关字样；
+# 只有 "Using software decoding" 则说明硬解没起来：确认 ls /dev/video* 里有 cedrus 设备、视频是 H.264
+```
 
 ## 4. 设备端：母镜像批量部署
 
@@ -202,6 +247,7 @@ mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/
 先按第 3 节把一台样机完整装好并验证通过，然后清理成"出厂状态"：
 
 ```sh
+systemctl enable display-agent    # install-agent.sh 不会自动 enable；母镜像里必须开着，否则烧出来的设备开机不播放
 systemctl stop display-agent
 rm -f /var/lib/display-agent/identity.json /var/lib/display-agent/current.json
 rm -rf /var/lib/display-agent/media/* /var/lib/display-agent/playlist.m3u
@@ -247,13 +293,19 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
   `{模板, 星期, 起止时间}`，支持跨午夜；无命中回落全局模板；
 - 生效延迟 ≈ 设备的 `poll_interval_s`（局域网建议 5~10s，304 轮询开销可忽略）。
 
-**上传限制**（超限会当场拒收并说明原因，不会等到现场才发现）：
+**上传与转码**：
 
-| | 限制 | 为什么 |
+| | 处理 | 为什么 |
 |---|---|---|
-| 图片 | png/jpg，≤ 20MB **且** ≤ 约 1200 万像素 | 屏幕只有 1440×900；1200 万像素解码成 RGBA 就占 48MB，设备只有 1GB 内存 |
-| 视频 | mp4/mov，≤ 500MB | |
-| 视频编码 | **必须 H.264** | H3 芯片没有 HEVC 硬解，1440×900 的 H.265 软解也带不动。服务端解析容器取编码标识，H.265 直接拒收并提示用 `ffmpeg -c:v libx264` 重新编码 |
+| 图片 | png/jpg ≤ 20MB；超过 1440×900 的**自动等比缩小** | 设备只有 1GB 内存，解码后的位图是 宽×高×4 字节；在服务端缩一次，所有设备都省 |
+| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 原片码率动辄 10~20Mbps，即使能硬解，持续高码率也会让 H3 发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
+
+转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后自动加到播放列表末尾
+（未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
+
+服务端需要装 `ffmpeg`（`apt install ffmpeg`，或在 `server.json` 里用 `ffmpeg_path` 指定）。
+**没装时不能上传视频**（图片照常），管理后台顶部会醒目提示。未转码的原片码率控制不住，
+下发到设备就是过热隐患，所以宁可当场拒收。
 
 **模板**：至多有一个"播放内容"区域（mpv 只能把视频放进一个矩形）。
 只剩一个模板时不能删除——系统始终需要一个全局默认模板；删掉当前的全局模板时，
@@ -261,7 +313,7 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 
 ### 5.2 现场定位
 
-**设备**页每行【测试】→ 选 1/5/15 分钟：该屏全屏显示"测试"卡片（含设备名与属性），到期自动恢复。
+**设备**页每行【测试】→ 选 1/5/15 分钟：该屏全屏显示"测试"卡片（含设备编号与属性），到期自动恢复。
 这条路径与正常内容走同一套分发管线，因此测试成功本身就验证了整条链路。
 
 ### 5.3 程序 OTA
@@ -300,9 +352,7 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 所以新增设备端配置项时，务必让"缺省值即可用"——否则这批设备就得逐台登录。
 
-**播放能力现状**：图片与视频都已支持（H.264 MP4 等，见 `internal/manifest` 的扩展名表），
-目录轮播模式下图文混排、视频播完自动切下一条、列表循环都已实测可用；视频不需要任何升级。
-模板渲染的是静态图，因此"模板里嵌视频"目前不支持，那需要服务端配合，不是仅升级代理能做到的。
+**播放能力现状**：模板媒体区里图文混排、视频播完自动切下一条、列表循环都已实测可用。
 
 ## 6. 服务端升级与数据迁移
 
@@ -312,10 +362,9 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 | 路径 | 内容 | 要不要保留 |
 |---|---|---|
 | `data/state.json` | 设备（含自注册设备的密钥）、属性、模板、时段、全局设置、固件元数据、更新目标 | **必须** |
-| `data/uploads/` | 后台上传的图片 | **必须** |
 | `data/firmware/` | 上传的代理程序 | 建议（否则待下发的更新目标会失效） |
 | `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
-| `media/` | 目录轮播模式的内容 | **必须** |
+| `media/` | 各设备的播放内容 | **必须** |
 | `server.json` | 配置（含两个口令） | **必须**。另外把 `.secrets/tokens.env` 也备份到构建机之外 |
 
 ### 6.1 原地升级
@@ -357,7 +406,8 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 | 检查项 | 方法 |
 |---|---|
-| HDMI 输出 1440×900 | `cat /sys/class/drm/card*-HDMI-A-1/modes` 首行为 1440x900 |
+| 分辨率 / 硬解 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示"硬解 xxx"、1440×900、温度正常 |
+| 开机自启 | `systemctl is-enabled display-agent` 为 enabled（安装脚本不会自动 enable） |
 | 网络连通 | `curl -sI http://<服务器>:8080` 有响应 |
 | 代理运行 | `systemctl status display-agent` active (running) |
 | 软看门狗 | `systemctl show display-agent -p WatchdogTimestamp` 持续更新 |
@@ -380,8 +430,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 ## 9. 当前已知简化
 
-- 图片展示时长写在**模板**里（设备端 agent.json 的 `image_duration_s` 只是收到第一份清单之前的兜底）；
-  同一份清单里的图片共用一个时长，暂不支持逐条目时长——mpv 的 m3u 不支持逐条目选项。
+- 图片展示时长写在**模板**里；同一份清单里的图片共用一个时长，暂不支持逐条目时长——mpv 的 m3u 不支持逐条目选项。
   单张静态图用 `inf`，不会周期性重载；
 - 模板里的"播放内容"区域靠 mpv 的 `overlay-add` 合成。本地已在 X11 输出上验证通过，
   **样机上需再确认 DRM 输出（`--vo=gpu --gpu-context=drm`）下叠加层正常，再对整批设备下发 OTA**。

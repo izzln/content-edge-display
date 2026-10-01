@@ -80,7 +80,7 @@ func TestValidateTemplate(t *testing.T) {
 	valid := func() Template {
 		return Template{ID: "t1", Regions: []Region{
 			{ID: "left", X: 0, Y: 0, W: 720, H: 900, Type: "attribute", Key: "room"},
-			{ID: "right", X: 720, Y: 0, W: 720, H: 900, Type: "image"},
+			{ID: "right", X: 720, Y: 0, W: 720, H: 900, Type: "media"},
 		}}
 	}
 
@@ -103,16 +103,16 @@ func TestValidateTemplate(t *testing.T) {
 		func(x *Template) { x.Background = "red" },
 		func(x *Template) { x.Regions = nil },
 		func(x *Template) { x.Regions[0].Type = "video" },
-		func(x *Template) { x.Regions[0].Key = "" },    // attribute 必须有 key
-		func(x *Template) { x.Regions[1].ID = "left" }, // 重复 id
-		func(x *Template) { x.Regions[0].W = 2000 },    // 越界
+		func(x *Template) { x.Regions[1].Type = "image" }, // 静态图片区已删除
+		func(x *Template) { x.Regions[0].Key = "" },       // attribute 必须有 key
+		func(x *Template) { x.Regions[1].ID = "left" },    // 重复 id
+		func(x *Template) { x.Regions[0].W = 2000 },       // 越界
 		func(x *Template) { x.Regions[0].X = -1 },
 		func(x *Template) { x.Regions[0].Align = "top" },
 		func(x *Template) { x.Regions[0].Color = "#12345" },
 		func(x *Template) { x.ImageDurationS = 99999 }, // 停留时长上限
 		func(x *Template) { // 一个模板至多一个媒体区（mpv 只能把视频放进一个矩形）
 			x.Regions[0].Type, x.Regions[0].Key = RegionMedia, ""
-			x.Regions[1].Type = RegionMedia
 		},
 	}
 	for i, mutate := range cases {
@@ -127,7 +127,7 @@ func TestValidateTemplate(t *testing.T) {
 func TestValidateDisplay(t *testing.T) {
 	get := func(id string) (Template, bool) {
 		if id == "t1" {
-			return Template{ID: "t1", Regions: []Region{{ID: "right", Type: "image"}}}, true
+			return Template{ID: "t1", Regions: []Region{{ID: "right", Type: RegionMedia}}}, true
 		}
 		return Template{}, false
 	}
@@ -136,17 +136,17 @@ func TestValidateDisplay(t *testing.T) {
 	if err := ValidateDisplay(&d, get); err != nil || d.Mode != ModeGlobal {
 		t.Fatalf("空配置应当默认跟随全局模板：%v %+v", err, d)
 	}
-	d = DisplayConfig{Mode: "template", TemplateID: "t1", Bindings: map[string]string{"right": "a.png"}}
+	d = DisplayConfig{Mode: "global", TemplateID: "t1"}
+	if err := ValidateDisplay(&d, get); err != nil || d.TemplateID != "" {
+		t.Fatalf("跟随全局时不应保留专属模板：%v %+v", err, d)
+	}
+	d = DisplayConfig{Mode: "template", TemplateID: "t1"}
 	if err := ValidateDisplay(&d, get); err != nil {
 		t.Fatalf("valid display rejected: %v", err)
 	}
 	d = DisplayConfig{Mode: "template", TemplateID: "missing"}
 	if err := ValidateDisplay(&d, get); err == nil {
 		t.Fatal("missing template accepted")
-	}
-	d = DisplayConfig{Mode: "template", TemplateID: "t1", Bindings: map[string]string{"nope": "a.png"}}
-	if err := ValidateDisplay(&d, get); err == nil {
-		t.Fatal("binding to unknown region accepted")
 	}
 	d = DisplayConfig{Mode: "weird"}
 	if err := ValidateDisplay(&d, get); err == nil {
@@ -207,5 +207,54 @@ func TestMirrored(t *testing.T) {
 	}
 	if c := Mirrored(Region{X: 100, W: 200, Align: "center"}, 1000); c.X != 700 || c.Align != "center" {
 		t.Fatalf("居中对齐不应改变：%+v", c)
+	}
+}
+
+// 旧版本 state.json：静态图片区（image）与目录轮播模式（playlist）都已删除，加载时要迁移，
+// 否则升级服务端后现场设备会没有媒体区可放内容。
+func TestOpenMigratesLegacyState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{
+	  "templates": {
+	    "split": {"id":"split","w":1440,"h":900,"regions":[
+	      {"id":"left","x":0,"y":0,"w":720,"h":900,"type":"attribute","key":"room"},
+	      {"id":"right","x":720,"y":0,"w":720,"h":900,"type":"image"},
+	      {"id":"logo","x":0,"y":0,"w":100,"h":100,"type":"image"}]},
+	    "both": {"id":"both","w":1440,"h":900,"regions":[
+	      {"id":"m","x":0,"y":0,"w":720,"h":900,"type":"media"},
+	      {"id":"logo","x":720,"y":0,"w":100,"h":100,"type":"image"}]}
+	  },
+	  "displays": {
+	    "dev-1": {"mode":"playlist","bindings":{"right":"a.png"}},
+	    "dev-2": {"mode":"template","template_id":"split"}
+	  },
+	  "devices": {"dev-1": {"id":"dev-1","secret":"s","name":"旧名字"}}
+	}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	split, _ := st.Template("split")
+	if len(split.Regions) != 2 || split.Regions[1].ID != "right" || split.Regions[1].Type != RegionMedia {
+		t.Fatalf("第一个 image 区应转成媒体区、其余删掉：%+v", split.Regions)
+	}
+	both, _ := st.Template("both")
+	if len(both.Regions) != 1 || both.Regions[0].Type != RegionMedia {
+		t.Fatalf("已有媒体区时 image 区直接删掉：%+v", both.Regions)
+	}
+	if err := ValidateTemplate(&split); err != nil {
+		t.Fatalf("迁移后的模板应当合法：%v", err)
+	}
+	if d := st.Display("dev-1"); d.Mode != ModeGlobal {
+		t.Fatalf("目录轮播模式应迁移为跟随全局：%+v", d)
+	}
+	if d := st.Display("dev-2"); d.Mode != ModeTemplate || d.TemplateID != "split" {
+		t.Fatalf("专属模板配置应保持不变：%+v", d)
+	}
+	if _, ok := st.Device("dev-1"); !ok {
+		t.Fatal("设备记录不应丢失")
 	}
 }

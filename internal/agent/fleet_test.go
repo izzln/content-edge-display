@@ -39,7 +39,7 @@ func TestDeriveDeviceID(t *testing.T) {
 
 func TestIdentityPersistence(t *testing.T) {
 	cfg := &Config{CacheDir: t.TempDir()}
-	hw := HardwareInfo{Hostname: "orangepione", HWSerial: "0123456789abcdef"}
+	hw := HardwareInfo{Hostname: "orangepione", HWSerial: "0123456789abcdef"} // 默认主机名不能当编号
 
 	id1, err := loadOrCreateIdentity(cfg, hw)
 	if err != nil {
@@ -67,10 +67,11 @@ func TestIdentityPersistence(t *testing.T) {
 	}
 }
 
-func TestConfigRequiresEnrollOrStatic(t *testing.T) {
-	c := &Config{ServerURL: "http://x"}
+// 设备只能自注册加入，没有 enroll_token 的代理永远不会被服务端认出来——加载配置时就报错。
+func TestConfigRequiresEnrollToken(t *testing.T) {
+	c := &Config{ServerURL: "http://x", DeviceID: "explicit"}
 	if err := c.fillDefaults(); err == nil {
-		t.Fatal("expected error without enroll_token or device_id/secret")
+		t.Fatal("expected error without enroll_token")
 	}
 	c = &Config{ServerURL: "http://x", EnrollToken: "tok"}
 	if err := c.fillDefaults(); err != nil {
@@ -168,13 +169,10 @@ func TestApplyUpdateSwitchesSymlinks(t *testing.T) {
 	// 固件下载与媒体下载共用签名下载器：用设备媒体目录里的文件充当"固件"取得 URL/sha。
 	content := []byte("brand-new-binary")
 	os.WriteFile(filepath.Join(devDir, "fw.mp4"), content, 0o644)
-	m, err := manifest.BuildFromDir(devDir, testDeviceID, 10, manifest.NewHashCache())
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := manifest.Command{Type: "update", Version: "2.0.0", URL: m.Items[0].URL, SHA256: m.Items[0].SHA256, Size: m.Items[0].Size}
+	fw := mediaItem(t, devDir, "fw.mp4")
+	cmd := manifest.Command{Type: "update", Version: "2.0.0", URL: fw.URL, SHA256: fw.SHA256, Size: fw.Size}
 
-	err = a.handleCommands(ctx, []manifest.Command{cmd})
+	err := a.handleCommands(ctx, []manifest.Command{cmd})
 	if !errors.Is(err, ErrRestartForUpdate) {
 		t.Fatalf("expected ErrRestartForUpdate, got %v", err)
 	}

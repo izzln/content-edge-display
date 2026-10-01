@@ -20,32 +20,25 @@ import (
 
 // ---- 测试素材 ----
 
-// box 拼一个 ISO-BMFF 盒子。
-func box(typ string, parts ...[]byte) []byte {
-	var body []byte
-	for _, p := range parts {
-		body = append(body, p...)
-	}
-	out := make([]byte, 4)
-	binary.BigEndian.PutUint32(out, uint32(8+len(body)))
-	return append(append(out, typ...), body...)
-}
-
 func u32(v uint32) []byte {
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint32(b, v)
 	return b
 }
 
-// mp4Fixture 造一个只有盒子骨架的 MP4：编码 fourcc 是我们唯一关心的信息。
-// 解析逻辑另外在真实的 ffmpeg 产物上验证过（libx264→avc1、libx265→hev1、.mov→avc1）。
-func mp4Fixture(fourcc string) []byte {
-	sampleEntry := box(fourcc, make([]byte, 70)) // 其余字段与本测试无关
-	stsd := box("stsd", u32(0), u32(1), sampleEntry)
-	moov := box("moov", box("trak", box("mdia", box("minf", box("stbl", stsd)))))
-	ftyp := box("ftyp", []byte("isom"), u32(0x200), []byte("isomiso2avc1mp41"))
-	mdat := box("mdat", bytes.Repeat([]byte{0}, 64))
-	return append(append(ftyp, moov...), mdat...)
+// fakeVideo 是测试用的"视频"内容：真实转码另有测试，这里只关心上传与排队流程。
+var fakeVideo = []byte("not really a video")
+
+// putMediaFile 直接往设备媒体目录放一个文件（模拟运营方拷进 media_root，或已转码完成的产物）。
+func putMediaFile(t *testing.T, s *Server, name string, data []byte) {
+	t.Helper()
+	dir := s.deviceMediaDir(testDeviceID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // pngHeaderFixture 造一个只有 IHDR 的 PNG：image.DecodeConfig 只读文件头，
@@ -63,6 +56,11 @@ func tinyPNG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
 	img.SetRGBA(0, 0, color.RGBA{0xFF, 0, 0, 0xFF})
+	return encodePNG(t, img)
+}
+
+func encodePNG(t *testing.T, img image.Image) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
@@ -97,8 +95,9 @@ func uploadMedia(t *testing.T, h http.Handler, deviceID string, files ...upload)
 }
 
 type uploadResult struct {
-	Accepted []string `json:"accepted"`
-	Rejected []struct {
+	Accepted    []string `json:"accepted"`
+	Transcoding []string `json:"transcoding"`
+	Rejected    []struct {
 		Name   string `json:"name"`
 		Reason string `json:"reason"`
 	} `json:"rejected"`
@@ -114,42 +113,6 @@ func parseUpload(t *testing.T, w *httptest.ResponseRecorder) uploadResult {
 	return res
 }
 
-// ---- 编码识别 ----
-
-func TestVideoCodecGate(t *testing.T) {
-	cases := []struct {
-		name    string
-		data    []byte
-		wantErr string // 空表示应当放行
-	}{
-		{"h264-avc1", mp4Fixture("avc1"), ""},
-		{"h264-avc3", mp4Fixture("avc3"), ""},
-		{"h265-hvc1", mp4Fixture("hvc1"), "H.265"},
-		{"h265-hev1", mp4Fixture("hev1"), "H.265"},
-		{"av1", mp4Fixture("av01"), "AV1"},
-		{"no-video-track", mp4Fixture("mp4a"), "没有找到视频轨道"},
-		{"not-a-mp4", []byte("这不是 MP4 文件，只是一段文字而已"), "不是有效的 MP4"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			err := checkVideoPlayable(bytes.NewReader(c.data), int64(len(c.data)))
-			switch {
-			case c.wantErr == "" && err != nil:
-				t.Fatalf("应当放行，却被拒：%v", err)
-			case c.wantErr != "" && err == nil:
-				t.Fatal("应当拒收，却放行了")
-			case c.wantErr != "" && !strings.Contains(err.Error(), c.wantErr):
-				t.Fatalf("拒收原因应包含 %q，得到：%v", c.wantErr, err)
-			}
-		})
-	}
-	// H.265 的提示必须可操作：告诉运营方怎么办，而不只是说不行
-	err := checkVideoPlayable(bytes.NewReader(mp4Fixture("hvc1")), int64(len(mp4Fixture("hvc1"))))
-	if !strings.Contains(err.Error(), "H.264") || !strings.Contains(err.Error(), "ffmpeg") {
-		t.Fatalf("拒收提示应告诉运营方怎么重新编码，得到：%v", err)
-	}
-}
-
 // ---- 上传校验 ----
 
 func TestDeviceMediaUploadValidation(t *testing.T) {
@@ -157,25 +120,26 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 	dev := "/api/v1/admin/devices/" + testDeviceID + "/media"
 
 	res := parseUpload(t, uploadMedia(t, h, testDeviceID,
-		upload{"promo.jpg", tinyPNG(t)}, // 后缀是 jpg 但内容是 PNG：解码器认内容，应当通过
-		upload{"clip.mp4", mp4Fixture("avc1")},
-		upload{"hevc.mp4", mp4Fixture("hvc1")},
-		upload{"huge.png", pngHeaderFixture(4000, 3100)},
+		upload{"promo.jpg", tinyPNG(t)},                     // 后缀是 jpg 但内容是 PNG：解码器认内容，应当通过
+		upload{"clip.mp4", fakeVideo},                       // 测试服务端没有 ffmpeg：视频一律拒收
+		upload{"huge.png", pngHeaderFixture(8000, 7000)},    // 5600 万像素，超过服务端上限
+		upload{"truncated.png", pngHeaderFixture(800, 600)}, // 只有文件头，内容被截断
 		upload{"notes.txt", []byte("hello")},
 		upload{"broken.png", []byte("not a png at all")},
 	))
-	if len(res.Accepted) != 2 {
-		t.Fatalf("应当只收下 2 个文件，得到 %v（拒收 %+v）", res.Accepted, res.Rejected)
+	if len(res.Accepted) != 1 {
+		t.Fatalf("应当只收下 1 个文件，得到 %v（拒收 %+v）", res.Accepted, res.Rejected)
 	}
 	reasons := map[string]string{}
 	for _, r := range res.Rejected {
 		reasons[r.Name] = r.Reason
 	}
 	for name, want := range map[string]string{
-		"hevc.mp4":   "H.264",
-		"huge.png":   "像素过大",
-		"notes.txt":  "不支持的文件类型",
-		"broken.png": "无法解码",
+		"clip.mp4":      "ffmpeg", // 未转码的视频会让设备过热，宁可不收
+		"huge.png":      "像素过大",
+		"notes.txt":     "不支持的文件类型",
+		"broken.png":    "无法解码",
+		"truncated.png": "无法解码",
 	} {
 		if !strings.Contains(reasons[name], want) {
 			t.Errorf("%s 的拒收原因应包含 %q，得到 %q", name, want, reasons[name])
@@ -183,7 +147,7 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 	}
 	// 被拒的文件不能留在目录里
 	w := do(t, h, adminReq("GET", dev, nil), http.StatusOK)
-	for _, bad := range []string{"hevc.mp4", "huge.png", "notes.txt", "broken.png"} {
+	for _, bad := range []string{"clip.mp4", "huge.png", "notes.txt", "broken.png", "truncated.png"} {
 		if strings.Contains(w.Body.String(), bad) {
 			t.Errorf("被拒的 %s 不该出现在播放列表里：%s", bad, w.Body.String())
 		}
@@ -194,8 +158,8 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 	if len(res.Accepted) != 1 || res.Accepted[0] != "promo-2.jpg" {
 		t.Fatalf("同名文件应自动改名，得到 %v", res.Accepted)
 	}
-	if len(res.Playlist) != 3 {
-		t.Fatalf("播放列表应有 3 个文件，得到 %+v", res.Playlist)
+	if len(res.Playlist) != 2 {
+		t.Fatalf("播放列表应有 2 个文件，得到 %+v", res.Playlist)
 	}
 
 	// 未知设备
@@ -218,11 +182,11 @@ func TestDeviceMediaOversizeRejected(t *testing.T) {
 // ---- 播放列表顺序与增删 ----
 
 func TestDeviceMediaReorderAndDelete(t *testing.T) {
-	_, h := newAdminTestServer(t)
+	s, h := newAdminTestServer(t)
 	base := "/api/v1/admin/devices/" + testDeviceID + "/media"
 
-	parseUpload(t, uploadMedia(t, h, testDeviceID,
-		upload{"a.jpg", tinyPNG(t)}, upload{"b.jpg", tinyPNG(t)}, upload{"c.mp4", mp4Fixture("avc1")}))
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.jpg", tinyPNG(t)}, upload{"b.jpg", tinyPNG(t)}))
+	putMediaFile(t, s, "c.mp4", fakeVideo) // 直接拷进目录的文件排在记录过的文件之后
 
 	names := func(w *httptest.ResponseRecorder) []string {
 		var list []MediaFile
@@ -240,6 +204,10 @@ func TestDeviceMediaReorderAndDelete(t *testing.T) {
 	got := names(do(t, h, adminReq("GET", base, nil), http.StatusOK))
 	if strings.Join(got, ",") != "a.jpg,b.jpg,c.mp4" {
 		t.Fatalf("初始顺序应为上传顺序，得到 %v", got)
+	}
+	// 后台看到的顺序就是设备在放的顺序
+	if m := deviceManifest(t, h); len(m.Items) != 3 || m.Items[2].Name != "c.mp4" {
+		t.Fatalf("清单顺序应与后台列表一致：%+v", m.Items)
 	}
 
 	// 拖拽排序
@@ -274,6 +242,27 @@ func TestDeviceMediaReorderAndDelete(t *testing.T) {
 	}
 }
 
+// 回归：同一次上传多个文件时，播放顺序要按上传顺序，而不是按文件名；
+// 之后直接拷进目录的文件排在最后，且后台与设备看到的一致。
+func TestPlaylistOrderIsUploadOrder(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"z.jpg", tinyPNG(t)}, upload{"a.jpg", tinyPNG(t)}))
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"m.jpg", tinyPNG(t)}))
+	putMediaFile(t, s, "b.mp4", fakeVideo)
+
+	var admin []string
+	for _, f := range listMedia(t, h) {
+		admin = append(admin, f.Name)
+	}
+	var device []string
+	for _, it := range deviceManifest(t, h).Items {
+		device = append(device, it.Name)
+	}
+	if want := "z.jpg,a.jpg,m.jpg,b.mp4"; strings.Join(admin, ",") != want || strings.Join(device, ",") != want {
+		t.Fatalf("后台 %v / 设备 %v，期望都是 %s", admin, device, want)
+	}
+}
+
 // ---- 清单 layout ----
 
 // 模板有媒体区且媒体区有内容时：清单条目是媒体文件本身（视频不转码），
@@ -287,7 +276,7 @@ func TestManifestLayoutAndMirror(t *testing.T) {
 		t.Fatalf("媒体区空时应回落整屏图：%+v", m)
 	}
 
-	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"clip.mp4", mp4Fixture("avc1")}))
+	putMediaFile(t, s, "clip.mp4", fakeVideo)
 	m := deviceManifest(t, h)
 	if m.Layout == nil {
 		t.Fatal("媒体区有内容时必须下发 layout，否则视频会铺满整屏、盖掉属性")

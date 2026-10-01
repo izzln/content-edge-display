@@ -24,6 +24,7 @@ internal/
   agent/              设备端主循环、身份、下载、更新
   player/             播放器抽象：mpv（JSON IPC）与 null（无显示环境测试用）
   render/             模板与测试卡的服务端渲染
+  transcode/          上传素材归一化：视频转码（ffmpeg）、图片缩放
   store/              状态持久化（设备、模板、时段、固件、更新目标）
   manifest/           播放清单结构与版本号
   sign/               设备请求 HMAC 签名（两端共用）
@@ -50,10 +51,11 @@ make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖，并�
 # 1. 服务端：拷过去解开，按包内 INSTALL.md 安装
 #    server.json 里的 admin_token / enroll_token 已由 make 生成填好（存于 .secrets/tokens.env，勿提交）
 #    模板中文渲染需 CJK 字体：apt install fonts-noto-cjk 并设置 font_path
+#    视频转码需 ffmpeg：apt install ffmpeg（不装视频不转码，高码率原片会让设备过热）
 
 # 2. 管理后台：浏览器打开 http://<服务器>:8080/admin （输入 admin_token）
 #    首启已自动建好"左右分屏"模板并设为全局默认，直接在 设备 → 内容 里为每台设备
-#    上传要播的图片/视频即可（视频须为 H.264；属性在左还是在右用"左右对调"开关切换）
+#    上传要播的图片/视频即可（视频自动转码；属性在左还是在右用"左右对调"开关切换）
 
 # 3. 设备端：按 docs/deployment.md 用设备端包装好一台样机、做成母镜像批量烧录，
 #    之后设备上电自动注册，升级程序在后台"程序更新"页完成，无需再登录设备

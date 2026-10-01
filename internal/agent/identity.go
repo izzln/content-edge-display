@@ -33,9 +33,9 @@ var defaultHostnames = map[string]bool{
 
 var hostnameIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
 
-// loadOrCreateIdentity 解析设备身份，优先级：
-// 配置文件显式值 > cache_dir/identity.json > 主机名（非默认值）> SoC 序列号/MAC 派生。
-// 生成的值持久化到 identity.json，重启/重试不变。
+// loadOrCreateIdentity 解析设备身份。编号优先级：
+// 配置文件显式 device_id > cache_dir/identity.json > 主机名（非默认值）> SoC 序列号/MAC 派生；
+// 密钥首次随机生成。两者持久化到 identity.json，重启/重试不变。
 func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 	path := filepath.Join(cfg.CacheDir, "identity.json")
 	var id Identity
@@ -50,9 +50,7 @@ func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 		id.DeviceID = deriveDeviceID(hw)
 		changed = true
 	}
-	if cfg.Secret != "" {
-		id.Secret = cfg.Secret
-	} else if id.Secret == "" {
+	if id.Secret == "" {
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
 			return Identity{}, err

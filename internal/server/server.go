@@ -3,6 +3,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,17 +24,11 @@ import (
 	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/sign"
 	"github.com/izzln/content-edge-display/internal/store"
+	"github.com/izzln/content-edge-display/internal/transcode"
 )
 
 // OnlineWindow 内有心跳视为设备在线。
 const OnlineWindow = 5 * time.Minute
-
-// DeviceConfig 是一台显示屏设备的注册信息。
-type DeviceConfig struct {
-	ID     string `json:"id"`
-	Secret string `json:"secret"`
-	Name   string `json:"name"`
-}
 
 // placeholderToken 是配置样例里的占位口令。仓库是公开的，样例值人人可见，
 // 带着它启动等于没有口令，所以直接拒绝启动。
@@ -45,11 +40,14 @@ const placeholderToken = "change-me"
 type Config struct {
 	Listen      string `json:"listen"`
 	MediaRoot   string `json:"media_root"`
-	DataDir     string `json:"data_dir"`  // state.json / uploads / rendered / firmware
+	DataDir     string `json:"data_dir"`  // state.json / rendered / firmware / incoming
 	FontPath    string `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
 	AdminToken  string `json:"admin_token"`
 	EnrollToken string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
 	Timezone    string `json:"timezone"`     // 时段计划时区，默认系统时区
+	// FFmpegPath 指定 ffmpeg；留空在 PATH 里找。找不到时不能上传视频（后台会提示），
+	// 因为未转码的原片码率过高，会让设备过热关机。
+	FFmpegPath string `json:"ffmpeg_path,omitempty"`
 }
 
 // resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
@@ -111,19 +109,24 @@ type Heartbeat struct {
 	Playing    string `json:"playing"`
 	PlayerVer  string `json:"player_ver"`
 	IP         string `json:"ip,omitempty"`
+	// HWDec 是设备端 mpv 实际使用的硬解方式；"no" = 软解（H3 上带不动 1440×900，
+	// 会卡顿发热甚至过热关机），空串 = 问不到（如 null 播放器）。
+	HWDec string `json:"hwdec,omitempty"`
+	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
+	OutputW int `json:"output_w,omitempty"`
+	OutputH int `json:"output_h,omitempty"`
 }
 
 // DeviceStatus 是管理接口返回的设备状态。
 type DeviceStatus struct {
 	ID           string              `json:"id"`
-	Name         string              `json:"name"`
 	Online       bool                `json:"online"`
 	LastSeen     *time.Time          `json:"last_seen,omitempty"`
 	Heartbeat    *Heartbeat          `json:"heartbeat,omitempty"`
 	Attrs        map[string]string   `json:"attrs"`
 	Display      store.DisplayConfig `json:"display"`
 	TestUntil    *time.Time          `json:"test_until,omitempty"`
-	ActiveSource string              `json:"active_source"` // test/override/schedule/global/playlist
+	ActiveSource string              `json:"active_source"` // test/override/schedule/global
 	ActiveTpl    string              `json:"active_template,omitempty"`
 	AgentVersion string              `json:"agent_version,omitempty"`
 	UpdateTarget *store.UpdateTarget `json:"update_target,omitempty"`
@@ -141,6 +144,10 @@ type Server struct {
 	mu       sync.Mutex
 	lastSeen map[string]time.Time
 	lastHB   map[string]Heartbeat
+
+	encoder videoEncoder // nil 表示没有 ffmpeg：视频只校验不转码
+	jobs    *jobQueue
+	stop    context.CancelFunc
 
 	now func() time.Time // 测试注入
 }
@@ -167,12 +174,14 @@ func New(cfg *Config) (*Server, error) {
 		now:      time.Now,
 	}
 	// 首次启动时把需要的目录都建出来（media_root 也在内：设备媒体文件放这里）。
-	for _, dir := range []string{cfg.MediaRoot, s.uploadsDir(), s.renderedDir(), s.firmwareDir()} {
+	// incoming/ 是待转码原片的暂存区：转码任务只在内存里，重启后它们已无人认领，清掉。
+	os.RemoveAll(s.incomingDir())
+	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.firmwareDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
 	}
-	s.renderer, err = render.New(cfg.FontPath, s.uploadsDir())
+	s.renderer, err = render.New(cfg.FontPath)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +191,26 @@ func New(cfg *Config) (*Server, error) {
 	if err := s.seedDefaults(); err != nil {
 		return nil, err
 	}
+
+	s.jobs = newJobQueue()
+	if enc := transcode.Find(cfg.FFmpegPath); enc != nil {
+		s.encoder = enc
+		log.Printf("视频转码已启用：%s", enc.Version())
+	} else {
+		log.Printf("warning: 未找到 ffmpeg，不能上传视频（未转码的原片码率过高，会让设备过热关机）。" +
+			"请安装 ffmpeg（apt install ffmpeg）或在 server.json 里配置 ffmpeg_path")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.stop = cancel
+	go s.runTranscoder(ctx)
 	return s, nil
+}
+
+// Close 停止后台转码协程（正在跑的 ffmpeg 会被杀掉）。
+func (s *Server) Close() {
+	if s.stop != nil {
+		s.stop()
+	}
 }
 
 // seedDefaults 首次启动时播种一个可用的左右分屏模板并设为全局默认；
@@ -199,7 +227,6 @@ func (s *Server) seedDefaults() error {
 	})
 }
 
-func (s *Server) uploadsDir() string  { return filepath.Join(s.cfg.DataDir, "uploads") }
 func (s *Server) renderedDir() string { return filepath.Join(s.cfg.DataDir, "rendered") }
 func (s *Server) firmwareDir() string { return filepath.Join(s.cfg.DataDir, "firmware") }
 
@@ -209,47 +236,61 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/device/register", s.handleRegister)
 	mux.HandleFunc("GET /api/v1/device/manifest", s.handleManifest)
 	mux.HandleFunc("POST /api/v1/device/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("GET /media/{device}/{file}", s.handleMedia)
-	mux.HandleFunc("GET /render/{device}/{file}", s.handleRender)
-	mux.HandleFunc("GET /firmware/{file}", s.handleFirmwareDownload)
+	mux.HandleFunc("GET /media/{device}/{file}", s.serveDeviceFile(func(dev string) string { return s.deviceMediaDir(dev) }))
+	mux.HandleFunc("GET /render/{device}/{file}", s.serveDeviceFile(func(dev string) string { return filepath.Join(s.renderedDir(), dev) }))
+	mux.HandleFunc("GET /firmware/{file}", s.serveDeviceFile(func(string) string { return s.firmwareDir() }))
 	s.registerAdmin(mux)
 	return mux
 }
 
-// deviceByID 查找已注册的设备。
-func (s *Server) deviceByID(id string) (DeviceConfig, bool) {
-	if d, ok := s.store.Device(id); ok {
-		return DeviceConfig{ID: d.ID, Secret: d.Secret, Name: d.Name}, true
-	}
-	return DeviceConfig{}, false
-}
-
 // allDevices 返回全部已注册设备，按 ID 排序。
-func (s *Server) allDevices() []DeviceConfig {
-	out := []DeviceConfig{}
+func (s *Server) allDevices() []store.Device {
+	out := []store.Device{}
 	s.store.View(func(st *store.State) {
 		for _, d := range st.Devices {
-			out = append(out, DeviceConfig{ID: d.ID, Secret: d.Secret, Name: d.Name})
+			out = append(out, d)
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-// authenticate 校验设备签名请求头，返回设备配置。
-func (s *Server) authenticate(r *http.Request) (DeviceConfig, error) {
-	id := r.Header.Get(sign.HeaderDeviceID)
-	dev, ok := s.deviceByID(id)
+// authenticate 校验设备签名请求头，返回设备。
+func (s *Server) authenticate(r *http.Request) (store.Device, error) {
+	dev, ok := s.store.Device(r.Header.Get(sign.HeaderDeviceID))
 	if !ok {
-		return DeviceConfig{}, errors.New("unknown device")
+		return store.Device{}, errors.New("unknown device")
 	}
 	err := sign.Verify(dev.Secret,
 		r.Header.Get(sign.HeaderTimestamp), r.Method, r.URL.Path,
 		r.Header.Get(sign.HeaderSign), s.now())
 	if err != nil {
-		return DeviceConfig{}, err
+		return store.Device{}, err
 	}
 	return dev, nil
+}
+
+// serveDeviceFile 生成设备下载文件的处理器（媒体、渲染图、固件共用）：
+// 校验签名；路径里带 {device} 的只允许访问自己的目录；文件名不得含路径成分。
+// http.ServeFile 原生支持 Range，设备端据此断点续传。
+func (s *Server) serveDeviceFile(dirOf func(deviceID string) string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		dev, err := s.authenticate(r)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if d := r.PathValue("device"); d != "" && d != dev.ID {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		name := r.PathValue("file")
+		if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") || strings.Contains(name, "\\") {
+			http.Error(w, "bad file name", http.StatusBadRequest)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(dirOf(dev.ID), name))
+	}
 }
 
 func (s *Server) deviceMediaDir(deviceID string) string {
@@ -283,34 +324,14 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
-	dev, err := s.authenticate(r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	// 设备只能访问自己的媒体目录。
-	if r.PathValue("device") != dev.ID {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	name := r.PathValue("file")
-	if name == "" || strings.HasPrefix(name, ".") ||
-		strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		http.Error(w, "bad file name", http.StatusBadRequest)
-		return
-	}
-	// http.ServeFile 原生支持 Range 断点续传。
-	http.ServeFile(w, r, filepath.Join(s.deviceMediaDir(dev.ID), name))
-}
-
 // 渲染画布尺寸（与显示屏一致）。
 const canvasW, canvasH = 1440, 900
 
 // resolveTemplate 决定设备当前应显示的模板及来源：
-// 设备级覆盖 > 时段计划命中 > 全局默认模板；都没有则 ok=false（目录轮播）。
+// 设备专属模板 > 时段计划命中 > 全局默认模板。全局默认模板由首启播种保证存在，
+// 且最后一个模板不可删，所以正常情况下总能找到；找不到说明 state.json 被手工改坏了。
 func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Template, source string, ok bool) {
-	if disp := s.store.Display(deviceID); disp.Mode == "template" {
+	if disp := s.store.Display(deviceID); disp.Mode == store.ModeTemplate {
 		if t, found := s.store.Template(disp.TemplateID); found {
 			return t, "override", true
 		}
@@ -322,39 +343,31 @@ func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Temp
 		}
 		log.Printf("schedule %s: template %q missing, ignoring", sc.ID, sc.TemplateID)
 	}
-	if g := s.store.Global(); g.TemplateID != "" {
-		if t, found := s.store.Template(g.TemplateID); found {
-			return t, "global", true
-		}
-		log.Printf("global template %q missing, falling back to playlist", g.TemplateID)
+	if t, found := s.store.Template(s.store.Global().TemplateID); found {
+		return t, "global", true
 	}
-	return store.Template{}, "playlist", false
+	return store.Template{}, "", false
 }
 
-// mediaItems 构建设备媒体区的播放条目。
-// 模板没有媒体区时返回空；播放列表为空时回落到扫描设备媒体目录（便于直接往目录里放文件）。
-func (s *Server) mediaItems(deviceID string, playlist []string, tpl store.Template) ([]manifest.Item, error) {
+// mediaItems 构建设备媒体区的播放条目（顺序见 playlist）；模板没有媒体区时为空。
+func (s *Server) mediaItems(deviceID string, tpl store.Template) ([]manifest.Item, error) {
 	if _, ok := tpl.MediaRegion(); !ok {
 		return nil, nil
 	}
-	dir := s.deviceMediaDir(deviceID)
-	names := playlist
-	if len(names) == 0 {
-		var err error
-		if names, err = manifest.ListMedia(dir); err != nil {
-			return nil, err
-		}
+	names, err := s.playlist(deviceID)
+	if err != nil {
+		return nil, err
 	}
-	return manifest.BuildItems(dir, deviceID, names, tpl.ImageDurationS, s.hashes)
+	return manifest.BuildItems(s.deviceMediaDir(deviceID), deviceID, names, tpl.ImageDurationS, s.hashes)
 }
 
-// buildManifest 生成设备清单：测试屏 > 模板（覆盖/时段/全局）> 目录轮播，并附带待执行指令。
+// buildManifest 生成设备清单：测试屏 > 模板（专属/时段/全局），并附带待执行指令。
 //
 // 模板有媒体区且媒体区有内容时下发 layout：清单条目就是媒体文件本身（视频不转码），
 // 模板的静态部分作为“媒体区挖空”的叠加图随 layout 下发，由设备端贴在画面上。
 // 模板没有媒体区、或媒体区还没放内容时，退回到把整块模板渲染成一张整屏图的成熟路径，
 // 这样“刚建好还没传内容”的设备显示的是版式而不是黑屏。
-func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
+func (s *Server) buildManifest(dev store.Device) (*manifest.Manifest, error) {
 	now := s.now()
 	var (
 		items  []manifest.Item
@@ -363,7 +376,7 @@ func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
 	)
 
 	if until := s.store.TestUntil(dev.ID); now.Before(until) {
-		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, dev.Name, s.store.Attrs(dev.ID), until)
+		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, s.store.Attrs(dev.ID), until)
 		if err != nil {
 			return nil, fmt.Errorf("render test card: %w", err)
 		}
@@ -372,13 +385,14 @@ func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
 			return nil, err
 		}
 		items, keep = []manifest.Item{it}, []string{it.Name}
-	} else if tpl, _, ok := s.resolveTemplate(dev.ID, now); ok {
-		disp := s.store.Display(dev.ID)
-		media, err := s.mediaItems(dev.ID, disp.Playlist, tpl)
+	} else if tpl, _, ok := s.resolveTemplate(dev.ID, now); !ok {
+		return nil, errors.New("没有可用的模板（全局默认模板缺失）")
+	} else {
+		media, err := s.mediaItems(dev.ID, tpl)
 		if err != nil {
 			return nil, err
 		}
-		rendered, err := s.renderer.Render(tpl, s.store.Attrs(dev.ID), disp.Bindings, disp.Mirror, len(media) > 0)
+		rendered, err := s.renderer.Render(tpl, s.store.Attrs(dev.ID), s.store.Display(dev.ID).Mirror, len(media) > 0)
 		if err != nil {
 			return nil, fmt.Errorf("render template %s: %w", tpl.ID, err)
 		}
@@ -401,12 +415,6 @@ func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
 		} else {
 			items = []manifest.Item{png}
 		}
-	} else {
-		m, err := manifest.BuildFromDir(s.deviceMediaDir(dev.ID), dev.ID, store.DefaultImageDurationS, s.hashes)
-		if err != nil {
-			return nil, err
-		}
-		items = m.Items
 	}
 	s.pruneRendered(dev.ID, keep)
 
@@ -415,7 +423,7 @@ func (s *Server) buildManifest(dev DeviceConfig) (*manifest.Manifest, error) {
 		cmds = append(cmds, cmd)
 	}
 	return &manifest.Manifest{
-		Version:  manifest.VersionWith(items, cmds, layout),
+		Version:  manifest.Version(items, cmds, layout),
 		Items:    items,
 		Layout:   layout,
 		Commands: cmds,
@@ -451,13 +459,11 @@ func (s *Server) renderedItem(deviceID, kind string, img image.Image) (manifest.
 		}
 	}
 	return manifest.Item{
-		ID:     sumHex[:12],
 		Type:   "image",
 		Name:   name,
 		URL:    "/render/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
 		SHA256: sumHex,
 		Size:   int64(buf.Len()),
-		Order:  1,
 	}, nil
 }
 
@@ -483,25 +489,6 @@ func (s *Server) pruneRendered(deviceID string, keep []string) {
 	}
 }
 
-func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
-	dev, err := s.authenticate(r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if r.PathValue("device") != dev.ID {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	name := r.PathValue("file")
-	if name == "" || strings.HasPrefix(name, ".") ||
-		strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		http.Error(w, "bad file name", http.StatusBadRequest)
-		return
-	}
-	http.ServeFile(w, r, filepath.Join(s.renderedDir(), dev.ID, name))
-}
-
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	dev, err := s.authenticate(r)
 	if err != nil {
@@ -517,8 +504,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	s.lastSeen[dev.ID] = s.now()
 	s.lastHB[dev.ID] = hb
 	s.mu.Unlock()
-	// 自注册设备：持久化程序版本/IP（仅变化时写盘），服务端重启后升级状态仍可判断。
-	if d, ok := s.store.Device(dev.ID); ok && (d.AgentVersion != hb.PlayerVer || (hb.IP != "" && d.IP != hb.IP)) {
+	// 持久化程序版本/IP（仅变化时写盘）：服务端重启后升级状态仍可判断。
+	if dev.AgentVersion != hb.PlayerVer || (hb.IP != "" && dev.IP != hb.IP) {
 		if err := s.store.Update(func(st *store.State) error {
 			d := st.Devices[dev.ID]
 			d.AgentVersion = hb.PlayerVer
@@ -531,21 +518,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			log.Printf("heartbeat: persist device %s failed: %v", dev.ID, err)
 		}
 	}
-	log.Printf("heartbeat device=%s version=%s agent=%s uptime=%ds disk_free=%dMB playing=%q",
-		dev.ID, hb.Version, hb.PlayerVer, hb.UptimeS, hb.DiskFreeMB, hb.Playing)
+	log.Printf("heartbeat device=%s version=%s agent=%s uptime=%ds disk_free=%dMB temp=%dC hwdec=%s out=%dx%d playing=%q",
+		dev.ID, hb.Version, hb.PlayerVer, hb.UptimeS, hb.DiskFreeMB, hb.TempC,
+		hb.HWDec, hb.OutputW, hb.OutputH, hb.Playing)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// agentVersion 返回设备最近上报的程序版本（内存心跳优先，其次持久化记录）。
-func (s *Server) agentVersion(deviceID string) string {
-	s.mu.Lock()
-	hb, ok := s.lastHB[deviceID]
-	s.mu.Unlock()
-	if ok && hb.PlayerVer != "" {
-		return hb.PlayerVer
-	}
-	if d, ok := s.store.Device(deviceID); ok {
-		return d.AgentVersion
-	}
-	return ""
 }

@@ -48,6 +48,11 @@
   .pl-item .grip { cursor:grab; color:var(--muted); }
   .pl-item .sp { flex:1; }
   button[disabled] { opacity:.45; cursor:not-allowed; }
+  .pl-item.pending { background:#fff; border-style:dashed; }
+  .pl-item.failed { border-color:var(--bad); }
+  .pl-item progress { width:120px; }
+  .bad { color:var(--bad); font-weight:600; }
+  .bad-note { margin-top:8px; padding:8px 10px; border:1px solid var(--bad); border-radius:4px; background:#fff4f4; color:#a00; }
 </style>
 </head>
 <body>
@@ -126,20 +131,20 @@ document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
   for (const t of ["devices", "templates", "firmware"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
 });
 
-let devices = [], templates = [], global = {}, schedules = [], firmware = [], uploads = [];
+let devices = [], templates = [], global = {}, schedules = [], firmware = [], info = {};
 const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
 const tplById = id => templates.find(t => t.id === id);
-const SOURCE = { test: "测试中", override: "设备覆盖", schedule: "时段", global: "全局", playlist: "目录轮播" };
+const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段", global: "全局" };
 
 const arr = v => Array.isArray(v) ? v : [];
 async function refresh() {
   try {
-    const [d, t, g, s, f, u] = await Promise.all([
+    const [d, t, g, s, f, i] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
-      api("/api/v1/admin/schedules"), api("/api/v1/admin/firmware"), api("/api/v1/admin/uploads")]);
+      api("/api/v1/admin/schedules"), api("/api/v1/admin/firmware"), api("/api/v1/admin/info")]);
     // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
-    [devices, templates, global, schedules, firmware, uploads] =
-      [arr(d), arr(t), g || {}, arr(s), arr(f), arr(u)];
+    [devices, templates, global, schedules, firmware, info] =
+      [arr(d), arr(t), g || {}, arr(s), arr(f), i || {}];
   } catch { return; }
   try {
     renderDevices(); renderTemplates(); renderSchedules(); renderFirmware();
@@ -150,12 +155,34 @@ async function refresh() {
 }
 
 // ================= 设备 =================
+// healthLine 把设备上报的解码方式、温度、输出分辨率翻译成一眼能看懂的提示。
+// 这三项出问题的现场表现分别是：卡顿发热、过热关机、画面错位。
+function healthLine(hb) {
+  const parts = [];
+  if (hb.hwdec === "no") parts.push('<span class="bad" title="H3 软解带不动 1440×900，会卡顿、发热甚至过热关机">软解</span>');
+  else if (hb.hwdec) parts.push(`<span class="okc" title="mpv 实际使用的硬解方式">硬解 ${esc(hb.hwdec)}</span>`);
+  if (hb.temp_c) parts.push(hb.temp_c >= 80
+    ? `<span class="bad" title="H3 到 85°C 开始降频，再高会关机">${hb.temp_c}°C</span>`
+    : `${hb.temp_c}°C`);
+  if (hb.output_w) {
+    const ok = hb.output_w === 1440 && hb.output_h === 900;
+    parts.push(ok ? `${hb.output_w}×${hb.output_h}`
+      : `<span class="warn" title="显示屏实际输出与模板画布不一致（叠加图会被缩放）；检查 /boot/armbianEnv.txt 的 video= 参数">输出 ${hb.output_w}×${hb.output_h}</span>`);
+  }
+  return parts.length ? `<div class="muted">${parts.join(" · ")}</div>` : "";
+}
+
 function renderDevices() {
   const g = tplById(global.template_id);
   $("#globalBar").innerHTML = g
     ? `当前全局默认模板：<b>${esc(g.name)}</b>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}
        <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
     : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
+  if (!info.transcode) {
+    $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端没有找到 ffmpeg，暂时<b>不能上传视频</b>
+      （未转码的原片码率过高，会让设备过热关机）。请在服务器上 <code>apt install ffmpeg</code>
+      （或在 server.json 里配置 <code>ffmpeg_path</code>）后重启服务端。</div>`;
+  }
   const rows = devices.map(d => {
     const st = d.online ? '<span class="dot on"></span>在线'
       : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
@@ -163,7 +190,7 @@ function renderDevices() {
     let show = `<span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || d.active_source}</span>`;
     if (d.active_template) show += ` <span class="badge">${esc(d.active_template)}</span>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
-    if (d.heartbeat) show += `<div class="muted">播放: ${esc((d.heartbeat.playing || "").split("/").pop())}</div>`;
+    if (d.heartbeat) show += `<div class="muted">播放: ${esc((d.heartbeat.playing || "").split("/").pop())}</div>` + healthLine(d.heartbeat);
     let ver = `<div class="muted">程序 ${esc(d.agent_version || "?")}`;
     if (d.update_target) {
       const t = d.update_target;
@@ -175,7 +202,7 @@ function renderDevices() {
     const hw = d.hw ? `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>` : "";
     return `<tr>
       <td>${st}</td>
-      <td><b>${esc(d.name)}</b><div class="muted">${esc(d.id)}</div>${hw}${ver}</td>
+      <td><b>${esc(d.id)}</b>${hw}${ver}</td>
       <td>${attrs}</td>
       <td>${show}</td>
       <td>
@@ -236,11 +263,11 @@ const effectiveTplID = d => (d.display.mode === "template" && d.display.template
 
 async function contentDialog(id) {
   const d = devices.find(x => x.id === id);
-  try { pl = arr(await api(`/api/v1/admin/devices/${id}/media`)); } catch { pl = []; }
+  try { setPlaylistData(await api(`/api/v1/admin/devices/${id}/media`)); } catch { setPlaylistData([]); }
   plDirty = false;
   const own = d.display.mode === "template";
   const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
-  modal(`<h2>内容 — ${esc(d.name)} <span class="muted">${esc(d.id)}</span></h2>
+  modal(`<h2>内容 — ${esc(d.id)}</h2>
     <div class="row"><label><input type="radio" name="mode" value="global" ${own ? "" : "checked"} onchange="onModeChange()">
         跟随全局模板<span class="muted">（${esc(tplById(global.template_id)?.name || "未设置")}）</span></label></div>
     <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
@@ -278,7 +305,7 @@ async function copyGlobalTemplate() {
   renderContentBody(currentDeviceID());
 }
 
-// renderContentBody 画出与当前所选模板匹配的内容区：媒体区 → 播放列表；image 区域 → 图片绑定。
+// renderContentBody 画出与当前所选模板匹配的内容区：有媒体区才显示播放列表。
 function renderContentBody(id) {
   const box = $("#contentBody");
   if (!box) return;
@@ -295,35 +322,46 @@ function renderContentBody(id) {
       要放图片/视频，请换一个带媒体区的模板。</p>`;
   } else {
     html = `<div class="row"><b>播放内容</b><span class="muted">按顺序循环播放；图片停留 ${esc(tpl.image_duration_s)} 秒（写在模板里），视频播完即切</span></div>
-      <div class="row"><input type="file" id="plFiles" multiple accept=".png,.jpg,.jpeg,.mp4,.mov">
+      <div class="row"><input type="file" id="plFiles" multiple
+          accept=".png,.jpg,.jpeg${info.transcode ? ",.mp4,.mov,.mkv,.webm,.avi,.m4v" : ""}">
         <button class="primary" onclick="uploadDeviceMedia('${esc(id)}')">上传</button></div>
-      <p class="muted">图片 png/jpg，单张不超过 20MB 且不超过约 1200 万像素；视频 mp4/mov，不超过 500MB，
-        <b>编码必须是 H.264</b>（设备芯片不能硬解 H.265，传上来也放不动，会被当场拒收）。视频一律静音播放。</p>
+      <p class="muted">${uploadHint()}</p>
       <div id="plBox"></div>`;
-  }
-  // 静态图片区域（如 logo）由服务端合成进画面，与播放列表无关
-  const imgRegions = (tpl?.regions || []).filter(r => r.type === "image");
-  if (imgRegions.length) {
-    window._bindings = { ...(devices.find(x => x.id === id).display.bindings || {}) };
-    html += `<div class="row" style="margin-top:12px"><b>固定图片区域</b><span class="muted">由服务端合成进画面（如 logo）</span></div>` +
-      imgRegions.map(r => `<div class="row">区域 <b>${esc(r.id)}</b>
-        <select onchange="window._bindings['${esc(r.id)}']=this.value"><option value="">（未绑定）</option>
-        ${uploads.map(u => `<option value="${esc(u)}" ${window._bindings[r.id] === u ? "selected" : ""}>${esc(u)}</option>`).join("")}</select></div>`).join("") +
-      `<div class="row"><input type="file" id="upFile" accept=".png,.jpg,.jpeg">
-        <button onclick="doUpload(() => renderContentBody('${esc(id)}'))">上传图片</button></div>`;
-  } else {
-    window._bindings = {};
   }
   box.innerHTML = html;
   renderPlaylist(id);
 }
 
+function uploadHint() {
+  const img = "图片 png/jpg，单张不超过 20MB，过大的会自动缩到屏幕尺寸。";
+  if (info.transcode) {
+    const v = info.video_spec || {};
+    return img + ` 视频 mp4/mov/mkv/webm，不超过 500MB，上传后<b>自动转码</b>为设备吃得消的 H.264
+      （${v.max_w}×${v.max_h} 以内、${v.max_fps}fps、码率 ≤ ${(v.max_bitrate_k / 1000).toFixed(0)}Mbps、静音），
+      转码在后台进行，完成后自动加入播放列表。`;
+  }
+  return img + ` <b>暂不能上传视频</b>：服务端未安装 ffmpeg，未转码的视频会让设备过热。`;
+}
+
 const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+
+let plPending = [];   // 转码中 / 排队 / 失败的视频（不参与排序与播放）
+let plPoll = null;    // 有转码任务时定时刷新进度
+
+// setPlaylist 把服务端返回的列表拆成"就绪"与"处理中"两部分。
+function setPlaylistData(list) {
+  const all = arr(list);
+  pl = all.filter(f => !f.status || f.status === "ready");
+  plPending = all.filter(f => f.status && f.status !== "ready");
+}
+
+const JOB_LABEL = { queued: "排队中", transcoding: "转码中", failed: "转码失败" };
 
 function renderPlaylist(id) {
   const box = $("#plBox");
   if (!box) return;
-  if (!pl.length) {
+  schedulePlPoll(id);
+  if (!pl.length && !plPending.length) {
     box.innerHTML = '<p class="muted">还没有内容。媒体区暂时显示模板底色，不会黑屏。</p>';
     return;
   }
@@ -336,10 +374,39 @@ function renderPlaylist(id) {
       <button class="sm" onclick="movePl(${i},1,'${esc(id)}')">↓</button>
       <button class="sm danger" onclick="deleteMedia('${esc(id)}','${esc(f.name)}')">删除</button>
     </div>`).join("") +
-    `<div class="row"><button class="primary" ${plDirty ? "" : "disabled"} id="plSave"
+    plPending.map(f => `<div class="pl-item pending ${f.status === "failed" ? "failed" : ""}">
+      <span class="grip">⏳</span> ${esc(f.name)}
+      <span class="badge">${JOB_LABEL[f.status] || esc(f.status)}${f.status === "transcoding" && f.progress ? " " + f.progress + "%" : ""}</span>
+      ${f.status === "transcoding" ? `<progress max="100" value="${f.progress || 0}"></progress>` : ""}
+      ${f.error ? `<span class="bad" title="${esc(f.error)}">${esc(f.error.slice(0, 80))}</span>` : ""}
+      <span class="sp"></span>
+      <button class="sm danger" onclick="deleteMedia('${esc(id)}','${esc(f.name)}')">${f.status === "failed" ? "移除" : "取消"}</button>
+    </div>`).join("") +
+    (pl.length ? `<div class="row"><button class="primary" ${plDirty ? "" : "disabled"} id="plSave"
         onclick="savePlaylistOrder('${esc(id)}')">保存播放顺序</button>
-      <span class="muted">拖动条目或用 ↑↓ 调整顺序</span></div>`;
+      <span class="muted">拖动条目或用 ↑↓ 调整顺序${plPending.length ? "；转码完成的视频会自动加到末尾" : ""}</span></div>` : "");
   bindPlDrag(id);
+}
+
+// schedulePlPoll 有转码任务时每 2 秒刷新一次进度；对话框关掉或任务都结束了就停。
+function schedulePlPoll(id) {
+  clearTimeout(plPoll);
+  if (!plPending.some(f => f.status !== "failed")) return;
+  plPoll = setTimeout(async () => {
+    if (!$("#overlay").classList.contains("show") || !$("#plBox")) return;
+    let list;
+    try { list = await api(`/api/v1/admin/devices/${id}/media`); } catch { return; }
+    if (plDirty) {
+      // 运营方正在调整顺序：只更新处理中的部分，别把还没保存的顺序冲掉
+      const ready = new Set(pl.map(f => f.name));
+      const fresh = arr(list).filter(f => f.status === "ready" && !ready.has(f.name));
+      pl = pl.concat(fresh);
+      plPending = arr(list).filter(f => f.status && f.status !== "ready");
+    } else {
+      setPlaylistData(list);
+    }
+    renderPlaylist(id);
+  }, 2000);
 }
 
 // bindPlDrag 用原生 HTML5 拖放实现排序（触屏上用 ↑↓ 按钮）。
@@ -365,7 +432,7 @@ function movePl(i, delta, id) {
   plDirty = true; renderPlaylist(id);
 }
 async function savePlaylistOrder(id) {
-  pl = arr(await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) }));
+  setPlaylistData(await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) }));
   plDirty = false; toast("播放顺序已保存"); renderPlaylist(id);
 }
 async function uploadDeviceMedia(id) {
@@ -375,45 +442,39 @@ async function uploadDeviceMedia(id) {
   for (const f of files) fd.append("files", f);
   toast(`正在上传 ${files.length} 个文件…`);
   const r = await api(`/api/v1/admin/devices/${id}/media`, { method: "POST", body: fd });
-  pl = arr(r.playlist); plDirty = false;
+  setPlaylistData(r.playlist); plDirty = false;
   const bad = arr(r.rejected);
+  const okCount = arr(r.accepted).length + arr(r.transcoding).length;
   if (bad.length) {
     modal(`<h2>部分文件未通过校验</h2>
-      <p>已收下 ${arr(r.accepted).length} 个；以下文件被拒收：</p>
+      <p>已收下 ${okCount} 个；以下文件被拒收：</p>
       <table>${bad.map(b => `<tr><td>${esc(b.name)}</td><td>${esc(b.reason)}</td></tr>`).join("")}</table>
       <div class="actions"><button class="primary" onclick="contentDialog('${esc(id)}')">返回</button></div>`);
     return;
   }
-  toast(`已上传 ${arr(r.accepted).length} 个文件`);
+  toast(arr(r.transcoding).length
+    ? `已上传 ${okCount} 个文件，其中 ${arr(r.transcoding).length} 个视频正在后台转码`
+    : `已上传 ${okCount} 个文件`);
   renderContentBody(id);
 }
 async function deleteMedia(id, name) {
   if (!confirm(`从播放列表中删除 ${name}？文件会从服务器上删除。`)) return;
-  pl = arr(await api(`/api/v1/admin/devices/${id}/media/${encodeURIComponent(name)}`, { method: "DELETE" }));
+  setPlaylistData(await api(`/api/v1/admin/devices/${id}/media/${encodeURIComponent(name)}`, { method: "DELETE" }));
   plDirty = false; toast("已删除"); renderPlaylist(id);
 }
 
 async function saveContent(id) {
   const mode = document.querySelector('input[name=mode]:checked').value;
-  const body = { mode, mirror: $("#mirrorChk").checked, bindings: {} };
+  const body = { mode, mirror: $("#mirrorChk").checked };
   if (mode === "template") {
     body.template_id = $("#ovSel").value;
     if (!body.template_id) { toast("请选择模板"); return; }
   }
-  for (const [k, v] of Object.entries(window._bindings || {})) if (v) body.bindings[k] = v;
   await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
   if (plDirty) await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) });
   toast("已保存"); closeModal(); refresh();
 }
 
-async function doUpload(after) {
-  const f = $("#upFile").files[0];
-  if (!f) { toast("请先选择文件"); return; }
-  const fd = new FormData(); fd.append("file", f);
-  const r = await api("/api/v1/admin/uploads", { method: "POST", body: fd });
-  if (!uploads.includes(r.name)) uploads.push(r.name);
-  toast("已上传 " + r.name); if (after) after();
-}
 async function previewDevice(id) {
   const d = devices.find(x => x.id === id);
   const tid = d.active_template || effectiveTplID(d);
@@ -429,7 +490,7 @@ async function showPreview(url, target) {
 }
 
 // ================= 模板 / 全局 / 时段 =================
-const REGION_LABEL = { attribute: "属性", text: "文字", image: "固定图片", media: "播放内容" };
+const REGION_LABEL = { attribute: "属性", text: "文字", media: "播放内容" };
 function renderTemplates() {
   $("#globalSel").innerHTML =
     templates.map(t => `<option value="${esc(t.id)}" ${global.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -504,7 +565,7 @@ function editTemplateJSON(id) {
       { id: "attr", x: 0, y: 0, w: 720, h: 900, type: "attribute", key: "room", font_size: 160, color: "#FFFFFF", bg: "#1E3A8A", align: "center" },
       { id: "media", x: 720, y: 0, w: 720, h: 900, type: "media" }] };
   modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2><textarea id="tplJSON">${esc(JSON.stringify(sample, null, 2))}</textarea>
-    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、image（服务端合成的固定图片）、
+    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、
       media（设备播放的图片/视频，每个模板至多一个）。</p>
     <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button></div>`);
 }
@@ -569,7 +630,7 @@ async function deleteFirmware(v) {
   await api(`/api/v1/admin/firmware/${v}`, { method: "DELETE" }); toast("已删除"); refresh();
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.name)} <span class="muted">${esc(d.id)} · 当前 ${esc(d.agent_version || "?")}</span></label>`).join("");
+  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>
