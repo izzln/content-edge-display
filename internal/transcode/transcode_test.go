@@ -17,9 +17,9 @@ import (
 // needFFmpeg 在没装 ffmpeg 的环境里跳过（服务端没有 ffmpeg 时会退化为只校验不转码，另有测试覆盖）。
 func needFFmpeg(t *testing.T) *Encoder {
 	t.Helper()
-	e := Find("")
-	if e == nil {
-		t.Skip("未安装 ffmpeg，跳过转码测试")
+	e, err := Find("")
+	if err != nil {
+		t.Skipf("ffmpeg 不可用，跳过转码测试：%v", err)
 	}
 	return e
 }
@@ -190,5 +190,28 @@ func TestParseDuration(t *testing.T) {
 	}
 	if d := parseDuration("no duration here"); d != 0 {
 		t.Fatalf("got %v", d)
+	}
+}
+
+// "明明装了却说找不到"：错误里必须说清楚是哪一种情况，而不是一句"未找到"。
+func TestFindReportsWhy(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Setenv("PATH", dir)
+	if _, err := Find(""); err == nil || !strings.Contains(err.Error(), "PATH="+dir) || !strings.Contains(err.Error(), "运行用户") {
+		t.Fatalf("不在 PATH 里：应给出实际 PATH 与运行用户，得到 %v", err)
+	}
+
+	noexec := filepath.Join(dir, "ffmpeg-noexec")
+	os.WriteFile(noexec, []byte("#!/bin/sh\n"), 0o644)
+	if _, err := Find(noexec); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("没有执行权限：应说明，得到 %v", err)
+	}
+
+	// 找到了但跑不起来（例如 snap 版 ffmpeg 以没有家目录的系统用户运行）
+	broken := filepath.Join(dir, "ffmpeg-snap")
+	os.WriteFile(broken, []byte("#!/bin/sh\necho 'cannot create user data directory: /nonexistent/snap/ffmpeg: Permission denied' >&2\nexit 1\n"), 0o755)
+	if _, err := Find(broken); err == nil || !strings.Contains(err.Error(), "cannot create user data directory") {
+		t.Fatalf("运行失败：应带上 ffmpeg 自己的报错，得到 %v", err)
 	}
 }

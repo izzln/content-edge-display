@@ -94,7 +94,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
 | `timezone` | 时段计划所用时区，默认取系统时区 |
-| `ffmpeg_path` | 可选，ffmpeg 路径；留空在 PATH 里找。找不到时视频不转码（见 5.1） |
+| `ffmpeg_path` | 可选，ffmpeg 路径；留空在**服务进程的** PATH 里找（systemd 下只有 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`）。不可用时不能上传视频（见 5.1） |
 
 `media_root` 与 `data_dir` 及其子目录在服务端启动时自动创建，不用手工 mkdir。
 
@@ -325,7 +325,11 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后自动加到播放列表末尾
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
 
-服务端需要装 `ffmpeg`（`apt install ffmpeg`，或在 `server.json` 里用 `ffmpeg_path` 指定）。
+服务端需要装 `ffmpeg`（`apt install ffmpeg`，或在 `server.json` 里用 `ffmpeg_path` 写绝对路径），
+并且要**以服务的运行用户能跑通**：`sudo -u display ffmpeg -version`。服务由 systemd 以 `display`
+用户、精简 PATH 启动，snap 版（`/snap/bin`，系统用户没有家目录会运行失败）、装在 `/root` 或家目录下、
+装在 `/opt` 等位置的 ffmpeg 在你的 shell 里能用，服务却用不了。不可用时后台顶部与
+`journalctl -u display-server` 会写明是哪一种原因；装好后约 30 秒内自动生效，无需重启服务端。
 **没装时不能上传视频**（图片照常），管理后台顶部会醒目提示。未转码的原片码率控制不住，
 下发到设备就是过热隐患，所以宁可当场拒收。
 

@@ -35,7 +35,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	}
 	t.Cleanup(s.Close)
 	// 默认按"没装 ffmpeg"跑，结果不依赖测试机环境；转码相关测试自己注入转码器。
-	s.encoder = nil
+	s.setEncoder(nil)
 	// 设备只有自注册这一条路径，测试里直接写进 store，省去逐个走注册接口。
 	addTestDevice(t, s, testDeviceID, testSecret)
 	addTestDevice(t, s, "dev-002", "other-secret")

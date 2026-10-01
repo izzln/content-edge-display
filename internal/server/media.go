@@ -231,8 +231,8 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part *multipart.Part, t
 			return "", false, "图片仅支持 png/jpg"
 		}
 	case "video":
-		if s.encoder == nil {
-			return "", false, "服务端未安装 ffmpeg，暂不能上传视频（未转码的视频会让设备过热）"
+		if s.videoEncoder() == nil {
+			return "", false, "服务端 ffmpeg 不可用，暂不能上传视频（未转码的视频会让设备过热）；原因见后台顶部提示"
 		}
 		isVideo, name = true, transcode.OutputName(name)
 	default:

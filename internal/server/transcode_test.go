@@ -94,7 +94,7 @@ func byName(files []MediaFile, name string) (MediaFile, bool) {
 func TestVideoUploadIsTranscodedInBackground(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	enc := &fakeEncoder{block: make(chan struct{}), started: make(chan struct{})}
-	s.encoder = enc
+	s.setEncoder(enc)
 
 	res := parseUpload(t, uploadMedia(t, h, testDeviceID,
 		upload{"a.jpg", tinyPNG(t)},
@@ -141,7 +141,7 @@ func TestVideoUploadIsTranscodedInBackground(t *testing.T) {
 // 转码失败要让运营方看到原因，并能删掉重传。
 func TestVideoTranscodeFailureIsVisibleAndDeletable(t *testing.T) {
 	s, h := newAdminTestServer(t)
-	s.encoder = &fakeEncoder{fail: errors.New("转码失败：Invalid data found when processing input")}
+	s.setEncoder(&fakeEncoder{fail: errors.New("转码失败：Invalid data found when processing input")})
 
 	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"bad.mp4", []byte("不是视频")}))
 	files := waitMedia(t, h, "转码失败", func(fs []MediaFile) bool {
@@ -165,7 +165,7 @@ func TestVideoTranscodeFailureIsVisibleAndDeletable(t *testing.T) {
 func TestDeleteWhileTranscodingCancels(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	enc := &fakeEncoder{block: make(chan struct{}), started: make(chan struct{})}
-	s.encoder = enc
+	s.setEncoder(enc)
 
 	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"long.mp4", fakeVideo}))
 	<-enc.started
@@ -193,7 +193,7 @@ func TestInfoReportsTranscodeCapability(t *testing.T) {
 	if info.Transcode || info.FFmpeg != "" {
 		t.Fatalf("未装 ffmpeg 时应报告不可转码：%+v", info)
 	}
-	s.encoder = &fakeEncoder{}
+	s.setEncoder(&fakeEncoder{})
 	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
 	if !info.Transcode || info.FFmpeg != "fake ffmpeg" || info.Spec.MaxBitrateK <= 0 {
 		t.Fatalf("装了 ffmpeg 时应报告版本与转码参数：%+v", info)
@@ -221,12 +221,12 @@ func TestImageUploadIsShrunk(t *testing.T) {
 
 // 用真实 ffmpeg 走一遍：上传一段高码率 H.265，设备拿到的是 H.264。
 func TestRealFFmpegEndToEnd(t *testing.T) {
-	enc := transcode.Find("")
-	if enc == nil {
-		t.Skip("未安装 ffmpeg")
+	enc, err := transcode.Find("")
+	if err != nil {
+		t.Skipf("ffmpeg 不可用：%v", err)
 	}
 	s, h := newAdminTestServer(t)
-	s.encoder = enc
+	s.setEncoder(enc)
 
 	src := filepath.Join(t.TempDir(), "hot.mp4")
 	if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -246,5 +246,49 @@ func TestRealFFmpegEndToEnd(t *testing.T) {
 	out, _ := exec.Command("ffmpeg", "-hide_banner", "-i", filepath.Join(s.deviceMediaDir(testDeviceID), "hot.mp4")).CombinedOutput()
 	if !strings.Contains(string(out), "Video: h264") {
 		t.Fatalf("转码产物应当是设备能硬解的 H.264：\n%s", out)
+	}
+}
+
+// 装好 ffmpeg 后不用重启服务端：不可用时会节流重新探测；探测失败的原因要能在后台看到。
+func TestEncoderRedetectionAndReason(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	calls := 0
+	var result videoEncoder
+	s.encMu.Lock()
+	s.findEnc = func() (videoEncoder, error) {
+		calls++
+		if result == nil {
+			return nil, errors.New("在 PATH 里找不到 ffmpeg（服务进程的 PATH=/usr/bin，运行用户 display）")
+		}
+		return result, nil
+	}
+	s.encoder, s.encTried = nil, time.Time{}
+	s.encMu.Unlock()
+
+	var info struct {
+		Transcode bool   `json:"transcode"`
+		Err       string `json:"ffmpeg_error"`
+	}
+	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
+	if info.Transcode || !strings.Contains(info.Err, "运行用户 display") {
+		t.Fatalf("后台应拿到具体原因：%+v", info)
+	}
+	// 节流：紧接着再问不会重新探测
+	s.videoEncoder()
+	if calls != 1 {
+		t.Fatalf("间隔内不应重复探测，探测了 %d 次", calls)
+	}
+	// 运营方装好了 ffmpeg；过了节流间隔后自动启用
+	result = &fakeEncoder{}
+	s.encMu.Lock()
+	s.encTried = time.Now().Add(-encoderRetry)
+	s.encMu.Unlock()
+	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
+	if !info.Transcode {
+		t.Fatalf("装好 ffmpeg 后应自动启用，不用重启：%+v", info)
+	}
+	res := parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.mp4", fakeVideo}))
+	if len(res.Transcoding) != 1 {
+		t.Fatalf("启用后应能上传视频：%+v", res)
 	}
 }

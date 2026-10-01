@@ -179,9 +179,12 @@ function renderDevices() {
        <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
     : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
   if (!info.transcode) {
-    $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端没有找到 ffmpeg，暂时<b>不能上传视频</b>
-      （未转码的原片码率过高，会让设备过热关机）。请在服务器上 <code>apt install ffmpeg</code>
-      （或在 server.json 里配置 <code>ffmpeg_path</code>）后重启服务端。</div>`;
+    $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端的 ffmpeg 不可用，暂时<b>不能上传视频</b>
+      （未转码的原片码率过高，会让设备过热关机）。
+      ${info.ffmpeg_error ? `<div>原因：<code>${esc(info.ffmpeg_error)}</code></div>` : ""}
+      <div class="muted">注意服务是以 <code>display</code> 用户、systemd 的精简 PATH 运行的，不是你登录 shell 的环境：
+        用 <code>sudo -u display ffmpeg -version</code> 能跑通才算可用。推荐 <code>apt install ffmpeg</code>（装到 /usr/bin）；
+        装在别处就在 server.json 写 <code>ffmpeg_path</code> 绝对路径。装好后约 30 秒内自动生效，无需重启。</div></div>`;
   }
   const rows = devices.map(d => {
     const st = d.online ? '<span class="dot on"></span>在线'

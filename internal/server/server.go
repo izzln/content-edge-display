@@ -45,7 +45,8 @@ type Config struct {
 	AdminToken  string `json:"admin_token"`
 	EnrollToken string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
 	Timezone    string `json:"timezone"`     // 时段计划时区，默认系统时区
-	// FFmpegPath 指定 ffmpeg；留空在 PATH 里找。找不到时不能上传视频（后台会提示），
+	// FFmpegPath 指定 ffmpeg；留空在 PATH 里找（注意是服务进程的 PATH，systemd 下只有
+	// /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin）。不可用时不能上传视频（后台会提示原因），
 	// 因为未转码的原片码率过高，会让设备过热关机。
 	FFmpegPath string `json:"ffmpeg_path,omitempty"`
 }
@@ -88,6 +89,10 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.MediaRoot = resolvePath(base, cfg.MediaRoot)
 	cfg.DataDir = resolvePath(base, cfg.DataDir)
 	cfg.FontPath = resolvePath(base, cfg.FontPath)
+	// ffmpeg_path 只写程序名（如 "ffmpeg"）时按 PATH 查找；带路径的相对写法按配置文件目录解析
+	if strings.ContainsRune(cfg.FFmpegPath, os.PathSeparator) {
+		cfg.FFmpegPath = resolvePath(base, cfg.FFmpegPath)
+	}
 	if cfg.EnrollToken == "" {
 		return nil, errors.New("config: enroll_token 不能为空，否则没有任何设备能接入（用 make tokens 生成）")
 	}
@@ -145,9 +150,14 @@ type Server struct {
 	lastSeen map[string]time.Time
 	lastHB   map[string]Heartbeat
 
-	encoder videoEncoder // nil 表示没有 ffmpeg：视频只校验不转码
-	jobs    *jobQueue
-	stop    context.CancelFunc
+	encMu      sync.Mutex
+	encoder    videoEncoder                 // nil 表示当前没有可用的 ffmpeg：不收视频
+	encoderErr string                       // 不可用的原因（日志与后台提示用）
+	encTried   time.Time                    // 上次探测时间
+	findEnc    func() (videoEncoder, error) // 探测 ffmpeg（测试可替换）
+	jobs       *jobQueue
+	stop       context.CancelFunc
+	stopped    chan struct{} // 转码协程退出后关闭
 
 	now func() time.Time // 测试注入
 }
@@ -193,23 +203,64 @@ func New(cfg *Config) (*Server, error) {
 	}
 
 	s.jobs = newJobQueue()
-	if enc := transcode.Find(cfg.FFmpegPath); enc != nil {
-		s.encoder = enc
-		log.Printf("视频转码已启用：%s", enc.Version())
-	} else {
-		log.Printf("warning: 未找到 ffmpeg，不能上传视频（未转码的原片码率过高，会让设备过热关机）。" +
-			"请安装 ffmpeg（apt install ffmpeg）或在 server.json 里配置 ffmpeg_path")
+	s.findEnc = func() (videoEncoder, error) {
+		enc, err := transcode.Find(cfg.FFmpegPath)
+		if err != nil {
+			return nil, err // 注意别把 nil 的 *Encoder 包进接口
+		}
+		return enc, nil
 	}
+	s.videoEncoder()
 	ctx, cancel := context.WithCancel(context.Background())
-	s.stop = cancel
-	go s.runTranscoder(ctx)
+	s.stop, s.stopped = cancel, make(chan struct{})
+	go func() {
+		defer close(s.stopped)
+		s.runTranscoder(ctx)
+	}()
 	return s, nil
 }
 
-// Close 停止后台转码协程（正在跑的 ffmpeg 会被杀掉）。
+// encoderRetry 是 ffmpeg 不可用时重新探测的最短间隔：运营方装好 ffmpeg 后不用重启服务端。
+const encoderRetry = 30 * time.Second
+
+// videoEncoder 返回可用的转码器，没有则为 nil。不可用时按 encoderRetry 节流重新探测。
+func (s *Server) videoEncoder() videoEncoder {
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+	if s.encoder != nil || s.findEnc == nil || time.Since(s.encTried) < encoderRetry {
+		return s.encoder
+	}
+	s.encTried = time.Now()
+	enc, err := s.findEnc()
+	if err != nil {
+		if s.encoderErr != err.Error() { // 同一原因只记一次，别刷屏
+			log.Printf("warning: ffmpeg 不可用，暂不能上传视频：%v。"+
+				"请 apt install ffmpeg，或在 server.json 的 ffmpeg_path 里写 ffmpeg 的绝对路径"+
+				"（该文件须能被服务的运行用户执行）", err)
+		}
+		s.encoderErr = err.Error()
+		return nil
+	}
+	s.encoder, s.encoderErr = enc, ""
+	log.Printf("视频转码已启用：%s", enc.Version())
+	return enc
+}
+
+// setEncoder 直接指定转码器（测试用）；nil 表示模拟"没有 ffmpeg"且不再探测。
+func (s *Server) setEncoder(enc videoEncoder) {
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+	s.encoder, s.findEnc = enc, nil
+	if enc == nil {
+		s.encoderErr = "测试：未配置转码器"
+	}
+}
+
+// Close 停止后台转码协程并等它退出（正在跑的 ffmpeg 会被杀掉），之后不会再有文件写入。
 func (s *Server) Close() {
 	if s.stop != nil {
 		s.stop()
+		<-s.stopped
 	}
 }
 

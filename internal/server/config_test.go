@@ -155,3 +155,26 @@ func TestLoadConfigDefaultListenPort(t *testing.T) {
 		t.Fatalf("默认监听端口应为 :9000，得到 %q", cfg.Listen)
 	}
 }
+
+// ffmpeg_path：只写程序名按 PATH 找；带路径的相对写法按配置文件目录解析（systemd 下工作目录是 /）。
+func TestLoadConfigFFmpegPath(t *testing.T) {
+	dir := t.TempDir()
+	load := func(ff string) string {
+		p := filepath.Join(dir, "server.json")
+		os.WriteFile(p, []byte(`{"admin_token":"6DOTtuXB","enroll_token":"G2o4MrHY","ffmpeg_path":"`+ff+`"}`), 0o644)
+		cfg, err := LoadConfig(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.FFmpegPath
+	}
+	if got := load("ffmpeg"); got != "ffmpeg" {
+		t.Errorf("只写程序名应保持原样（按 PATH 查找），得到 %q", got)
+	}
+	if got := load("bin/ffmpeg"); got != filepath.Join(dir, "bin/ffmpeg") {
+		t.Errorf("相对路径应按配置目录解析，得到 %q", got)
+	}
+	if got := load("/usr/bin/ffmpeg"); got != "/usr/bin/ffmpeg" {
+		t.Errorf("绝对路径应原样保留，得到 %q", got)
+	}
+}
