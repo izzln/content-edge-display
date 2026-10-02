@@ -27,7 +27,7 @@ const (
 )
 
 // newTransport 构造设备端共用的 HTTP 传输层。
-func newTransport(cacheDir string, clock *serverClock) http.RoundTripper {
+func newTransport(cacheDir string, clock *serverClock, sched *schedule) http.RoundTripper {
 	r := &fallbackResolver{path: filepath.Join(cacheDir, "server-addr")}
 	t := &http.Transport{
 		Proxy:                 nil, // 永远直连
@@ -37,7 +37,7 @@ func newTransport(cacheDir string, clock *serverClock) http.RoundTripper {
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConnsPerHost:   2,
 	}
-	return clockTransport{base: t, clock: clock}
+	return clockTransport{base: t, clock: clock, sched: sched}
 }
 
 // fallbackResolver 解析服务端地址，失败时退回上次成功解析的地址。

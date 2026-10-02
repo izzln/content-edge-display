@@ -14,6 +14,21 @@ import (
 	"sync"
 )
 
+// 设备的轮询与心跳间隔由服务端统一规定（server.json），随每个设备请求的响应头下发
+// （包括 304 与注册响应），设备照办。改间隔只改服务端一处；服务端也因此知道每台设备
+// 多久该来一次，能据此判断离线。
+const (
+	HeaderPollInterval      = "X-Poll-Interval"      // 秒
+	HeaderHeartbeatInterval = "X-Heartbeat-Interval" // 秒
+
+	DefaultPollIntervalS      = 10
+	DefaultHeartbeatIntervalS = 60
+	MinPollIntervalS          = 1
+	MaxPollIntervalS          = 300
+	MinHeartbeatIntervalS     = 10
+	MaxHeartbeatIntervalS     = 3600
+)
+
 // Item 是清单中的一个播放条目。
 type Item struct {
 	Type     string `json:"type"` // "image" | "video"

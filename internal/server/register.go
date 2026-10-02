@@ -34,6 +34,7 @@ type RegisterRequest struct {
 // 设备下次重试即可注册成功，属性、播放列表等配置都保留（不必删设备重来）。
 // 不自动接受，是因为 enroll_token 烧在每台设备里，自动接受等于谁都能冒充任意设备。
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	s.announceSchedule(w) // 注册成功后设备即按服务端规定的间隔轮询、心跳
 	if s.cfg.EnrollToken == "" {
 		http.Error(w, "enrollment disabled", http.StatusForbidden)
 		return

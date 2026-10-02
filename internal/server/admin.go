@@ -162,10 +162,14 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 			AgentVersion: d.AgentVersion,
 		}
 		s.mu.Lock()
+		offline := s.offlineAfter(d.ID)
+		st.PollS, st.OfflineS = int(s.pollEvery(d.ID)/time.Second), int(offline/time.Second)
 		if seen, ok := s.lastSeen[d.ID]; ok {
-			hb := s.lastHB[d.ID]
-			st.LastSeen, st.Heartbeat = &seen, &hb
-			st.Online = now.Sub(seen) <= OnlineWindow
+			st.LastSeen = &seen
+			st.Online = now.Sub(seen) <= offline
+		}
+		if hb, ok := s.lastHB[d.ID]; ok {
+			st.Heartbeat = &hb
 		}
 		st.Sync = s.syncState(d.ID, st.Online)
 		s.mu.Unlock()

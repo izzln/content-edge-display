@@ -382,3 +382,95 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 		t.Errorf("心跳不应逐条记日志（上线只记一次）：\n%s", out)
 	}
 }
+
+// 在线判断：任何签名通过的请求都算联系过（不只心跳），约 3 个轮询周期没来就算离线；
+// 轮询/心跳间隔由服务端规定，随每个设备响应下发。
+func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.AdminToken = adminToken
+	s.cfg.PollIntervalS, s.cfg.HeartbeatIntervalS = 10, 60
+	h := s.Handler()
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	status := func() DeviceStatus {
+		w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
+		var list []DeviceStatus
+		json.Unmarshal(w.Body.Bytes(), &list)
+		for _, d := range list {
+			if d.ID == testDeviceID {
+				return d
+			}
+		}
+		t.Fatal("device missing")
+		return DeviceStatus{}
+	}
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		var r *http.Request
+		if body == "" {
+			r = signedRequestAt(now, method, path, nil)
+		} else {
+			r = signedRequestAt(now, method, path, strings.NewReader(body))
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	// 只轮询、从没心跳过（旧版程序刚连上，或服务端刚重启）：也算在线
+	w := send("GET", "/api/v1/device/manifest", "")
+	if w.Header().Get("X-Poll-Interval") != "10" || w.Header().Get("X-Heartbeat-Interval") != "60" {
+		t.Fatalf("响应头应下发间隔：%v", w.Header())
+	}
+	if st := status(); !st.Online || st.Heartbeat != nil {
+		t.Fatalf("轮询过就应在线（且没有伪造的空心跳）：%+v", st)
+	}
+	// 不知道设备的轮询间隔时保守地按 60 秒算：3 分钟才判离线
+	if st := status(); st.OfflineS != 180 {
+		t.Fatalf("未知轮询间隔时离线阈值应为 180 秒，得到 %d", st.OfflineS)
+	}
+
+	// 新版程序在心跳里报告自己按 10 秒轮询 → 30 秒没来就离线
+	send("POST", "/api/v1/device/heartbeat", `{"player_ver":"1.1.0","poll_interval_s":10}`)
+	if st := status(); st.PollS != 10 || st.OfflineS != 30 {
+		t.Fatalf("应按设备报告的轮询间隔判断：%+v", st)
+	}
+	now = now.Add(25 * time.Second)
+	if !status().Online {
+		t.Fatal("25 秒没来（不到 3 个轮询周期）仍应在线")
+	}
+	// 304 也算联系过，并且同样带着间隔
+	w = send("GET", "/api/v1/device/manifest", "")
+	etag := w.Header().Get("ETag")
+	r := signedRequestAt(now, "GET", "/api/v1/device/manifest", nil)
+	r.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotModified || w.Header().Get("X-Poll-Interval") != "10" {
+		t.Fatalf("304 也要带间隔：%d %v", w.Code, w.Header())
+	}
+	now = now.Add(31 * time.Second)
+	if st := status(); st.Online || st.Sync != syncOffline {
+		t.Fatalf("31 秒没有任何请求应判离线：%+v", st)
+	}
+
+	// 注册响应也带间隔：设备注册后马上就照办
+	b, _ := json.Marshal(map[string]string{"device_id": "dev-new", "secret": "s", "enroll_token": "enroll-me"})
+	rr := httptest.NewRequest("POST", "/api/v1/device/register", strings.NewReader(string(b)))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, rr)
+	if w.Header().Get("X-Poll-Interval") != "10" {
+		t.Fatalf("注册响应应带间隔：%d %v", w.Code, w.Header())
+	}
+}
+
+func TestIntervalConfigBounds(t *testing.T) {
+	for _, c := range []Config{{PollIntervalS: 301}, {HeartbeatIntervalS: 5}, {PollIntervalS: -1}} {
+		if err := c.checkIntervals(); err == nil {
+			t.Errorf("%+v 应被拒绝", c)
+		}
+	}
+	c := Config{}
+	if err := c.checkIntervals(); err != nil || c.PollIntervalS != 10 || c.HeartbeatIntervalS != 60 {
+		t.Fatalf("默认值应为 10/60：%+v %v", c, err)
+	}
+}

@@ -6,5 +6,7 @@
   "admin_token": "change-me",
   "enroll_token": "change-me-too",
   "timezone": "Asia/Shanghai",
-  "ffmpeg_path": ""
+  "ffmpeg_path": "",
+  "poll_interval_s": 10,
+  "heartbeat_interval_s": 60
 }

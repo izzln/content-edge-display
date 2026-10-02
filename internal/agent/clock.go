@@ -57,16 +57,20 @@ func (c *serverClock) observe(h http.Header) {
 	}
 }
 
-// clockTransport 在每个 HTTP 响应上更新 serverClock。
+// clockTransport 在每个 HTTP 响应上更新 serverClock 与服务端规定的轮询/心跳间隔（schedule.go）。
 type clockTransport struct {
 	base  http.RoundTripper
 	clock *serverClock
+	sched *schedule // 可为 nil
 }
 
 func (t clockTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(r)
 	if err == nil {
 		t.clock.observe(resp.Header)
+		if t.sched != nil {
+			t.sched.observe(resp.Header)
+		}
 	}
 	return resp, err
 }

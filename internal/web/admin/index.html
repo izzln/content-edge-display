@@ -244,6 +244,8 @@ function renderDevices() {
     const tplName = tplById(d.active_template)?.name || d.active_template;
     show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
       d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
+    if (d.online && d.last_seen) show += `<div class="contact" data-seen="${Date.parse(d.last_seen)}" data-poll="${d.poll_interval_s}"
+      data-offline="${d.offline_after_s}" data-sync="${esc(d.sync)}"></div>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
     let ver = `<div class="muted">程序 ${esc(d.agent_version || "?")}`;
     if (d.update_target) {
@@ -271,7 +273,27 @@ function renderDevices() {
       </td></tr>`;
   }).join("");
   $("#devTable").innerHTML = `<tr><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">暂无设备。设备烧录母镜像上电后会自动注册出现在这里。</td></tr>'}`;
+  tickContact();
 }
+
+// tickContact 每秒刷新"设备多久前联系过"：等待刷新时让人知道设备是还没轮到，还是已经不来了。
+// 用服务器时间算（浏览器所在电脑的时钟可能不准）。
+const serverNow = () => Date.now() + ((info.server_time || infoFetchedAt) - infoFetchedAt);
+function tickContact() {
+  for (const el of document.querySelectorAll("#devTable .contact")) {
+    const age = Math.max(0, Math.round((serverNow() - +el.dataset.seen) / 1000));
+    const poll = +el.dataset.poll, offline = +el.dataset.offline;
+    let html = "";
+    if (age > 2 * poll) {
+      html = `<span class="warn">⚠ 设备 ${age} 秒未响应</span><div class="muted">${
+        age >= offline ? "可能已离线" : `超过 ${offline} 秒无响应判离线`}</div>`;
+    } else if (el.dataset.sync === "waiting" || el.dataset.sync === "syncing") {
+      html = `<span class="muted">设备 ${age} 秒前联系过，每 ${poll} 秒来一次</span>`;
+    }
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+}
+setInterval(tickContact, 1000);
 
 function testDialog(id) {
   modal(`<h2>测试屏 — ${esc(id)}</h2>

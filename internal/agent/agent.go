@@ -42,12 +42,13 @@ type Agent struct {
 	updateFailedAt map[string]time.Time
 	verified       bool         // 本次运行是否已确认过版本（首个成功心跳后）
 	clock          *serverClock // 签名用的时间以服务端为准，见 clock.go
+	sched          *schedule    // 轮询/心跳间隔由服务端规定，见 schedule.go
 }
 
 // New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
-	clock := newServerClock()
-	tr := newTransport(cfg.CacheDir, clock)
+	clock, sched := newServerClock(), newSchedule()
+	tr := newTransport(cfg.CacheDir, clock, sched)
 	return &Agent{
 		cfg:            cfg,
 		player:         p,
@@ -56,6 +57,7 @@ func New(cfg *Config, p player.Player) *Agent {
 		startedAt:      time.Now(),
 		updateFailedAt: map[string]time.Time{},
 		clock:          clock,
+		sched:          sched,
 	}
 }
 
@@ -100,6 +102,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	pollTimer := time.NewTimer(0)
 	hbTimer := time.NewTimer(0)
+	hbEvery := a.sched.Heartbeat()
 	wdTicker := time.NewTicker(watchdogInterval) // 不依赖轮询/心跳间隔的配置值
 	defer pollTimer.Stop()
 	defer hbTimer.Stop()
@@ -131,6 +134,11 @@ func (a *Agent) Run(ctx context.Context) error {
 				}
 			}
 			pollTimer.Reset(a.pollDelay())
+			// 服务端改了心跳间隔：立即按新间隔重排，不等旧间隔走完（旧的可能长达一小时）
+			if every := a.sched.Heartbeat(); every != hbEvery {
+				hbEvery = every
+				hbTimer.Reset(every)
+			}
 		case <-wdTicker.C:
 			sdNotify("WATCHDOG=1")
 		case <-hbTimer.C:
@@ -138,7 +146,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.Heartbeat(ctx); err != nil {
 				log.Printf("agent: heartbeat failed: %v", err)
 			}
-			hbTimer.Reset(time.Duration(a.cfg.HeartbeatIntervalS) * time.Second)
+			hbEvery = a.sched.Heartbeat()
+			hbTimer.Reset(hbEvery)
 		}
 	}
 }
@@ -244,7 +253,7 @@ func (a *Agent) Register(ctx context.Context) error {
 
 // pollDelay 返回下一次轮询间隔（失败时指数退避）。
 func (a *Agent) pollDelay() time.Duration {
-	d := time.Duration(a.cfg.PollIntervalS) * time.Second
+	d := a.sched.Poll()
 	for i := 0; i < a.failures && d < maxPollBackoff; i++ {
 		d *= 2
 	}
@@ -432,6 +441,8 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 		"hwdec":        stats.HWDec,
 		"output_w":     stats.OutputW,
 		"output_h":     stats.OutputH,
+		// 告诉服务端自己实际按多久轮询一次，服务端据此判断离线
+		"poll_interval_s": int(a.sched.Poll() / time.Second),
 	}
 	body, err := json.Marshal(hb)
 	if err != nil {

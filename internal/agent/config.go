@@ -13,15 +13,15 @@ import (
 //
 // 设备一律凭 enroll_token 自注册：编号取自主机名或 SoC 序列号（device_id 可显式覆盖），
 // 密钥首启随机生成，两者持久化在 cache_dir/identity.json。
+// 轮询/心跳间隔不在这里配置：由服务端规定，设备照办（见 schedule.go）。旧配置里的
+// poll_interval_s / heartbeat_interval_s 会被忽略。
 type Config struct {
-	ServerURL          string `json:"server_url"`
-	DeviceID           string `json:"device_id,omitempty"`
-	EnrollToken        string `json:"enroll_token"`
-	CacheDir           string `json:"cache_dir"`
-	InstallDir         string `json:"install_dir"` // OTA 安装布局根目录；空=禁用 OTA
-	PollIntervalS      int    `json:"poll_interval_s"`
-	HeartbeatIntervalS int    `json:"heartbeat_interval_s"`
-	Player             string `json:"player"` // "mpv" | "null"
+	ServerURL   string `json:"server_url"`
+	DeviceID    string `json:"device_id,omitempty"`
+	EnrollToken string `json:"enroll_token"`
+	CacheDir    string `json:"cache_dir"`
+	InstallDir  string `json:"install_dir"` // OTA 安装布局根目录；空=禁用 OTA
+	Player      string `json:"player"`      // "mpv" | "null"
 	// DisplayMode 是显示屏输出模式（WxH 或 WxH@刷新率），传给 mpv 的 --drm-mode。
 	// mpv 默认用 EDID 首选模式、不理会内核的 video= 参数，所以要单独指定；留空则不强制。
 	DisplayMode  string   `json:"display_mode"`
@@ -67,12 +67,6 @@ func (c *Config) fillDefaults() error {
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
 	if c.CacheDir == "" {
 		c.CacheDir = "/var/lib/display-agent"
-	}
-	if c.PollIntervalS <= 0 {
-		c.PollIntervalS = 30
-	}
-	if c.HeartbeatIntervalS <= 0 {
-		c.HeartbeatIntervalS = 60
 	}
 	if c.Player == "" {
 		c.Player = "mpv"

@@ -30,9 +30,6 @@ import (
 	"github.com/izzln/content-edge-display/internal/transcode"
 )
 
-// OnlineWindow 内有心跳视为设备在线。
-const OnlineWindow = 5 * time.Minute
-
 // placeholderToken 是配置样例里的占位口令。仓库是公开的，样例值人人可见，
 // 带着它启动等于没有口令，所以直接拒绝启动。
 const placeholderToken = "change-me"
@@ -52,6 +49,27 @@ type Config struct {
 	// /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin）。不可用时不能上传视频（后台会提示原因），
 	// 因为未转码的原片码率过高，会让设备过热关机。
 	FFmpegPath string `json:"ffmpeg_path,omitempty"`
+	// 设备的轮询与心跳间隔：在这里统一规定，设备从响应头学到后照办（见 manifest.HeaderPollInterval）。
+	// 轮询决定后台改动多快上屏、多快发现设备离线；心跳只上报温度/硬解等健康数据。
+	PollIntervalS      int `json:"poll_interval_s,omitempty"`      // 默认 10
+	HeartbeatIntervalS int `json:"heartbeat_interval_s,omitempty"` // 默认 60
+}
+
+// checkIntervals 填充轮询/心跳间隔的默认值并检查范围。
+func (c *Config) checkIntervals() error {
+	if c.PollIntervalS == 0 {
+		c.PollIntervalS = manifest.DefaultPollIntervalS
+	}
+	if c.HeartbeatIntervalS == 0 {
+		c.HeartbeatIntervalS = manifest.DefaultHeartbeatIntervalS
+	}
+	if c.PollIntervalS < manifest.MinPollIntervalS || c.PollIntervalS > manifest.MaxPollIntervalS {
+		return fmt.Errorf("config: poll_interval_s 应在 %d~%d 秒之间", manifest.MinPollIntervalS, manifest.MaxPollIntervalS)
+	}
+	if c.HeartbeatIntervalS < manifest.MinHeartbeatIntervalS || c.HeartbeatIntervalS > manifest.MaxHeartbeatIntervalS {
+		return fmt.Errorf("config: heartbeat_interval_s 应在 %d~%d 秒之间", manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS)
+	}
+	return nil
 }
 
 // resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
@@ -96,6 +114,9 @@ func LoadConfig(path string) (*Config, error) {
 	if strings.ContainsRune(cfg.FFmpegPath, os.PathSeparator) {
 		cfg.FFmpegPath = resolvePath(base, cfg.FFmpegPath)
 	}
+	if err := cfg.checkIntervals(); err != nil {
+		return nil, err
+	}
 	if cfg.EnrollToken == "" {
 		return nil, errors.New("config: enroll_token 不能为空，否则没有任何设备能接入（用 make tokens 生成）")
 	}
@@ -123,13 +144,17 @@ type Heartbeat struct {
 	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
 	OutputW int `json:"output_w,omitempty"`
 	OutputH int `json:"output_h,omitempty"`
+	// PollIntervalS 是设备实际在用的轮询间隔（照服务端规定）；旧版程序不报，见 offlineAfter。
+	PollIntervalS int `json:"poll_interval_s,omitempty"`
 }
 
 // DeviceStatus 是管理接口返回的设备状态。
 type DeviceStatus struct {
 	ID           string              `json:"id"`
 	Online       bool                `json:"online"`
-	LastSeen     *time.Time          `json:"last_seen,omitempty"`
+	LastSeen     *time.Time          `json:"last_seen,omitempty"` // 最近一次任何请求（轮询/心跳/下载）
+	PollS        int                 `json:"poll_interval_s"`     // 设备多久该来一次
+	OfflineS     int                 `json:"offline_after_s"`     // 多久没来算离线
 	Heartbeat    *Heartbeat          `json:"heartbeat,omitempty"`
 	Attrs        map[string]string   `json:"attrs"`
 	Display      store.DisplayConfig `json:"display"`
@@ -204,6 +229,9 @@ type Server struct {
 
 // New 创建服务端：加载状态文件、准备数据目录、初始化渲染器。
 func New(cfg *Config) (*Server, error) {
+	if err := cfg.checkIntervals(); err != nil {
+		return nil, err
+	}
 	st, err := store.Open(filepath.Join(cfg.DataDir, "state.json"))
 	if err != nil {
 		return nil, err
@@ -349,6 +377,48 @@ func (s *Server) authenticate(r *http.Request) (store.Device, error) {
 	return dev, nil
 }
 
+// announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳（设备照办，见 manifest.HeaderPollInterval）。
+func (s *Server) announceSchedule(w http.ResponseWriter) {
+	w.Header().Set(manifest.HeaderPollInterval, strconv.Itoa(s.cfg.PollIntervalS))
+	w.Header().Set(manifest.HeaderHeartbeatInterval, strconv.Itoa(s.cfg.HeartbeatIntervalS))
+}
+
+// unknownPollInterval 是不知道设备轮询间隔时的保守假设：旧版程序按自己 agent.json 里的间隔轮询、
+// 也不报告；服务端重启后、设备第一个心跳之前也不知道。
+const unknownPollInterval = 60 * time.Second
+
+// pollEvery 返回设备实际的轮询间隔（设备在心跳里报告）。调用方持有 s.mu。
+func (s *Server) pollEvery(deviceID string) time.Duration {
+	if hb, ok := s.lastHB[deviceID]; ok && hb.PollIntervalS > 0 {
+		return time.Duration(hb.PollIntervalS) * time.Second
+	}
+	return unknownPollInterval
+}
+
+// offlineAfter 返回设备多久没有任何请求就算离线：约 3 个轮询周期，至少 30 秒。
+// 要连续几次没来才算，偶尔一次请求失败不会让状态来回跳。调用方持有 s.mu。
+func (s *Server) offlineAfter(deviceID string) time.Duration {
+	return max(3*s.pollEvery(deviceID), 30*time.Second)
+}
+
+// noteContact 记下设备最近一次联系，用于判断在线。任何签名通过的请求都算：轮询、心跳、下载文件——
+// 设备下载大文件时轮询会暂停，只看轮询的话"正在刷新"的设备反而会被判离线。
+func (s *Server) noteContact(dev store.Device, r *http.Request) {
+	now := s.now()
+	s.mu.Lock()
+	seen, known := s.lastSeen[dev.ID]
+	back := !known || now.Sub(seen) > s.offlineAfter(dev.ID)
+	s.lastSeen[dev.ID] = now
+	s.mu.Unlock()
+	if back {
+		ip := dev.IP
+		if ip == "" {
+			ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+		}
+		log.Printf("设备 %s 上线（%s，程序 %s）", dev.ID, ip, cmp.Or(dev.AgentVersion, "?"))
+	}
+}
+
 // deviceAuth 校验设备请求；失败时回 401 并说明原因、记日志（同一设备同一原因每分钟最多一条）。
 //
 // 只回一句 "unauthorized" 的话，现场根本无从判断是时钟不准、密钥不对还是设备被删了——
@@ -356,6 +426,8 @@ func (s *Server) authenticate(r *http.Request) (store.Device, error) {
 func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Device, bool) {
 	dev, err := s.authenticate(r)
 	if err == nil {
+		s.noteContact(dev, r)
+		s.announceSchedule(w)
 		return dev, true
 	}
 	id := r.Header.Get(sign.HeaderDeviceID)
@@ -626,15 +698,6 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	seen, known := s.lastSeen[dev.ID]
-	if !known || s.now().Sub(seen) > OnlineWindow {
-		ip := hb.IP
-		if ip == "" {
-			ip, _, _ = net.SplitHostPort(r.RemoteAddr)
-		}
-		log.Printf("设备 %s 上线（%s，程序 %s）", dev.ID, ip, cmp.Or(hb.PlayerVer, "?"))
-	}
-	s.lastSeen[dev.ID] = s.now()
 	s.lastHB[dev.ID] = hb
 	s.mu.Unlock()
 	// 持久化程序版本/IP（仅变化时写盘）：服务端重启后升级状态仍可判断。
