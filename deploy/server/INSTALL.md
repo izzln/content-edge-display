@@ -56,7 +56,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 > （`display` 用户无权读取）、装在 `/opt/...` 等不在上述 PATH 里的位置。
 > 后台顶部和服务日志（`journalctl -u display-server`）会写明具体原因。推荐用 `apt install ffmpeg`
 > （装到 `/usr/bin`）；装在别处就在 `server.json` 里写 `"ffmpeg_path": "/绝对路径/ffmpeg"`，
-> 并确认 `sudo -u display /绝对路径/ffmpeg -version` 能跑通。装好后约 30 秒内自动生效，无需重启服务端。
+> 并确认 `sudo -u display /绝对路径/ffmpeg -version` 能跑通。装好后重启服务端（`systemctl restart display-server`）生效。
 
 管理后台：浏览器打开 `http://<服务器>:9000/admin`，输入 `admin_token`。
 

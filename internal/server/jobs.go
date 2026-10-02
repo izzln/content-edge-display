@@ -172,16 +172,27 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 	defer os.Remove(j.src)
 
 	start := time.Now()
-	enc := s.videoEncoder() // 任务只在有转码器时入队，转码器一旦可用就不会再变回 nil
+	enc := s.videoEncoder() // 任务只在有转码器时入队
 	total := enc.Duration(jctx, j.src)
+	var srcSize int64
+	if fi, err := os.Stat(j.src); err == nil {
+		srcSize = fi.Size()
+	}
+	log.Printf("开始转码 设备 %s：%s（原片 %s，时长 %.0f 秒）", j.deviceID, j.name, humanBytes(srcSize), total)
 	dir := s.deviceMediaDir(j.deviceID)
 	dst := filepath.Join(dir, j.name)
+	logged := 0 // 已记录的进度档位（25/50/75）
 	err := os.MkdirAll(dir, 0o755)
 	if err == nil {
 		err = enc.Video(jctx, j.src, dst, transcode.DefaultSpec(), func(sec float64) {
-			if total > 0 {
-				p := int(sec * 100 / total)
-				s.jobs.update(j, func(j *transcodeJob) { j.progress = min(p, 99) })
+			if total <= 0 {
+				return
+			}
+			p := min(int(sec*100/total), 99)
+			s.jobs.update(j, func(j *transcodeJob) { j.progress = p })
+			if step := p / 25 * 25; step > logged && step < 100 {
+				logged = step
+				log.Printf("转码中 设备 %s：%s %d%%（已用 %s）", j.deviceID, j.name, step, time.Since(start).Round(time.Second))
 			}
 		})
 	}
@@ -191,14 +202,19 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 		return
 	}
 	if err != nil {
-		log.Printf("transcode %s/%s failed after %s: %v", j.deviceID, j.name, time.Since(start).Round(time.Second), err)
+		log.Printf("转码失败 设备 %s：%s（用时 %s）：%v", j.deviceID, j.name, time.Since(start).Round(time.Second), err)
 		s.jobs.update(j, func(j *transcodeJob) { j.status, j.err, j.cancel = jobFailed, err.Error(), nil })
 		return
 	}
 	// 完成：追加到播放列表末尾，然后从队列里摘掉
 	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
-		log.Printf("transcode %s/%s: update playlist failed: %v", j.deviceID, j.name, err)
+		log.Printf("转码完成但加入播放列表失败 设备 %s：%s：%v", j.deviceID, j.name, err)
 	}
 	s.jobs.drop(j)
-	log.Printf("transcode %s/%s done in %s", j.deviceID, j.name, time.Since(start).Round(time.Second))
+	var outSize int64
+	if fi, err := os.Stat(dst); err == nil {
+		outSize = fi.Size()
+	}
+	log.Printf("转码成功 设备 %s：%s（%s → %s，用时 %s），已加入播放列表",
+		j.deviceID, j.name, humanBytes(srcSize), humanBytes(outSize), time.Since(start).Round(time.Second))
 }

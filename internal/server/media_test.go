@@ -263,6 +263,71 @@ func TestPlaylistOrderIsUploadOrder(t *testing.T) {
 	}
 }
 
+// 后台逐个文件上传、可能几个标签页同时传：同名文件并发上传也不能互相覆盖。
+func TestConcurrentSameNameUploadsDoNotCollide(t *testing.T) {
+	_, h := newAdminTestServer(t)
+	const n = 6
+	done := make(chan uploadResult, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			var buf bytes.Buffer
+			mw := multipart.NewWriter(&buf)
+			fw, _ := mw.CreateFormFile("files", "same.png")
+			img := image.NewRGBA(image.Rect(0, 0, 64, 64)) // 大一点，让并发请求在落盘阶段重叠
+			fw.Write(encodePNG(t, img))
+			mw.Close()
+			r := httptest.NewRequest("POST", "/api/v1/admin/devices/"+testDeviceID+"/media", &buf)
+			r.Header.Set("X-Admin-Token", adminToken)
+			r.Header.Set("Content-Type", mw.FormDataContentType())
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			var res uploadResult
+			json.Unmarshal(w.Body.Bytes(), &res)
+			done <- res
+		}()
+	}
+	seen := map[string]bool{}
+	for i := 0; i < n; i++ {
+		res := <-done
+		if len(res.Accepted) != 1 {
+			t.Fatalf("每次上传都应收下 1 个文件：%+v", res)
+		}
+		if seen[res.Accepted[0]] {
+			t.Fatalf("两次上传选中了同一个文件名 %s", res.Accepted[0])
+		}
+		seen[res.Accepted[0]] = true
+	}
+	if got := len(listMedia(t, h)); got != n {
+		t.Fatalf("播放列表应有 %d 个文件，得到 %d", n, got)
+	}
+}
+
+func TestDeviceMediaThumb(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	img := image.NewRGBA(image.Rect(0, 0, 1440, 900))
+	putMediaFile(t, s, "big.png", encodePNG(t, img))
+	putMediaFile(t, s, "clip.mp4", fakeVideo)
+	base := "/api/v1/admin/devices/" + testDeviceID + "/media/"
+
+	w := do(t, h, adminReq("GET", base+"big.png/thumb", nil), http.StatusOK)
+	thumb, format, err := image.Decode(w.Body)
+	if err != nil || format != "jpeg" {
+		t.Fatalf("缩略图应是 JPEG：%v %s", err, format)
+	}
+	if b := thumb.Bounds(); b.Dx() > 240 || b.Dy() > 160 {
+		t.Fatalf("缩略图过大：%v", b)
+	}
+	// 没变就 304，不重复解码
+	r := adminReq("GET", base+"big.png/thumb", nil)
+	r.Header.Set("If-None-Match", w.Header().Get("ETag"))
+	do(t, h, r, http.StatusNotModified)
+
+	do(t, h, adminReq("GET", base+"clip.mp4/thumb", nil), http.StatusNotFound)
+	do(t, h, adminReq("GET", base+"nope.png/thumb", nil), http.StatusNotFound)
+	// 只读接口也要 token
+	do(t, h, httptest.NewRequest("GET", base+"big.png/thumb", nil), http.StatusUnauthorized)
+}
+
 // ---- 清单 layout ----
 
 // 模板有媒体区且媒体区有内容时：清单条目是媒体文件本身（视频不转码），

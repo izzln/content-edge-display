@@ -1,18 +1,20 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg" // image.DecodeConfig 需要
 	_ "image/png"
 	"io"
-	"mime/multipart"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
@@ -162,16 +164,6 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 	accepted := []string{}    // 已就绪，直接进播放列表
 	transcoding := []string{} // 已进入转码队列，完成后自动追加到播放列表末尾
 	rejected := []rejection{}
-	existing, err := s.mediaList(dev.ID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	taken := map[string]bool{}
-	for _, f := range existing {
-		taken[f.Name] = true
-	}
-
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -185,16 +177,23 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 			part.Close()
 			continue
 		}
-		name, queued, reason := s.saveUploadedMedia(dev.ID, dir, part, taken)
+		orig := filepath.Base(part.FileName())
+		log.Printf("接收上传 → 设备 %s：%s（%s）", dev.ID, orig, uploadSizeHint(r))
+		start := time.Now()
+		cr := &countingReader{r: part}
+		name, queued, reason := s.saveUploadedMedia(dev.ID, dir, cr, orig)
 		part.Close()
+		took := time.Since(start).Round(100 * time.Millisecond)
 		if reason != "" {
-			rejected = append(rejected, rejection{Name: filepath.Base(part.FileName()), Reason: reason})
+			log.Printf("上传被拒 ← 设备 %s：%s（已收 %s，用时 %s）：%s", dev.ID, orig, humanBytes(cr.n), took, reason)
+			rejected = append(rejected, rejection{Name: orig, Reason: reason})
 			continue
 		}
-		taken[name] = true
 		if queued {
+			log.Printf("上传完成 ← 设备 %s：%s（%s，用时 %s），已排队转码为 %s", dev.ID, orig, humanBytes(cr.n), took, name)
 			transcoding = append(transcoding, name)
 		} else {
+			log.Printf("上传完成 ← 设备 %s：%s（%s，用时 %s），已加入播放列表", dev.ID, name, humanBytes(cr.n), took)
 			accepted = append(accepted, name)
 		}
 	}
@@ -219,8 +218,7 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 //   - 图片：校验能解码，过大的缩到画布尺寸以内，立即就绪；
 //   - 视频：原片放进暂存区排队转码，产物名统一为 .mp4。没有 ffmpeg 就不收视频——
 //     未转码的原片码率过高，会让设备过热关机，宁可当场拒绝。
-func (s *Server) saveUploadedMedia(deviceID, dir string, part *multipart.Part, taken map[string]bool) (string, bool, string) {
-	name := filepath.Base(part.FileName())
+func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name string) (string, bool, string) {
 	if !mediaNamePattern.MatchString(name) {
 		return "", false, "文件名非法（仅支持字母、数字、空格和 . _ -，最长 128 字符）"
 	}
@@ -238,7 +236,11 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part *multipart.Part, t
 	default:
 		return "", false, "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等）"
 	}
-	name = uniqueName(name, taken)
+	name, release, err := s.claimMediaName(deviceID, name)
+	if err != nil {
+		return "", false, err.Error()
+	}
+	defer release()
 
 	limit, stageDir := int64(maxImageUploadBytes), dir
 	if isVideo {
@@ -282,6 +284,72 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part *multipart.Part, t
 		return fail(err.Error())
 	}
 	return name, false, ""
+}
+
+// claimMediaName 为一次上传选定不重名的文件名，并在上传期间占住它。
+//
+// 后台逐个文件上传，几个浏览器标签页还可能同时往同一台设备传：只按请求开始时的列表查重，
+// 两个同名文件会选中同一个名字、互相覆盖。占用在文件落盘（或进入转码队列）后释放，
+// 那时它已经出现在 mediaList 里了。
+func (s *Server) claimMediaName(deviceID, name string) (string, func(), error) {
+	s.uploadMu.Lock()
+	defer s.uploadMu.Unlock()
+	existing, err := s.mediaList(deviceID)
+	if err != nil {
+		return "", nil, err
+	}
+	taken := map[string]bool{}
+	for _, f := range existing {
+		taken[f.Name] = true
+	}
+	prefix := deviceID + "/"
+	for k := range s.uploading {
+		if strings.HasPrefix(k, prefix) {
+			taken[strings.TrimPrefix(k, prefix)] = true
+		}
+	}
+	name = uniqueName(name, taken)
+	if s.uploading == nil {
+		s.uploading = map[string]bool{}
+	}
+	s.uploading[prefix+name] = true
+	return name, func() {
+		s.uploadMu.Lock()
+		delete(s.uploading, prefix+name)
+		s.uploadMu.Unlock()
+	}, nil
+}
+
+// countingReader 统计读到的字节数（日志用）。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	c.n += int64(n)
+	return n, err
+}
+
+// uploadSizeHint 给出本次上传请求的大致大小（单文件上传时就是文件大小）。
+func uploadSizeHint(r *http.Request) string {
+	if r.ContentLength > 0 {
+		return "约 " + humanBytes(r.ContentLength)
+	}
+	return "大小未知"
+}
+
+// humanBytes 把字节数格式化成 KB/MB。
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0fKB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
 }
 
 // checkImage 在完整解码之前先读文件头：挡住伪装成图片的文件与超大图（解压炸弹）。
@@ -363,6 +431,40 @@ func (s *Server) handleReorderDeviceMedia(w http.ResponseWriter, r *http.Request
 	writeJSON(w, files)
 }
 
+// handleDeviceMediaThumb 返回播放列表里一张图片的缩略图（后台列表用）。视频没有缩略图，回 404。
+func (s *Server) handleDeviceMediaThumb(w http.ResponseWriter, r *http.Request) {
+	dev, ok := s.pathDevice(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("file")
+	if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") || manifest.TypeOf(name) != "image" {
+		http.NotFound(w, r)
+		return
+	}
+	path := filepath.Join(s.deviceMediaDir(dev.ID), name)
+	info, err := os.Stat(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	// 同名文件可能删了又重新上传，所以用修改时间+大小做 ETag，每次让浏览器来问一下。
+	etag := fmt.Sprintf(`"%x-%x"`, info.ModTime().UnixNano(), info.Size())
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	var buf bytes.Buffer
+	if err := transcode.Thumbnail(&buf, path, 240, 160); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Write(buf.Bytes())
+}
+
 // handleDeleteDeviceMedia 删除一个媒体文件及其播放列表项。
 func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request) {
 	dev, ok := s.pathDevice(w, r)
@@ -374,7 +476,9 @@ func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "bad file name", http.StatusBadRequest)
 		return
 	}
-	s.jobs.remove(dev.ID, name) // 转码中的会被取消，失败的直接移除
+	if s.jobs.remove(dev.ID, name) { // 转码中的会被取消，失败的直接移除
+		log.Printf("取消转码 ← 设备 %s：%s（运营方删除）", dev.ID, name)
+	}
 	if err := os.Remove(filepath.Join(s.deviceMediaDir(dev.ID), name)); err != nil && !os.IsNotExist(err) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

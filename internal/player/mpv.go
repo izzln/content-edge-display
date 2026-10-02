@@ -3,6 +3,7 @@ package player
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -41,6 +42,7 @@ type MPV struct {
 	socketPath   string
 	playlistPath string
 	extraArgs    []string
+	fadeScript   string // 过渡脚本路径；空表示不带过渡
 	reqID        atomic.Int64
 
 	mu         sync.Mutex
@@ -97,7 +99,21 @@ func imageDurationFor(items []Item) string {
 	return "" // 没有图片，保持现值
 }
 
+// fadeScript 是播放项之间"淡出到黑 → 淡入"的 mpv Lua 脚本，随代理二进制分发（OTA 即可更新）。
+//
+//go:embed fade.lua
+var fadeScript []byte
+
+// FadeSeconds 是切换时淡出、淡入各自的时长。
+const FadeSeconds = 0.6
+
 func (p *MPV) Start(ctx context.Context) error {
+	// 每次启动都重写一遍，保证脚本与当前程序版本一致；写不了就不带过渡效果，照常播放。
+	p.fadeScript = filepath.Join(filepath.Dir(p.playlistPath), "display-fade.lua")
+	if err := os.WriteFile(p.fadeScript, fadeScript, 0o644); err != nil {
+		log.Printf("player(mpv): cannot write transition script (%v); playing without fades", err)
+		p.fadeScript = ""
+	}
 	go p.supervise(ctx)
 	go p.ensureLoop(ctx)
 	return nil
@@ -145,6 +161,10 @@ func (p *MPV) supervise(ctx context.Context) {
 		}
 		if dur := p.snapshotImageDur(); dur != "" {
 			args = append(args, "--image-display-duration="+dur)
+		}
+		if p.fadeScript != "" {
+			args = append(args, "--script="+p.fadeScript,
+				"--script-opts=display-fade="+strconv.FormatFloat(FadeSeconds, 'f', -1, 64))
 		}
 		if _, err := os.Stat(p.playlistPath); err == nil {
 			args = append(args, "--playlist="+p.playlistPath)

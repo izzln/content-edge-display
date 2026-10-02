@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -286,5 +288,97 @@ func TestTestCardUsesConfiguredTimezone(t *testing.T) {
 	s.now = func() time.Time { return fixed }
 	if render(tokyo) == render(time.UTC) {
 		t.Fatal("配置的时区不同，测试卡上的结束时间应不同")
+	}
+}
+
+// 后台"当前显示"列：等待刷新 → 正在刷新 → 已显示最新内容。
+func TestDeviceSyncState(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.AdminToken = adminToken
+	h := s.Handler()
+	state := func() string {
+		w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
+		var list []DeviceStatus
+		json.Unmarshal(w.Body.Bytes(), &list)
+		for _, d := range list {
+			if d.ID == testDeviceID {
+				return d.Sync
+			}
+		}
+		t.Fatal("device missing")
+		return ""
+	}
+	poll := func(applied string) string {
+		r := signedRequest("GET", "/api/v1/device/manifest", nil)
+		if applied != "" {
+			r.Header.Set("If-None-Match", `"`+applied+`"`)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return strings.Trim(w.Header().Get("ETag"), `"`)
+	}
+	if got := state(); got != syncOffline {
+		t.Fatalf("没有心跳时应为离线，得到 %s", got)
+	}
+	heartbeatAs(t, h, "1.0.0")
+	if got := state(); got != syncWaiting {
+		t.Fatalf("还没来取过内容时应为等待刷新，得到 %s", got)
+	}
+	v1 := poll("")
+	if got := state(); got != syncSyncing {
+		t.Fatalf("取到新清单、还没应用时应为正在刷新，得到 %s", got)
+	}
+	poll(v1)
+	if got := state(); got != syncLatest {
+		t.Fatalf("设备报告已应用最新版本时应为已显示最新内容，得到 %s", got)
+	}
+	// 运营方改了内容：设备下次轮询前是"等待刷新"，取到后"正在刷新"，应用后"最新"
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "999"}), http.StatusOK)
+	if got := state(); got != syncWaiting {
+		t.Fatalf("改了配置后应为等待刷新，得到 %s", got)
+	}
+	v2 := poll(v1)
+	if v2 == v1 {
+		t.Fatal("改了属性，版本号应变化")
+	}
+	if got := state(); got != syncSyncing {
+		t.Fatalf("取到新清单后应为正在刷新，得到 %s", got)
+	}
+	poll(v2)
+	if got := state(); got != syncLatest {
+		t.Fatalf("应用后应为已显示最新内容，得到 %s", got)
+	}
+}
+
+// 控制台记录服务端自己的工作（上传、转码、下发），不再逐条打印设备心跳。
+func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	s, h := newAdminTestServer(t)
+	s.setEncoder(&fakeEncoder{})
+	heartbeatAs(t, h, "1.0.0")
+	heartbeatAs(t, h, "1.0.0")
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.jpg", tinyPNG(t)}, upload{"b.mp4", fakeVideo}, upload{"c.txt", []byte("x")}))
+	waitMedia(t, h, "转码完成", func(fs []MediaFile) bool {
+		f, ok := byName(fs, "b.mp4")
+		return ok && f.Status == mediaReady
+	})
+	deviceManifest(t, h)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "1"}), http.StatusOK)
+
+	out := buf.String()
+	for _, want := range []string{
+		"设备 dev-001 上线", "接收上传 → 设备 dev-001：a.jpg", "上传完成 ← 设备 dev-001：a.jpg",
+		"已排队转码为 b.mp4", "上传被拒 ← 设备 dev-001：c.txt", "开始转码 设备 dev-001：b.mp4",
+		"转码成功 设备 dev-001：b.mp4", "下发新内容 → 设备 dev-001", "后台操作 PUT /devices/dev-001/attributes → 200",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("控制台应有 %q\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "上线") != 1 || strings.Contains(out, "heartbeat device=") {
+		t.Errorf("心跳不应逐条记日志（上线只记一次）：\n%s", out)
 	}
 }

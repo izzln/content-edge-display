@@ -552,3 +552,19 @@ func TestMpvEnvProvidesRuntimeDir(t *testing.T) {
 		t.Fatalf("已有效时不应覆盖，得到 %q", got)
 	}
 }
+
+// 切换过渡脚本随程序分发：启动时写到播放列表旁边，内容与程序内嵌的一致（OTA 后自动更新）。
+func TestStartWritesTransitionScript(t *testing.T) {
+	p, _, playlistPath := newTestMPV(t)
+	os.WriteFile(filepath.Join(filepath.Dir(playlistPath), "display-fade.lua"), []byte("-- 旧版本"), 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 不真的拉起 mpv
+	p.Start(ctx)
+	data, err := os.ReadFile(p.fadeScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(fadeScript) || !strings.Contains(string(data), "brightness") {
+		t.Fatal("启动时应写入当前版本的过渡脚本")
+	}
+}

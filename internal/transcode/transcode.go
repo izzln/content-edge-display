@@ -275,6 +275,29 @@ func ShrinkImage(path string, maxW, maxH int) (bool, error) {
 	return true, nil
 }
 
+// Thumbnail 把图片等比缩到 maxW×maxH 以内，以 JPEG 写出（后台列表的缩略图）。
+// 透明部分垫白，免得 PNG 的透明区在 JPEG 里变黑。
+func Thumbnail(w io.Writer, path string, maxW, maxH int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	src, _, err := image.Decode(f)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	b := src.Bounds()
+	tw, th := b.Dx(), b.Dy()
+	if tw > maxW || th > maxH {
+		tw, th = fitWithin(tw, th, maxW, maxH)
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
+	xdraw.Draw(dst, dst.Bounds(), image.White, image.Point{}, xdraw.Src)
+	xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), src, b, xdraw.Over, nil)
+	return jpeg.Encode(w, dst, &jpeg.Options{Quality: 80})
+}
+
 // fitWithin 等比缩小到 maxW×maxH 以内。
 func fitWithin(w, h, maxW, maxH int) (int, int) {
 	if w*maxH > maxW*h {

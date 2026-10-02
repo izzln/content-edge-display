@@ -3,6 +3,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"image"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -133,10 +135,45 @@ type DeviceStatus struct {
 	Display      store.DisplayConfig `json:"display"`
 	TestUntil    *time.Time          `json:"test_until,omitempty"`
 	ActiveSource string              `json:"active_source"` // test/override/schedule/global
+	Sync         string              `json:"sync"`          // offline/waiting/syncing/latest，见 syncState
 	ActiveTpl    string              `json:"active_template,omitempty"`
 	AgentVersion string              `json:"agent_version,omitempty"`
 	UpdateTarget *store.UpdateTarget `json:"update_target,omitempty"`
 	HW           *store.Device       `json:"hw,omitempty"`
+}
+
+// deviceSync 记录设备最近一次取清单时的情况。设备每次轮询都带着自己已应用的版本
+// （If-None-Match），所以不用等心跳就能知道它显示的是不是最新内容。
+type deviceSync struct {
+	expected string // 那次轮询时服务端算出的版本
+	applied  string // 设备当时已应用的版本
+	served   string // 最近一次下发（200）给它的版本
+	gen      uint64 // 那次轮询时的配置写入计数
+}
+
+// 设备内容状态。
+const (
+	syncOffline = "offline" // 设备离线
+	syncWaiting = "waiting" // 配置改过了，设备还没来取（≤ 一个轮询周期）
+	syncSyncing = "syncing" // 设备已取到新清单，正在下载/切换
+	syncLatest  = "latest"  // 设备显示的就是最新内容
+)
+
+// syncState 判断设备的内容状态（调用方持有 s.mu）。
+// 按时间自动发生的变化（时段计划切换、测试屏到期）不改配置，在设备下次轮询时体现为"正在刷新"。
+func (s *Server) syncState(deviceID string, online bool) string {
+	if !online {
+		return syncOffline
+	}
+	st, ok := s.sync[deviceID]
+	switch {
+	case !ok || st.gen != s.store.Gen():
+		return syncWaiting
+	case st.applied != st.expected:
+		return syncSyncing
+	default:
+		return syncLatest
+	}
 }
 
 // Server 持有配置与运行期状态。
@@ -150,14 +187,15 @@ type Server struct {
 	mu         sync.Mutex
 	lastSeen   map[string]time.Time
 	lastHB     map[string]Heartbeat
-	authLogged map[string]time.Time // 认证失败日志节流
+	sync       map[string]deviceSync // 设备取内容的进度（后台"当前显示"列）
+	authLogged map[string]time.Time  // 认证失败日志节流
 
 	encMu      sync.Mutex
-	encoder    videoEncoder                 // nil 表示当前没有可用的 ffmpeg：不收视频
-	encoderErr string                       // 不可用的原因（日志与后台提示用）
-	encTried   time.Time                    // 上次探测时间
-	findEnc    func() (videoEncoder, error) // 探测 ffmpeg（测试可替换）
+	encoder    videoEncoder // nil 表示没有可用的 ffmpeg：不收视频
+	encoderErr string       // 不可用的原因（日志与后台提示用）
 	jobs       *jobQueue
+	uploadMu   sync.Mutex
+	uploading  map[string]bool // 正在上传的 设备/文件名，见 claimMediaName
 	stop       context.CancelFunc
 	stopped    chan struct{} // 转码协程退出后关闭
 
@@ -183,6 +221,7 @@ func New(cfg *Config) (*Server, error) {
 		loc:        loc,
 		lastSeen:   make(map[string]time.Time),
 		lastHB:     make(map[string]Heartbeat),
+		sync:       make(map[string]deviceSync),
 		authLogged: make(map[string]time.Time),
 		now:        time.Now,
 	}
@@ -206,14 +245,16 @@ func New(cfg *Config) (*Server, error) {
 	}
 
 	s.jobs = newJobQueue()
-	s.findEnc = func() (videoEncoder, error) {
-		enc, err := transcode.Find(cfg.FFmpegPath)
-		if err != nil {
-			return nil, err // 注意别把 nil 的 *Encoder 包进接口
-		}
-		return enc, nil
+	// ffmpeg 只在启动时检测一次；装好或改了 ffmpeg_path 后重启服务端生效。
+	if enc, err := transcode.Find(cfg.FFmpegPath); err != nil {
+		s.encoderErr = err.Error()
+		log.Printf("warning: ffmpeg 不可用，暂不能上传视频：%v。"+
+			"请 apt install ffmpeg，或在 server.json 的 ffmpeg_path 里写 ffmpeg 的绝对路径"+
+			"（该文件须能被服务的运行用户执行），然后重启服务端", err)
+	} else {
+		s.encoder = enc
+		log.Printf("视频转码已启用：%s", enc.Version())
 	}
-	s.videoEncoder()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.stop, s.stopped = cancel, make(chan struct{})
 	go func() {
@@ -223,37 +264,18 @@ func New(cfg *Config) (*Server, error) {
 	return s, nil
 }
 
-// encoderRetry 是 ffmpeg 不可用时重新探测的最短间隔：运营方装好 ffmpeg 后不用重启服务端。
-const encoderRetry = 30 * time.Second
-
-// videoEncoder 返回可用的转码器，没有则为 nil。不可用时按 encoderRetry 节流重新探测。
+// videoEncoder 返回可用的转码器，没有则为 nil。
 func (s *Server) videoEncoder() videoEncoder {
 	s.encMu.Lock()
 	defer s.encMu.Unlock()
-	if s.encoder != nil || s.findEnc == nil || time.Since(s.encTried) < encoderRetry {
-		return s.encoder
-	}
-	s.encTried = time.Now()
-	enc, err := s.findEnc()
-	if err != nil {
-		if s.encoderErr != err.Error() { // 同一原因只记一次，别刷屏
-			log.Printf("warning: ffmpeg 不可用，暂不能上传视频：%v。"+
-				"请 apt install ffmpeg，或在 server.json 的 ffmpeg_path 里写 ffmpeg 的绝对路径"+
-				"（该文件须能被服务的运行用户执行）", err)
-		}
-		s.encoderErr = err.Error()
-		return nil
-	}
-	s.encoder, s.encoderErr = enc, ""
-	log.Printf("视频转码已启用：%s", enc.Version())
-	return enc
+	return s.encoder
 }
 
-// setEncoder 直接指定转码器（测试用）；nil 表示模拟"没有 ffmpeg"且不再探测。
+// setEncoder 直接指定转码器（测试用）；nil 表示模拟"没有 ffmpeg"。
 func (s *Server) setEncoder(enc videoEncoder) {
 	s.encMu.Lock()
 	defer s.encMu.Unlock()
-	s.encoder, s.findEnc = enc, nil
+	s.encoder, s.encoderErr = enc, ""
 	if enc == nil {
 		s.encoderErr = "测试：未配置转码器"
 	}
@@ -388,20 +410,39 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	gen := s.store.Gen() // 先取：构建期间若又有改动，状态会保持"等待刷新"直到下次轮询
 	m, err := s.buildManifest(dev)
 	if err != nil {
 		log.Printf("manifest build for %s failed: %v", dev.ID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	etag := `"` + m.Version + `"`
-	w.Header().Set("ETag", etag)
+	applied := strings.Trim(strings.TrimSpace(r.Header.Get("If-None-Match")), `"`)
+	s.mu.Lock()
+	prev := s.sync[dev.ID]
+	s.sync[dev.ID] = deviceSync{expected: m.Version, applied: applied, served: prev.served, gen: gen}
+	s.mu.Unlock()
+
+	w.Header().Set("ETag", `"`+m.Version+`"`)
 	w.Header().Set("Cache-Control", "no-cache")
-	if inm := strings.TrimSpace(r.Header.Get("If-None-Match")); inm != "" {
-		if inm == etag || inm == m.Version {
-			w.WriteHeader(http.StatusNotModified)
-			return
+	if applied == m.Version {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if prev.served != m.Version { // 下载失败重试时会重复取同一版本，只记第一次
+		s.mu.Lock()
+		st := s.sync[dev.ID]
+		st.served = m.Version
+		s.sync[dev.ID] = st
+		s.mu.Unlock()
+		what := fmt.Sprintf("%d 个文件", len(m.Items))
+		if m.Layout != nil {
+			what += "（含模板叠加图）"
 		}
+		if len(m.Commands) > 0 {
+			what += fmt.Sprintf("，附 %d 条指令", len(m.Commands))
+		}
+		log.Printf("下发新内容 → 设备 %s：版本 %s，%s", dev.ID, m.Version, what)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(m); err != nil {
@@ -585,6 +626,14 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	seen, known := s.lastSeen[dev.ID]
+	if !known || s.now().Sub(seen) > OnlineWindow {
+		ip := hb.IP
+		if ip == "" {
+			ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+		}
+		log.Printf("设备 %s 上线（%s，程序 %s）", dev.ID, ip, cmp.Or(hb.PlayerVer, "?"))
+	}
 	s.lastSeen[dev.ID] = s.now()
 	s.lastHB[dev.ID] = hb
 	s.mu.Unlock()
@@ -602,8 +651,5 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			log.Printf("heartbeat: persist device %s failed: %v", dev.ID, err)
 		}
 	}
-	log.Printf("heartbeat device=%s version=%s agent=%s uptime=%ds disk_free=%dMB temp=%dC hwdec=%s out=%dx%d playing=%q",
-		dev.ID, hb.Version, hb.PlayerVer, hb.UptimeS, hb.DiskFreeMB, hb.TempC,
-		hb.HWDec, hb.OutputW, hb.OutputH, hb.Playing)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -35,6 +35,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/admin/devices/{id}/media", s.adminRead(s.handleListDeviceMedia))
 	mux.HandleFunc("POST /api/v1/admin/devices/{id}/media", s.adminWrite(s.handleUploadDeviceMedia))
 	mux.HandleFunc("PUT /api/v1/admin/devices/{id}/media", s.adminWrite(s.handleReorderDeviceMedia))
+	mux.HandleFunc("GET /api/v1/admin/devices/{id}/media/{file}/thumb", s.adminRead(s.handleDeviceMediaThumb))
 	mux.HandleFunc("DELETE /api/v1/admin/devices/{id}/media/{file}", s.adminWrite(s.handleDeleteDeviceMedia))
 	mux.HandleFunc("GET /api/v1/admin/templates", s.adminRead(s.handleListTemplates))
 	mux.HandleFunc("POST /api/v1/admin/templates", s.adminWrite(s.handlePutTemplate))
@@ -108,8 +109,28 @@ func (s *Server) adminWrite(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		h(w, r)
+		// 上传接口自己逐个文件记日志，这里不重复
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/media") {
+			h(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h(rec, r)
+		log.Printf("后台操作 %s %s → %d（%s）", r.Method, strings.TrimPrefix(r.URL.Path, "/api/v1/admin"),
+			rec.status, time.Since(start).Round(time.Millisecond))
 	}
+}
+
+// statusRecorder 记下处理器写出的状态码（日志用）。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -146,6 +167,7 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 			st.LastSeen, st.Heartbeat = &seen, &hb
 			st.Online = now.Sub(seen) <= OnlineWindow
 		}
+		st.Sync = s.syncState(d.ID, st.Online)
 		s.mu.Unlock()
 		if until := s.store.TestUntil(d.ID); now.Before(until) {
 			st.TestUntil, st.ActiveSource = &until, "test"
@@ -188,6 +210,7 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	delete(s.lastSeen, dev.ID)
 	delete(s.lastHB, dev.ID)
+	delete(s.sync, dev.ID)
 	s.mu.Unlock()
 	s.jobs.removeDevice(dev.ID)
 	os.RemoveAll(filepath.Join(s.renderedDir(), dev.ID))
