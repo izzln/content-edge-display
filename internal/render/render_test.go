@@ -122,7 +122,7 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 	if !overlay.HasMedia {
 		t.Fatal("模板有媒体区，HasMedia 应为 true")
 	}
-	// 叠加图：媒体区全透明（且是预乘 alpha 的全零，mpv overlay-add 需要）
+	// 叠加图：媒体区全透明（且是预乘 alpha 的全零，显示图层需要）
 	for _, p := range []image.Point{{720, 0}, {1080, 450}, {1439, 899}} {
 		if c := overlay.Image.RGBAAt(p.X, p.Y); c != (color.RGBA{}) {
 			t.Fatalf("叠加图媒体区 (%d,%d) 不透明: %+v", p.X, p.Y, c)

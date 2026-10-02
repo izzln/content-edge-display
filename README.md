@@ -18,11 +18,11 @@
 
 ```
 cmd/display-server/   服务端：设备注册/清单下发/媒体与固件分发/心跳/管理后台
-cmd/display-agent/    设备代理：自注册、轮询下载、校验、驱动 mpv、心跳、程序 OTA
+cmd/display-agent/    设备代理：自注册、轮询下载、校验、驱动 GStreamer 播放、心跳、程序 OTA
 internal/
   server/             HTTP API 与管理后台路由
   agent/              设备端主循环、身份、下载、更新
-  player/             播放器抽象：mpv（JSON IPC）与 null（无显示环境测试用）
+  player/             播放器：GStreamer 播放进程（cedrus 硬解 + KMS 图层直出）与 null（测试用）
   render/             模板与测试卡的服务端渲染
   transcode/          上传素材归一化：视频转码（ffmpeg）、图片缩放
   store/              状态持久化（设备、模板、时段、固件、更新目标）

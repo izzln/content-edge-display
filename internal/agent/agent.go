@@ -376,7 +376,7 @@ func (a *Agent) apply(m *manifest.Manifest) error {
 		})
 	}
 	if l := m.Layout; l != nil {
-		// 叠加图只给路径：真正贴图时要按 mpv 的实际输出分辨率光栅化，那是播放器的事。
+		// 叠加图只给路径：真正贴图时要按显示屏的实际输出分辨率光栅化，那是播放器的事。
 		scene.Overlay = &player.Overlay{PNG: a.localPath(l.Overlay)}
 		scene.Media = player.Rect{X: l.Media.X, Y: l.Media.Y, W: l.Media.W, H: l.Media.H}
 		scene.CanvasW, scene.CanvasH = l.CanvasW, l.CanvasH
@@ -443,6 +443,8 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// 同一份内容留在本地，现场自检脚本（check-display.sh）据此报告解码方式与输出分辨率
+	_ = os.WriteFile(filepath.Join(a.cfg.CacheDir, "status.json"), body, 0o644)
 	req, err := a.newRequest(ctx, http.MethodPost, "/api/v1/device/heartbeat", bytes.NewReader(body))
 	if err != nil {
 		return err

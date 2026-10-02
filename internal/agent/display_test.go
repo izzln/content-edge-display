@@ -3,7 +3,6 @@ package agent
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
@@ -22,40 +21,43 @@ func fakeDRM(t *testing.T, connectors map[string][2]string) {
 	t.Cleanup(func() { drmSysfs = old })
 }
 
-// 面板 EDID 首选 1080p、但也提供 1440x900：要显式让 mpv 用 1440x900（mpv 默认用首选模式）。
-func TestDRMModeArgsForcesAvailableMode(t *testing.T) {
+// 面板 EDID 首选 1080p、但也提供 1440x900：按配置用 1440x900（不指定就会按首选模式输出）。
+func TestOutputModeUsesConfiguredModeWhenAvailable(t *testing.T) {
 	fakeDRM(t, map[string][2]string{
 		"card0-HDMI-A-1": {"connected", "1920x1080\n1440x900\n1280x720\n"},
 	})
-	if got := DRMModeArgs("1440x900@60"); !reflect.DeepEqual(got, []string{"--drm-mode=1440x900@60"}) {
-		t.Fatalf("got %v", got)
+	if w, h := OutputMode("1440x900@60"); w != 1440 || h != 900 {
+		t.Fatalf("got %dx%d", w, h)
+	}
+	if w, h := OutputMode(""); w != 1920 || h != 1080 {
+		t.Fatalf("未配置时应用首选模式，得到 %dx%d", w, h)
 	}
 }
 
-// 屏幕根本没有这个模式时绝不能传：mpv 找不到模式会初始化失败，设备黑屏。
-func TestDRMModeArgsSkipsUnavailableMode(t *testing.T) {
+// 屏幕根本没有这个模式时退回首选模式：去设一个显示屏不认的模式只会黑屏。
+func TestOutputModeFallsBackToPreferred(t *testing.T) {
 	fakeDRM(t, map[string][2]string{
 		"card0-HDMI-A-1": {"connected", "1920x1080\n1280x720\n"},
 		"card0-HDMI-A-2": {"disconnected", "1440x900\n"}, // 没接的口不算
 	})
-	if got := DRMModeArgs("1440x900@60"); got != nil {
-		t.Fatalf("模式不可用时不应强制，得到 %v", got)
+	if w, h := OutputMode("1440x900@60"); w != 1920 || h != 1080 {
+		t.Fatalf("模式不可用时应退回首选模式，得到 %dx%d", w, h)
 	}
 }
 
-func TestDRMModeArgsWithoutSysfs(t *testing.T) {
+func TestOutputModeWithoutSysfs(t *testing.T) {
 	old := drmSysfs
 	drmSysfs = filepath.Join(t.TempDir(), "nope")
 	defer func() { drmSysfs = old }()
-	if got := DRMModeArgs("1440x900"); got != nil {
-		t.Fatalf("读不到 sysfs 时不应强制，得到 %v", got)
+	if w, h := OutputMode("1280x720"); w != 1280 || h != 720 {
+		t.Fatalf("读不到 sysfs 时按配置值，得到 %dx%d", w, h)
 	}
-	if got := DRMModeArgs(""); got != nil {
-		t.Fatalf("未配置时不应强制，得到 %v", got)
+	if w, h := OutputMode(""); w != 1440 || h != 900 {
+		t.Fatalf("未配置时按模板画布尺寸，得到 %dx%d", w, h)
 	}
 }
 
-// 格式不对 mpv 会拒绝启动，配置加载时就要挡住。
+// 格式不对的 display_mode 配置加载时就要挡住，装机时就能发现。
 func TestDisplayModeValidated(t *testing.T) {
 	for mode, ok := range map[string]bool{
 		"1440x900": true, "1440x900@60": true, "1920x1080@59.94": true, "": true,

@@ -56,7 +56,7 @@ type Rendered struct {
 //
 // overlayMode 决定媒体区怎么画：
 //   - true：留全透明，作为叠加图交给设备端贴在视频之上（Go 的 image.RGBA 本身是预乘 alpha，
-//     正是 mpv overlay-add 需要的格式）
+//     正是显示图层要的格式）
 //   - false：填上自己的底色，得到一张整屏静态图——用于模板没有媒体区、或媒体区还没有内容的情形
 func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, overlayMode bool) (*Rendered, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))

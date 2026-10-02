@@ -111,7 +111,7 @@ func TestValidateTemplate(t *testing.T) {
 		func(x *Template) { x.Regions[0].Align = "top" },
 		func(x *Template) { x.Regions[0].Color = "#12345" },
 		func(x *Template) { x.ImageDurationS = 99999 }, // 停留时长上限
-		func(x *Template) { // 一个模板至多一个媒体区（mpv 只能把视频放进一个矩形）
+		func(x *Template) { // 一个模板至多一个媒体区（只有一个视频图层）
 			x.Regions[0].Type, x.Regions[0].Key = RegionMedia, ""
 		},
 	}

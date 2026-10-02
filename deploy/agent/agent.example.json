@@ -3,8 +3,6 @@
   "enroll_token": "与服务端 server.json 的 enroll_token 一致",
   "cache_dir": "/var/lib/display-agent",
   "install_dir": "/usr/local/lib/display-agent",
-  "player": "mpv",
-  "display_mode": "1440x900@60",
-  "mpv_socket": "/run/display-agent/mpv.sock",
-  "mpv_extra_args": []
+  "player": "gst",
+  "display_mode": "1440x900@60"
 }

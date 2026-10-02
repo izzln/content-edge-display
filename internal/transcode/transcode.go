@@ -1,10 +1,11 @@
 // Package transcode 把运营方上传的素材归一化成设备能稳定播放的形态。
 //
-// 为什么非转码不可：设备上的 mpv 是**软解**的——H3 的硬件解码器（cedrus）需要 V4L2 Request API，
-// Armbian/Debian 自带的 FFmpeg/mpv 不支持（补丁至今未进 FFmpeg 上游），所以视频全靠 4 个 A7 核心解。
-// 原片动辄 1080p、10~20Mbps，软解不动，硬撑就发热，到 85°C 开始降频、再高直接关机。
-// 所以上传时统一压成软解吃得消的 H.264：1440×900 以内、30fps 以内、码率 4Mbps 以内，
-// 并用 x264 的 fastdecode 调优；顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
+// 为什么非转码不可：设备用 H3 的硬件解码器（cedrus，经 GStreamer 的 v4l2slh264dec）放视频，
+// 它只认 H.264/H.265 的常规档次、1080p 以内；原片的编码、分辨率、码率千奇百怪，
+// 而且持续高码率（10~20Mbps）即使硬解也会让芯片发热，到 85°C 开始降频、再高直接关机。
+// 所以上传时统一压成 H.264：1440×900 以内、30fps 以内、码率 4Mbps 以内；
+// 用 x264 的 fastdecode 调优，万一硬解失效退化成软解（后台会标红），也还放得动。
+// 顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
 //
 // 图片同理但不用 ffmpeg：纯 Go 缩到画布尺寸即可，省得设备上解一张几千万像素的图。
 package transcode
@@ -157,8 +158,8 @@ func (e *Encoder) videoArgs(src, dst string, spec Spec) []string {
 		"-c:v", "libx264",
 		"-profile:v", "high", "-level", "4.0",
 		"-preset", "veryfast",
-		// fastdecode：关掉 CABAC、环路滤波和加权预测，解码 CPU 省三四成；代价是同画质下文件大 10~20%。
-		// 设备是软解，这笔账划算——解码越轻越不容易发热、掉帧。
+		// fastdecode：关掉 CABAC、环路滤波和加权预测，软解 CPU 省三四成；代价是同画质下文件大 10~20%。
+		// 设备正常走硬解用不着它；留着是给硬解失效时兜底——退化成软解也不至于放不动。
 		"-tune", "fastdecode",
 		"-pix_fmt", "yuv420p",
 		"-b:v", strconv.Itoa(spec.BitrateK) + "k",

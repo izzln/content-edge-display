@@ -21,7 +21,7 @@ INSTALL_DIR=/usr/local/lib/display-agent
 HERE=$(cd "$(dirname "$0")" && pwd)
 # 显示屏模式。面板 EDID 报的往往是 1920x1080——必须在两处显式指定：
 #   - 内核 video= 参数（armbianEnv.txt）：管控制台，也让该模式出现在连接器的可用模式里；
-#   - agent.json 的 display_mode → mpv --drm-mode：mpv 默认用 EDID 首选模式，不看内核参数。
+#   - agent.json 的 display_mode：播放进程据此设置显示模式，不指定就用 EDID 首选模式。
 # 只设前者的结果就是"armbianEnv.txt 改了，播放时还是 1080p"。
 HDMI_MODE="${HDMI_MODE:-1440x900@60}"
 # 有些 HDMI 驱动板的 EDID 里根本没有 1440x900 这个模式，内核会忽略 video= 退回 EDID 首选模式。
@@ -59,17 +59,21 @@ cat > /etc/display-agent/agent.json <<EOF
   "enroll_token": "$ENROLL_TOKEN",
   "cache_dir": "/var/lib/display-agent",
   "install_dir": "$INSTALL_DIR",
-  "player": "mpv",
-  "display_mode": "$HDMI_MODE",
-  "mpv_socket": "/run/display-agent/mpv.sock",
-  "mpv_extra_args": []
+  "player": "gst",
+  "display_mode": "$HDMI_MODE"
 }
 EOF
 chmod 0600 /etc/display-agent/agent.json
 echo "== 已写入 /etc/display-agent/agent.json（每次安装都会覆盖）"
 
-echo "== 安装 mpv 与 systemd 单元"
-command -v mpv >/dev/null 2>&1 || { apt-get update && apt-get install -y mpv; }
+echo "== 安装 GStreamer 与 systemd 单元"
+# 播放进程是 Python + GStreamer（随代理分发）。硬解靠 plugins-bad 里的 v4l2codecs（驱动 cedrus），
+# 出画面靠 plugins-bad 的 kmssink；plugins-good 提供 MP4 解封装、JPEG/PNG 解码与裁剪；
+# libav 是软解兜底（硬解不可用时至少还能放，后台会标红提示）。
+apt-get update
+apt-get install -y --no-install-recommends python3 python3-gi python3-gst-1.0 gir1.2-gst-plugins-base-1.0 \
+	gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+	gstreamer1.0-tools libdrm2
 install -m 0644 "$HERE/display-agent.service" /etc/systemd/system/display-agent.service
 systemctl daemon-reload
 # 刻意不 enable：装完先人工确认一次（分辨率、硬解、画面），确认无误再
@@ -97,6 +101,6 @@ echo
 echo "== 完成。接下来："
 echo "   1) reboot                                   # 让 HDMI 模式生效"
 echo "   2) systemctl start display-agent            # 先手工起一次看效果"
-echo "   3) /usr/local/lib/display-agent/check-display.sh   # 确认分辨率与硬解"
+echo "   3) /usr/local/lib/display-agent/check-display.sh   # 确认分辨率、硬解与温度"
 echo "   4) systemctl enable display-agent           # 确认无误后再设为开机自启"
 echo "   日志: journalctl -u display-agent -f"
