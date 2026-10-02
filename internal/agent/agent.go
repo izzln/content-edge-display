@@ -31,7 +31,8 @@ const maxPollBackoff = 5 * time.Minute
 type Agent struct {
 	cfg       *Config
 	player    player.Player
-	http      *http.Client
+	api       *http.Client // 清单/心跳/注册：短超时
+	dl        *http.Client // 文件下载：不设总超时，靠停滞检测（见 download.go）
 	identity  Identity
 	hw        HardwareInfo
 	version   string // 当前已应用的 manifest 版本
@@ -46,13 +47,12 @@ type Agent struct {
 // New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
 	clock := newServerClock()
+	tr := newTransport(cfg.CacheDir, clock)
 	return &Agent{
-		cfg:    cfg,
-		player: p,
-		http: &http.Client{
-			Timeout:   10 * time.Minute, // 覆盖大文件下载
-			Transport: clockTransport{base: http.DefaultTransport, clock: clock},
-		},
+		cfg:            cfg,
+		player:         p,
+		api:            &http.Client{Timeout: apiTimeout, Transport: tr},
+		dl:             &http.Client{Transport: tr},
 		startedAt:      time.Now(),
 		updateFailedAt: map[string]time.Time{},
 		clock:          clock,
@@ -100,8 +100,10 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	pollTimer := time.NewTimer(0)
 	hbTimer := time.NewTimer(0)
+	wdTicker := time.NewTicker(watchdogInterval) // 不依赖轮询/心跳间隔的配置值
 	defer pollTimer.Stop()
 	defer hbTimer.Stop()
+	defer wdTicker.Stop()
 
 	for {
 		select {
@@ -129,6 +131,8 @@ func (a *Agent) Run(ctx context.Context) error {
 				}
 			}
 			pollTimer.Reset(a.pollDelay())
+		case <-wdTicker.C:
+			sdNotify("WATCHDOG=1")
 		case <-hbTimer.C:
 			sdNotify("WATCHDOG=1")
 			if err := a.Heartbeat(ctx); err != nil {
@@ -165,10 +169,8 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 		}
 		log.Printf("agent: register failed: %v (retry in %s)", err, delay)
 		sdNotify("WATCHDOG=1")
-		select {
-		case <-ctx.Done():
+		if !sleepFeeding(ctx, delay) {
 			return nil
-		case <-time.After(delay):
 		}
 		if delay < maxPollBackoff {
 			delay *= 2
@@ -215,7 +217,7 @@ func (a *Agent) Register(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.http.Do(req)
+	resp, err := a.api.Do(req)
 	if err != nil {
 		return err
 	}
@@ -275,7 +277,7 @@ func (a *Agent) PollOnce(ctx context.Context) (bool, error) {
 	if a.version != "" {
 		req.Header.Set("If-None-Match", `"`+a.version+`"`)
 	}
-	resp, err := a.http.Do(req)
+	resp, err := a.api.Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -440,7 +442,7 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.http.Do(req)
+	resp, err := a.api.Do(req)
 	if err != nil {
 		return err
 	}

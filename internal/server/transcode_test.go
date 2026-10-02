@@ -292,3 +292,18 @@ func TestEncoderRedetectionAndReason(t *testing.T) {
 		t.Fatalf("启用后应能上传视频：%+v", res)
 	}
 }
+
+// 后台要拿服务器时间与浏览器比对：离线环境下服务器没有 NTP，时钟漂移会让时段计划按错误时间切换。
+func TestInfoReportsServerTime(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	fixed := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
+	s.now = func() time.Time { return fixed }
+	var info struct {
+		ServerTime int64  `json:"server_time"`
+		Timezone   string `json:"timezone"`
+	}
+	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
+	if info.ServerTime != fixed.UnixMilli() || info.Timezone == "" {
+		t.Fatalf("应返回服务器时间与时区：%+v", info)
+	}
+}

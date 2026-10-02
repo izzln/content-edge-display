@@ -55,7 +55,11 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	spec := transcode.DefaultSpec()
 	info := map[string]any{
-		"transcode": false,
+		// 服务器时间：时段计划、测试屏到期、定时下发都按它算。后台拿它和浏览器时间比，
+		// 差得多就提示——离线环境下服务器没有 NTP，时钟漂移不会有人察觉。
+		"server_time": s.now().UnixMilli(),
+		"timezone":    s.loc.String(),
+		"transcode":   false,
 		"video_spec": map[string]int{
 			"max_w": spec.MaxW, "max_h": spec.MaxH, "max_fps": spec.MaxFPS,
 			"bitrate_k": spec.BitrateK, "max_bitrate_k": spec.MaxBitrateK,

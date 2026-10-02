@@ -19,8 +19,12 @@ mpv_get() {
 	req="{\"command\":[\"get_property\",\"$1\"]}"
 	if command -v socat >/dev/null 2>&1; then
 		printf '%s\n' "$req" | socat -t1 - "UNIX-CONNECT:$SOCK" 2>/dev/null
-	else
+	elif command -v nc >/dev/null 2>&1; then
 		printf '%s\n' "$req" | timeout 2 nc -U "$SOCK" 2>/dev/null
+	elif command -v python3 >/dev/null 2>&1; then
+		python3 -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect(sys.argv[1]); s.sendall(sys.argv[2].encode()+b"\n")
+print(s.makefile().readline())' "$SOCK" "$req" 2>/dev/null
 	fi
 }
 # 从 JSON 里抠一个字段（不引 jq）
@@ -48,6 +52,10 @@ fi
 
 echo
 echo "=== 2. mpv 实际输出分辨率与解码方式 ==="
+if ! command -v socat >/dev/null 2>&1 && ! command -v nc >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+	echo "               （需要 socat、nc 或 python3 之一才能查询 mpv；都没有时这一项跳过，"
+	echo "                 也可以在管理后台设备列表里看硬解与输出分辨率——设备随心跳上报）"
+fi
 if [ ! -S "$SOCK" ]; then
 	fail "mpv" "$SOCK 不存在（display-agent 没在跑？systemctl status display-agent）"
 else
