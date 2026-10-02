@@ -132,6 +132,8 @@ func (p *MPV) supervise(ctx context.Context) {
 			"--osd-level=0",
 			"--no-terminal",
 			"--loop-playlist=inf",
+			// 有可用的硬解就用；Armbian 自带的 mpv 驱动不了 H3 的 cedrus（需要 v4l2request 补丁），
+			// 实际会软解。换装打过补丁的 mpv 时，在 mpv_extra_args 里加 --hwdec=v4l2request-copy 覆盖。
 			"--hwdec=auto-safe",
 			// 内容一律撑满播放区（超出部分裁掉），且一律静音。
 			"--panscan=1",

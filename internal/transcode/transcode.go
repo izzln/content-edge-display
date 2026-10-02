@@ -1,9 +1,10 @@
 // Package transcode 把运营方上传的素材归一化成设备能稳定播放的形态。
 //
-// 为什么非转码不可：H3 的硬解能力有限，更要命的是**码率**——一段 20Mbps 的 1080p
-// 原片即使能硬解，持续高码率也会让芯片发热，到 85°C 开始降频、再高直接关机。
-// 所以上传时统一压到 1440×900 以内、4Mbps 以内、30fps 以内的 H.264，
-// 顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
+// 为什么非转码不可：设备上的 mpv 是**软解**的——H3 的硬件解码器（cedrus）需要 V4L2 Request API，
+// Armbian/Debian 自带的 FFmpeg/mpv 不支持（补丁至今未进 FFmpeg 上游），所以视频全靠 4 个 A7 核心解。
+// 原片动辄 1080p、10~20Mbps，软解不动，硬撑就发热，到 85°C 开始降频、再高直接关机。
+// 所以上传时统一压成软解吃得消的 H.264：1440×900 以内、30fps 以内、码率 4Mbps 以内，
+// 并用 x264 的 fastdecode 调优；顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
 //
 // 图片同理但不用 ffmpeg：纯 Go 缩到画布尺寸即可，省得设备上解一张几千万像素的图。
 package transcode
@@ -119,34 +120,7 @@ func (e *Encoder) Video(ctx context.Context, src, dst string, spec Spec, onProgr
 	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp.mp4")
 	defer os.Remove(tmp)
 
-	// scale 用 min(,) 包住：只缩不放，原本就小的素材不要被拉大（拉大只会更糊更费码率）。
-	// force_divisible_by=2 保证宽高是偶数，yuv420p 必需。
-	vf := fmt.Sprintf("scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-		spec.MaxW, spec.MaxH)
-
-	args := []string{
-		"-hide_banner", "-nostdin", "-y",
-		"-i", src,
-		"-vf", vf,
-		"-c:v", "libx264",
-		"-profile:v", "high", "-level", "4.0", // H3 硬解吃得下的档次
-		"-preset", "veryfast",
-		"-pix_fmt", "yuv420p",
-		"-b:v", strconv.Itoa(spec.BitrateK) + "k",
-		"-maxrate", strconv.Itoa(spec.MaxBitrateK) + "k",
-		"-bufsize", strconv.Itoa(spec.MaxBitrateK*2) + "k",
-		"-g", "60", // 2 秒一个关键帧，循环播放时跳转快
-		"-an",                     // 屏幕一律静音，音轨纯属浪费码率
-		"-movflags", "+faststart", // moov 放文件头
-		"-map_metadata", "-1", // 不带入原始元数据（可能含拍摄地点等）
-		"-progress", "pipe:1", "-nostats", "-loglevel", "error",
-	}
-	if e.fpsMax {
-		args = append(args, "-fpsmax", strconv.Itoa(spec.MaxFPS))
-	}
-	args = append(args, tmp)
-
-	cmd := exec.CommandContext(ctx, e.bin, args...)
+	cmd := exec.CommandContext(ctx, e.bin, e.videoArgs(src, tmp, spec)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -168,6 +142,38 @@ func (e *Encoder) Video(ctx context.Context, src, dst string, spec Spec, onProgr
 		return fmt.Errorf("ffmpeg failed: %s", msg)
 	}
 	return os.Rename(tmp, dst)
+}
+
+// videoArgs 返回把 src 转成 dst 的 ffmpeg 参数。
+func (e *Encoder) videoArgs(src, dst string, spec Spec) []string {
+	// scale 用 min(,) 包住：只缩不放，原本就小的素材不要被拉大（拉大只会更糊更费码率）。
+	// force_divisible_by=2 保证宽高是偶数，yuv420p 必需。
+	vf := fmt.Sprintf("scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+		spec.MaxW, spec.MaxH)
+	args := []string{
+		"-hide_banner", "-nostdin", "-y",
+		"-i", src,
+		"-vf", vf,
+		"-c:v", "libx264",
+		"-profile:v", "high", "-level", "4.0",
+		"-preset", "veryfast",
+		// fastdecode：关掉 CABAC、环路滤波和加权预测，解码 CPU 省三四成；代价是同画质下文件大 10~20%。
+		// 设备是软解，这笔账划算——解码越轻越不容易发热、掉帧。
+		"-tune", "fastdecode",
+		"-pix_fmt", "yuv420p",
+		"-b:v", strconv.Itoa(spec.BitrateK) + "k",
+		"-maxrate", strconv.Itoa(spec.MaxBitrateK) + "k",
+		"-bufsize", strconv.Itoa(spec.MaxBitrateK*2) + "k",
+		"-g", "60", // 2 秒一个关键帧，循环播放时跳转快
+		"-an",                     // 屏幕一律静音，音轨纯属浪费码率
+		"-movflags", "+faststart", // moov 放文件头
+		"-map_metadata", "-1", // 不带入原始元数据（可能含拍摄地点等）
+		"-progress", "pipe:1", "-nostats", "-loglevel", "error",
+	}
+	if e.fpsMax {
+		args = append(args, "-fpsmax", strconv.Itoa(spec.MaxFPS))
+	}
+	return append(args, dst)
 }
 
 // Duration 返回素材时长（秒），用于把转码进度换算成百分比；拿不到返回 0。

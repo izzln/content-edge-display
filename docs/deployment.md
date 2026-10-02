@@ -199,7 +199,7 @@ systemctl enable display-agent        # 确认无误后再设为开机自启
 mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/etc/display-agent/agent.json`
 的 `mpv_extra_args` 中加 `["--vo=gpu", "--gpu-context=drm"]`。
 
-### 3.4 确认分辨率、硬件解码与温度
+### 3.4 确认分辨率、解码方式与温度
 
 ```sh
 /usr/local/lib/display-agent/check-display.sh
@@ -211,20 +211,27 @@ mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/
 |---|---|---|
 | 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 首行 | 控制台分辨率不对 |
 | mpv 输出分辨率 | mpv 属性 `osd-dimensions` | 内容画面与模板对不上（已自动缩放，但会形变） |
-| 硬件解码 | mpv 属性 `hwdec-current`：`no` 即软解 | 卡顿、发热，严重时过热关机 |
+| 解码方式 | mpv 属性 `hwdec-current`：`no` 即软解（自带 mpv 的常态，见下） | — |
 | SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
 
-后三项也随心跳上报，**管理后台设备列表里直接能看到**：软解与 80°C 以上标红，
-输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台在软解或过热。
+后三项也随心跳上报，**管理后台设备列表里直接能看到**：80°C 以上标红，
+输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台过热。
 
-要手工确认 mpv 的解码方式，也可以在设备上直接播一段：
+#### 关于硬件解码：现状是软解，这是预期的
 
-```sh
-systemctl stop display-agent
-mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -iE "hwdec|Using hardware"
-# 期望看到类似 "Using hardware decoding (v4l2m2m-copy)" 或 drm 相关字样；
-# 只有 "Using software decoding" 则说明硬解没起来：确认 ls /dev/video* 里有 cedrus 设备、视频是 H.264
-```
+H3 的硬件解码器（主线内核驱动 cedrus）本身支持 H.264 和 H.265，但它是"无状态"解码器，
+播放器必须通过 V4L2 Request API 驱动它。**FFmpeg 上游至今没有合入这部分支持**（补丁只在
+LibreELEC 等社区版本里），Armbian/Debian 自带的 mpv 依赖官方 FFmpeg，所以 `--hwdec=auto-safe`
+找不到可用的硬解方式，退回软解，视频照常播放。FFmpeg 自带的 `v4l2m2m` 只适用于"有状态"
+解码器（如树莓派），对 cedrus 无效。
+
+因此服务端转码按**软解吃得消**的规格出片：1440×900 以内、≤ 30fps、码率约 2.5Mbps、
+x264 `fastdecode` 调优（解码 CPU 省三四成）。实际要盯的是温度，不是解码方式。
+
+想尝试硬解，需要在设备上换装打过 v4l2request 补丁的 FFmpeg 与 mpv（Armbian 社区有对应的软件源，
+据反馈 Debian 12 上 mpv 可用、Debian 13 上 mpv 不可用），然后在 `agent.json` 的 `mpv_extra_args`
+里加 `"--hwdec=v4l2request-copy"`。务必先在一台样机上验证画面与温度，再批量推广。
+`check-display.sh` 会报告 cedrus 是否加载、FFmpeg 是否支持 v4l2request。
 
 ## 4. 设备端：母镜像批量部署
 
@@ -341,7 +348,7 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 
 | 列 | 内容 | 多久更新 |
 |---|---|---|
-| 设备 | 编号、主机名/IP、程序版本，以及**硬解方式 · SoC 温度 · 实际输出分辨率**（软解与 ≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
+| 设备 | 编号、主机名/IP、程序版本，以及**解码方式 · SoC 温度 · 实际输出分辨率**（≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
 | 当前显示 | **等待刷新**（后台改了内容，设备还没来取）→ **正在刷新**（设备在下载新内容）→ **已显示最新内容**；离线设备显示"离线"。下面一行是内容来源与模板名；等待/正在刷新时再显示"设备 N 秒前联系过"，超过 2 个轮询周期没来就标黄"设备 N 秒未响应" | 设备每次轮询（`poll_interval_s`，默认 10 秒） |
 
 页面本身每 10 秒自动刷新一次（打开对话框时暂停），所以看到的状态最多再晚 10 秒；"N 秒前联系过"每秒走字。
@@ -354,7 +361,7 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 | | 处理 | 为什么 |
 |---|---|---|
 | 图片 | png/jpg ≤ 20MB；超过 1440×900 的**自动等比缩小** | 设备只有 1GB 内存，解码后的位图是 宽×高×4 字节；在服务端缩一次，所有设备都省 |
-| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 原片码率动辄 10~20Mbps，即使能硬解，持续高码率也会让 H3 发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
+| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0，x264 `fastdecode`）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 设备是软解（见 3.4），原片动辄 1080p、10~20Mbps，软解不动、硬撑就发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
 
 转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后按你在列表里排好的位置加入播放
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
@@ -482,7 +489,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 | 检查项 | 方法 |
 |---|---|
-| 分辨率 / 硬解 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示"硬解 xxx"、1440×900、温度正常 |
+| 分辨率 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示 1440×900、温度正常（播放视频时也低于 80°C） |
 | 开机自启 | `systemctl is-enabled display-agent` 为 enabled（安装脚本不会自动 enable） |
 | 网络连通 | `curl -sI http://<服务器>:9000` 有响应 |
 | 代理运行 | `systemctl status display-agent` active (running) |

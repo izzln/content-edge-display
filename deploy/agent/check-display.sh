@@ -1,5 +1,5 @@
 #!/bin/sh
-# 现场自检：确认显示输出模式、硬件解码、SoC 温度是否正常。
+# 现场自检：确认显示输出模式、解码方式、SoC 温度是否正常。
 # 装机后、以及怀疑"画面错位 / 卡顿 / 自动关机"时在设备上运行。
 #
 #   /usr/local/lib/display-agent/check-display.sh
@@ -54,7 +54,7 @@ echo
 echo "=== 2. mpv 实际输出分辨率与解码方式 ==="
 if ! command -v socat >/dev/null 2>&1 && ! command -v nc >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
 	echo "               （需要 socat、nc 或 python3 之一才能查询 mpv；都没有时这一项跳过，"
-	echo "                 也可以在管理后台设备列表里看硬解与输出分辨率——设备随心跳上报）"
+	echo "                 也可以在管理后台设备列表里看解码方式与输出分辨率——设备随心跳上报）"
 fi
 if [ ! -S "$SOCK" ]; then
 	fail "mpv" "$SOCK 不存在（display-agent 没在跑？systemctl status display-agent）"
@@ -73,16 +73,30 @@ else
 	fi
 	case "${HW:-}" in
 	""|"null")
-		say "硬件解码" "问不到（当前可能没在放视频）" ;;
+		say "解码方式" "问不到（当前可能没在放视频）" ;;
 	"no")
-		fail "硬件解码" "no —— 正在软解"
-		echo "               H3 软解 1440x900 带不动：会卡顿、发热，严重时过热关机。"
-		echo "               检查：ls -l /dev/video* （应有 cedrus 的 v4l2 m2m 设备）"
-		echo "                     mpv --hwdec=auto-safe --vo=gpu -v <文件> 2>&1 | grep -i hwdec"
-		echo "               另外确认视频是 H.264：H.265 在 H3 上没有硬解。" ;;
+		# Armbian/Debian 自带的 mpv/FFmpeg 驱动不了 H3 的硬件解码器（见下），软解是常态，不算故障。
+		# 服务端转码已按软解可承受的规格出片；真正要盯的是第 3 项的温度。
+		say "解码方式" "软解（Armbian 自带 mpv 的正常情况）" ;;
 	*)
-		say "硬件解码" "$HW ✓ （视频编码 ${VID:-?}）" ;;
+		say "解码方式" "硬解 $HW ✓ （视频编码 ${VID:-?}）" ;;
 	esac
+fi
+
+# 硬件解码器（cedrus）是"无状态"解码器，播放器要通过 V4L2 Request API 驱动它；
+# FFmpeg 上游至今没有合入这部分支持，所以自带的 mpv 一律软解。这里只报告现状，供排查参考。
+if ls /dev/video* >/dev/null 2>&1 && grep -qs cedrus /sys/class/video4linux/*/name; then
+	say "硬件解码器" "cedrus 已加载"
+else
+	say "硬件解码器" "未发现 cedrus（内核没带该驱动）"
+fi
+if command -v ffmpeg >/dev/null 2>&1; then
+	# 只认 v4l2request：官方版本的 -hwaccels 也会列出 drm（那只是设备类型，驱动不了 cedrus）
+	if ffmpeg -hide_banner -hwaccels 2>/dev/null | grep -q v4l2request; then
+		say "FFmpeg" "支持 v4l2request（可尝试 mpv --hwdec=v4l2request-copy）"
+	else
+		say "FFmpeg" "官方版本，不支持 v4l2request（无法驱动 cedrus，只能软解）"
+	fi
 fi
 
 echo
@@ -93,13 +107,11 @@ if [ -n "${T:-}" ]; then
 	if [ "$T" -ge 80 ]; then
 		fail "温度" "${T}°C —— 偏高"
 		echo "               H3 到 85°C 开始降频、更高会关机。确认：散热片装了没、"
-		echo "               视频码率是不是过高（服务端上传时会转码压到 4Mbps 以内）、"
-		echo "               以及第 2 项是不是在软解。"
+		echo "               通风是否良好；视频是否都经服务端转码（上传时统一压成软解吃得消的规格）。"
 	else
 		say "温度" "${T}°C ✓"
 	fi
 fi
-command -v vcgencmd >/dev/null 2>&1 || true
 FREQ=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)
 [ -n "${FREQ:-}" ] && say "CPU 频率" "$((FREQ / 1000)) MHz"
 

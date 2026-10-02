@@ -186,10 +186,10 @@ async function refresh() {
 
 // ================= 设备 =================
 // healthLine 把设备心跳翻译成一眼能看懂的提示：解码方式、温度、输出分辨率、运行时长、剩余空间。
-// 对应的现场问题分别是：卡顿发热、过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
+// 要盯的现场问题：过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
 function healthLine(hb) {
   const parts = [];
-  if (hb.hwdec === "no") parts.push('<span class="bad" title="H3 软解带不动 1440×900，会卡顿、发热甚至过热关机">软解</span>');
+  if (hb.hwdec === "no") parts.push('<span title="Armbian 自带的 mpv 驱动不了 H3 的硬件解码器，软解是常态；服务端已按软解可承受的规格转码，留意温度即可">软解</span>');
   else if (hb.hwdec) parts.push(`<span class="okc" title="mpv 实际使用的硬解方式">硬解 ${esc(hb.hwdec)}</span>`);
   if (hb.temp_c) parts.push(hb.temp_c >= 80
     ? `<span class="bad" title="H3 到 85°C 开始降频，再高会关机">${hb.temp_c}°C</span>`

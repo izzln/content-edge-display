@@ -95,8 +95,12 @@ func TestVideoNormalizesHotSource(t *testing.T) {
 	if fi, _ := os.Stat(dst); fi.Size() > 1500*1024 {
 		t.Fatalf("码率没压住：2 秒产物 %d 字节", fi.Size())
 	}
-	// faststart：moov 应在 mdat 之前，设备边下边播、断点续传后都能立即打开
 	data, _ := os.ReadFile(dst)
+	// fastdecode：设备是软解，要关掉 CABAC 与环路滤波（x264 把编码参数写在码流的 SEI 里）
+	if !bytes.Contains(data, []byte("cabac=0")) || !bytes.Contains(data, []byte("deblock=0")) {
+		t.Fatal("产物应按 fastdecode 编码（cabac=0、deblock=0）")
+	}
+	// faststart：moov 应在 mdat 之前，设备边下边播、断点续传后都能立即打开
 	if m, d := bytes.Index(data, []byte("moov")), bytes.Index(data, []byte("mdat")); m < 0 || d < 0 || m > d {
 		t.Fatal("产物没有做 faststart（moov 应在 mdat 之前）")
 	}

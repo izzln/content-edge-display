@@ -40,8 +40,8 @@ type Heartbeat struct {
 	UptimeS      int64  `json:"uptime"`       // 系统运行时长：突然变小说明重启过（如过热关机）
 	DiskFreeMB   int64  `json:"disk_free_mb"` // 缓存目录所在分区的剩余空间
 	TempC        int    `json:"temp_c,omitempty"`
-	// HWDec 是 mpv 实际使用的硬解方式；"no" = 软解（H3 上带不动 1440×900，
-	// 会卡顿发热甚至过热关机），空串 = 问不到（如 null 播放器）。
+	// HWDec 是 mpv 实际使用的硬解方式；"no" = 软解（自带 mpv 驱动不了 H3 的硬件解码器，
+	// 这是常态），空串 = 问不到（如 null 播放器）。
 	HWDec string `json:"hwdec,omitempty"`
 	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
 	OutputW int `json:"output_w,omitempty"`

@@ -47,8 +47,8 @@ type Player interface {
 
 // Stats 是播放器的运行状态，用于后台观察现场是否正常。
 type Stats struct {
-	// HWDec 是 mpv 实际使用的硬解方式；"no" 表示退化成了软解。
-	// H3 软解 1440×900 带不动，会卡顿、发热甚至过热关机，所以这一项要能在后台看到。
+	// HWDec 是 mpv 实际使用的硬解方式；"no" 表示软解（Armbian 自带的 mpv 驱动不了 H3 的
+	// 硬件解码器，软解是常态；换装打过 v4l2request 补丁的 mpv 后，这里能看出硬解是否生效）。
 	HWDec string
 	// OutputW/H 是显示屏实际输出分辨率。与模板画布不一致时叠加图会被缩放，
 	// 对不上通常说明内核没吃下 video= 参数或换了块屏。
