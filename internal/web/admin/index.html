@@ -43,14 +43,38 @@
   .badge { display:inline-block; background:#eef; border-radius:4px; padding:1px 6px; font-size:12px; margin:1px 2px; }
   .badge.global { background:#dfd; }
   .days label { margin-right:6px; font-size:12px; white-space:nowrap; }
-  .pl-item { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:4px; padding:5px 8px; margin-bottom:4px; background:#fafafa; }
-  .pl-item.over { border-color:var(--accent); background:#eef5ff; }
-  .pl-item .grip { cursor:grab; color:var(--muted); }
-  .pl-item .sp { flex:1; }
   button[disabled] { opacity:.45; cursor:not-allowed; }
-  .pl-item.pending { background:#fff; border-style:dashed; }
-  .pl-item.failed { border-color:var(--bad); }
-  .pl-item progress { width:120px; }
+  .pl-drop { display:block; border:2px dashed var(--line); border-radius:8px; padding:14px; text-align:center; cursor:pointer; background:#fcfcfd; transition:border-color .15s, background .15s; }
+  .pl-drop:hover, .pl-drop.hover { border-color:var(--accent); background:#eef5ff; }
+  .pl-drop .muted { margin-top:4px; }
+  .pl-head { display:flex; align-items:center; gap:8px; margin:10px 0 4px; font-size:12px; color:#555; }
+  .pl-head .sp { flex:1; }
+  .pl-list { list-style:none; margin:0; padding:0; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  .pl-item { display:flex; align-items:center; gap:10px; border:1px solid var(--line); border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff; position:relative; }
+  .pl-list.sorting .pl-item { transition:transform .18s ease; }
+  .pl-item.dragging { transition:none !important; z-index:5; scale:1.02; box-shadow:0 10px 28px rgba(0,0,0,.2); border-color:var(--accent); }
+  .pl-item.dropping { transition:transform .18s ease !important; z-index:5; }
+  .pl-item .grip { touch-action:none; cursor:grab; padding:10px 6px; margin:-6px 0 -6px -4px; color:#999; font-size:18px; line-height:1; border-radius:4px; }
+  .pl-item .grip:focus-visible { outline:2px solid var(--accent); }
+  body.pl-dragging, body.pl-dragging * { cursor:grabbing !important; }
+  .pl-item .thumb { flex:none; width:64px; height:40px; border-radius:4px; background:#eef0f3; overflow:hidden; display:flex; align-items:center; justify-content:center; color:#888; }
+  .pl-item .thumb img { width:100%; height:100%; object-fit:cover; pointer-events:none; -webkit-user-drag:none; }
+  .pl-item .thumb .vid { font-size:16px; }
+  .pl-item .info { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .pl-item .nm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pl-item .meta { font-size:12px; color:var(--muted); }
+  .pl-item .pbar { height:4px; background:#e6e9ef; border-radius:2px; overflow:hidden; margin-top:4px; }
+  .pl-item .pbar > i { display:block; height:100%; background:var(--accent); transition:width .2s; }
+  .pl-item .pbar.indeterminate > i { width:35%; animation:pl-slide 1.1s linear infinite; }
+  @keyframes pl-slide { from { transform:translateX(-100%); } to { transform:translateX(290%); } }
+  .pl-item.st-waiting { opacity:.7; }
+  .pl-item.st-rejected, .pl-item.st-failed { border-color:#f0b4b4; background:#fff8f8; }
+  .pl-empty { padding:12px 0; }
+  .sync { display:inline-block; white-space:nowrap; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+  .sync.latest { background:#e3f6e3; color:#1a7a1a; }
+  .sync.waiting { background:#fff2dc; color:#a35a00; }
+  .sync.syncing { background:#e3eeff; color:var(--accent); }
+  .sync.offline { background:#eee; color:#777; }
   .bad { color:var(--bad); font-weight:600; }
   .bad-note { margin-top:8px; padding:8px 10px; border:1px solid var(--bad); border-radius:4px; background:#fff4f4; color:#a00; }
 </style>
@@ -123,8 +147,13 @@ async function api(path, opts = {}) {
 }
 const J = body => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 3500); }
-function modal(html) { $("#modal").innerHTML = html; $("#overlay").classList.add("show"); }
-function closeModal() { $("#overlay").classList.remove("show"); }
+let modalGuard = null; // 关闭前的检查（如还有文件在上传），返回 false 则不关
+function modal(html) { modalGuard = null; $("#modal").innerHTML = html; $("#overlay").classList.add("show"); }
+function closeModal() {
+  if (modalGuard && !modalGuard()) return;
+  modalGuard = null;
+  $("#overlay").classList.remove("show");
+}
 $("#overlay").addEventListener("click", e => { if (e.target.id === "overlay") closeModal(); });
 document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
   document.querySelectorAll("header .tab").forEach(x => x.classList.toggle("active", x === b));
@@ -156,11 +185,11 @@ async function refresh() {
 }
 
 // ================= 设备 =================
-// healthLine 把设备上报的解码方式、温度、输出分辨率翻译成一眼能看懂的提示。
-// 这三项出问题的现场表现分别是：卡顿发热、过热关机、画面错位。
+// healthLine 把设备心跳翻译成一眼能看懂的提示：解码方式、温度、输出分辨率、运行时长、剩余空间。
+// 要盯的现场问题：过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
 function healthLine(hb) {
   const parts = [];
-  if (hb.hwdec === "no") parts.push('<span class="bad" title="H3 软解带不动 1440×900，会卡顿、发热甚至过热关机">软解</span>');
+  if (hb.hwdec === "no") parts.push('<span title="Armbian 自带的 mpv 驱动不了 H3 的硬件解码器，软解是常态；服务端已按软解可承受的规格转码，留意温度即可">软解</span>');
   else if (hb.hwdec) parts.push(`<span class="okc" title="mpv 实际使用的硬解方式">硬解 ${esc(hb.hwdec)}</span>`);
   if (hb.temp_c) parts.push(hb.temp_c >= 80
     ? `<span class="bad" title="H3 到 85°C 开始降频，再高会关机">${hb.temp_c}°C</span>`
@@ -170,8 +199,24 @@ function healthLine(hb) {
     parts.push(ok ? `${hb.output_w}×${hb.output_h}`
       : `<span class="warn" title="显示屏实际输出与模板画布不一致（叠加图会被缩放）；检查 /boot/armbianEnv.txt 的 video= 参数">输出 ${hb.output_w}×${hb.output_h}</span>`);
   }
+  if (hb.uptime > 0) {
+    const h = hb.uptime / 3600;
+    parts.push(h < 1
+      ? `<span class="warn" title="设备刚重启过；反复出现时留意温度（H3 过热会自动关机）">${Math.max(1, Math.round(hb.uptime / 60))} 分钟前启动</span>`
+      : `运行 ${h < 48 ? Math.round(h) + " 小时" : Math.round(h / 24) + " 天"}`);
+  }
+  if (hb.disk_free_mb >= 0 && hb.disk_free_mb < 500)
+    parts.push(`<span class="bad" title="缓存分区快满了，新内容可能下载失败">剩余 ${hb.disk_free_mb} MB</span>`);
   return parts.length ? `<div class="muted">${parts.join(" · ")}</div>` : "";
 }
+
+// 设备取内容的进度：后台改了内容 → 等待刷新（设备下次轮询才知道）→ 正在刷新（下载中）→ 已显示最新内容。
+const SYNC = {
+  waiting: ["等待刷新", "内容已更改，设备下次轮询时开始刷新"],
+  syncing: ["正在刷新", "设备正在下载新内容"],
+  latest: ["已显示最新内容", "设备正在播放当前配置的内容"],
+  offline: ["离线", "设备上线后会自动刷新到最新内容"],
+};
 
 function renderDevices() {
   const g = tplById(global.template_id);
@@ -196,20 +241,25 @@ function renderDevices() {
       ${info.ffmpeg_error ? `<div>原因：<code>${esc(info.ffmpeg_error)}</code></div>` : ""}
       <div class="muted">注意服务是以 <code>display</code> 用户、systemd 的精简 PATH 运行的，不是你登录 shell 的环境：
         用 <code>sudo -u display ffmpeg -version</code> 能跑通才算可用。推荐 <code>apt install ffmpeg</code>（装到 /usr/bin）；
-        装在别处就在 server.json 写 <code>ffmpeg_path</code> 绝对路径。装好后约 30 秒内自动生效，无需重启。</div></div>`;
+        装在别处就在 server.json 写 <code>ffmpeg_path</code> 绝对路径。装好后重启服务端生效。</div></div>`;
   }
   const rows = devices.map(d => {
     const st = d.online ? '<span class="dot on"></span>在线'
       : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
     const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<span class="badge">${esc(k)}=${esc(v)}</span>`).join("") || '<span class="muted">-</span>';
-    let show = `<span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || d.active_source}</span>`;
-    if (d.active_template) show += ` <span class="badge">${esc(d.active_template)}</span>`;
+    const [syncText, syncTip] = SYNC[d.sync] || [d.sync || "-", ""];
+    let show = `<span class="sync ${esc(d.sync)}" title="${esc(syncTip)}">${esc(syncText)}</span>`;
+    const tplName = tplById(d.active_template)?.name || d.active_template;
+    show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
+      d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
+    if (d.online && d.last_seen) show += `<div class="contact" data-seen="${Date.parse(d.last_seen)}" data-poll="${d.poll_interval_s}"
+      data-offline="${d.offline_after_s}" data-sync="${esc(d.sync)}"></div>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
-    if (d.heartbeat) show += `<div class="muted">播放: ${esc((d.heartbeat.playing || "").split("/").pop())}</div>` + healthLine(d.heartbeat);
-    let ver = `<div class="muted">程序 ${esc(d.agent_version || "?")}`;
+    const agentVer = d.hw?.agent_version;
+    let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
     if (d.update_target) {
       const t = d.update_target;
-      ver += d.agent_version === t.version
+      ver += agentVer === t.version
         ? ` <span class="okc">✓ 已更新到 ${esc(t.version)}</span>`
         : ` → <span class="warn">${esc(t.version)}${t.not_before && new Date(t.not_before) > new Date() ? " (定时 " + esc(fmtTime(t.not_before)) + ")" : " (待更新)"}</span>`;
     }
@@ -221,7 +271,7 @@ function renderDevices() {
         <div class="row" style="margin:6px 0 0"><button class="primary sm" onclick="rekeyDialog('${esc(d.id)}')">核对并处理</button></div></div>` : "";
     return `<tr>
       <td>${st}</td>
-      <td><b>${esc(d.id)}</b>${hw}${ver}${rekey}</td>
+      <td><b>${esc(d.id)}</b>${hw}${ver}${d.heartbeat ? healthLine(d.heartbeat) : ""}${rekey}</td>
       <td>${attrs}</td>
       <td>${show}</td>
       <td>
@@ -232,7 +282,27 @@ function renderDevices() {
       </td></tr>`;
   }).join("");
   $("#devTable").innerHTML = `<tr><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">暂无设备。设备烧录母镜像上电后会自动注册出现在这里。</td></tr>'}`;
+  tickContact();
 }
+
+// tickContact 每秒刷新"设备多久前联系过"：等待刷新时让人知道设备是还没轮到，还是已经不来了。
+// 用服务器时间算（浏览器所在电脑的时钟可能不准）。
+const serverNow = () => Date.now() + ((info.server_time || infoFetchedAt) - infoFetchedAt);
+function tickContact() {
+  for (const el of document.querySelectorAll("#devTable .contact")) {
+    const age = Math.max(0, Math.round((serverNow() - +el.dataset.seen) / 1000));
+    const poll = +el.dataset.poll, offline = +el.dataset.offline;
+    let html = "";
+    if (age > 2 * poll) {
+      html = `<span class="warn">⚠ 设备 ${age} 秒未响应</span><div class="muted">${
+        age >= offline ? "可能已离线" : `超过 ${offline} 秒无响应判离线`}</div>`;
+    } else if (el.dataset.sync === "waiting" || el.dataset.sync === "syncing") {
+      html = `<span class="muted">设备 ${age} 秒前联系过，每 ${poll} 秒来一次</span>`;
+    }
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+}
+setInterval(tickContact, 1000);
 
 function testDialog(id) {
   modal(`<h2>测试屏 — ${esc(id)}</h2>
@@ -296,19 +366,18 @@ async function saveAttrs(id) {
   toast("属性已保存"); closeModal(); refresh();
 }
 
-// ---- 内容：模板选择 + 左右对调 + 播放列表 + 静态图片绑定 ----
-// 一台设备要配的东西都在这一个对话框里：以前"图片"和"高级"分开，改哪边都像只改了一半。
-let pl = [];            // 当前设备的播放列表（服务端返回的顺序即播放顺序）
-let plDirty = false;    // 顺序是否被拖动过（未保存）
-
+// ---- 内容：模板选择 + 左右对调 + 播放列表 ----
+// 一台设备要配的东西都在这一个对话框里。播放列表的增删、排序即时生效（自动保存）；
+// 模板与左右对调要点"保存"。
 const mediaRegionOf = tid => (tplById(tid)?.regions || []).find(r => r.type === "media");
 // 设备实际会用到的模板：专属优先，否则全局默认。
 const effectiveTplID = d => (d.display.mode === "template" && d.display.template_id) || global.template_id;
 
 async function contentDialog(id) {
   const d = devices.find(x => x.id === id);
-  try { setPlaylistData(await api(`/api/v1/admin/devices/${id}/media`)); } catch { setPlaylistData([]); }
-  plDirty = false;
+  let list = [];
+  try { list = await api(`/api/v1/admin/devices/${id}/media`); } catch { /* 显示空列表 */ }
+  plOpen(id, list);
   const own = d.display.mode === "template";
   const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   modal(`<h2>内容 — ${esc(d.id)}</h2>
@@ -322,16 +391,16 @@ async function contentDialog(id) {
     <hr style="border:none;border-top:1px solid var(--line);margin:12px 0">
     <div id="contentBody"></div>
     <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveContent('${esc(id)}')">保存</button></div>`);
+    <div class="actions"><button onclick="closeModal()">关闭</button><button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button></div>`);
+  modalGuard = plCloseGuard;
   renderContentBody(id);
 }
 
 function onModeChange() {
   const own = document.querySelector('input[name=mode]:checked').value === "template";
   $("#ovSel").disabled = !own;
-  renderContentBody(currentDeviceID());
+  renderContentBody(plDev);
 }
-function currentDeviceID() { return $("#contentBody")?.dataset.device || ""; }
 
 // copyGlobalTemplate 以全局模板为蓝本建一个副本，供这台设备单独改。
 async function copyGlobalTemplate() {
@@ -346,165 +415,491 @@ async function copyGlobalTemplate() {
   sel.value = created.id; sel.disabled = false;
   document.querySelector('input[name=mode][value=template]').checked = true;
   toast("已复制为专属模板，可在「模板与时段」页继续编辑");
-  renderContentBody(currentDeviceID());
+  renderContentBody(plDev);
 }
 
 // renderContentBody 画出与当前所选模板匹配的内容区：有媒体区才显示播放列表。
 function renderContentBody(id) {
   const box = $("#contentBody");
   if (!box) return;
-  box.dataset.device = id;
   const own = document.querySelector('input[name=mode]:checked').value === "template";
   const tid = own ? $("#ovSel").value : global.template_id;
   const tpl = tplById(tid);
-  const media = mediaRegionOf(tid);
-  let html = "";
   if (!tpl) {
-    html = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
-  } else if (!media) {
-    html = `<p class="muted">模板「${esc(tpl.name)}」没有媒体区，这台设备不播放列表内容。
-      要放图片/视频，请换一个带媒体区的模板。</p>`;
-  } else {
-    html = `<div class="row"><b>播放内容</b><span class="muted">按顺序循环播放；图片停留 ${esc(tpl.image_duration_s)} 秒（写在模板里），视频播完即切</span></div>
-      <div class="row"><input type="file" id="plFiles" multiple
-          accept=".png,.jpg,.jpeg${info.transcode ? ",.mp4,.mov,.mkv,.webm,.avi,.m4v" : ""}">
-        <button class="primary" onclick="uploadDeviceMedia('${esc(id)}')">上传</button></div>
-      <p class="muted">${uploadHint()}</p>
-      <div id="plBox"></div>`;
+    box.innerHTML = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
+    return;
   }
-  box.innerHTML = html;
-  renderPlaylist(id);
+  if (!mediaRegionOf(tid)) {
+    box.innerHTML = `<p class="muted">模板「${esc(tpl.name)}」没有媒体区，这台设备不播放列表内容。
+      要放图片/视频，请换一个带媒体区的模板。</p>`;
+    return;
+  }
+  box.innerHTML = `<div class="row"><b>播放内容</b>
+      <span class="muted">按顺序循环播放；图片停留 ${esc(tpl.image_duration_s)} 秒（写在模板里），视频播完即切</span></div>
+    <label class="pl-drop" id="plDrop">
+      <input type="file" id="plFiles" multiple hidden accept="${esc(plAccept())}">
+      <b>点击选择图片${info.transcode ? "或视频" : ""}</b>，或把文件拖到这里
+      <div class="muted">${uploadHint()}</div>
+    </label>
+    <div class="pl-head"><span id="plSum"></span><span class="sp"></span><span id="plSaveState" class="muted"></span></div>
+    <ul class="pl-list" id="plList"></ul>`;
+  $("#plFiles").onchange = e => { plAddFiles(e.target.files); e.target.value = ""; };
+  bindFileDrop(box);
+  bindSortable($("#plList"));
+  renderPlaylist();
+}
+
+function plAccept() {
+  const img = "image/png,image/jpeg,.png,.jpg,.jpeg";
+  return info.transcode ? img + ",video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ts" : img;
 }
 
 function uploadHint() {
   const img = "图片 png/jpg，单张不超过 20MB，过大的会自动缩到屏幕尺寸。";
   if (info.transcode) {
     const v = info.video_spec || {};
-    return img + ` 视频 mp4/mov/mkv/webm，不超过 500MB，上传后<b>自动转码</b>为设备吃得消的 H.264
-      （${v.max_w}×${v.max_h} 以内、${v.max_fps}fps、码率 ≤ ${(v.max_bitrate_k / 1000).toFixed(0)}Mbps、静音），
-      转码在后台进行，完成后自动加入播放列表。`;
+    return img + ` 视频不超过 500MB，上传后<b>自动转码</b>为设备吃得消的 H.264
+      （${v.max_w}×${v.max_h} 以内、${v.max_fps}fps、码率 ≤ ${(v.max_bitrate_k / 1000).toFixed(0)}Mbps、静音）。
+      上传、转码过程中可以随时拖动调整顺序。`;
   }
-  return img + ` <b>暂不能上传视频</b>：服务端未安装 ffmpeg，未转码的视频会让设备过热。`;
+  return img + ` <b>暂不能上传视频</b>：服务端 ffmpeg 不可用（见页面顶部提示）。`;
 }
 
 const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+const IMAGE_RE = /\.(png|jpe?g)$/i, VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v|ts)$/i;
 
-let plPending = [];   // 转码中 / 排队 / 失败的视频（不参与排序与播放）
-let plPoll = null;    // 有转码任务时定时刷新进度
+// ---- 播放列表模型 ----
+// plItems 是界面上的完整列表，顺序即播放顺序：已就绪的、正在上传的、转码中的都在里面，
+// 都可以拖。服务端只记"已就绪"文件的顺序，所以每当两边的就绪顺序不一致（拖动过，
+// 或者某个文件刚传完/转码完被服务端追加到了末尾），就把界面上的顺序提交上去。
+//
+// 每项：{ key, label 显示名, name 服务端文件名（上传完成前为空）, type, size,
+//         state, progress, error, file, xhr, thumb }
+// state：waiting 等待上传 → uploading 上传中 → processing 服务器处理中 →
+//        ready 就绪 | queued 排队转码 → transcoding 转码中 → ready | failed 转码失败；
+//        rejected 未通过校验（只在本地显示，等运营方移除）
+let plDev = "", plItems = [], plSeq = 0;
+let plServerOrder = [];        // 服务端当前记录的就绪顺序
+let plEpoch = 0;               // 每次用写操作的响应更新列表就加一；比它旧的轮询结果作废
+let plSaveTimer = null, plSaveChain = Promise.resolve();
+let plPollTimer = null;
+let plDrag = null, plNeedsRender = false;
+const thumbCache = new Map();  // "设备/文件名" → object URL
 
-// setPlaylist 把服务端返回的列表拆成"就绪"与"处理中"两部分。
-function setPlaylistData(list) {
-  const all = arr(list);
-  pl = all.filter(f => !f.status || f.status === "ready");
-  plPending = all.filter(f => f.status && f.status !== "ready");
+const isBusy = it => it.state === "waiting" || it.state === "uploading" || it.state === "processing";
+const isLocal = it => isBusy(it) || it.state === "rejected";
+const readyNames = () => plItems.filter(it => it.state === "ready").map(it => it.name);
+const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+function fromServer(f) {
+  return { key: ++plSeq, label: f.name, name: f.name, type: f.type, size: f.size,
+    state: f.status || "ready", progress: f.progress || 0, error: f.error || "" };
 }
 
-const JOB_LABEL = { queued: "排队中", transcoding: "转码中", failed: "转码失败" };
+function plOpen(dev, list) {
+  plDev = dev; plItems = arr(list).map(fromServer); plEpoch++;
+  plServerOrder = readyNames();
+}
 
-function renderPlaylist(id) {
-  const box = $("#plBox");
-  if (!box) return;
-  schedulePlPoll(id);
-  if (!pl.length && !plPending.length) {
-    box.innerHTML = '<p class="muted">还没有内容。媒体区暂时显示模板底色，不会黑屏。</p>';
+// applyServer 用服务端返回的列表更新状态：保留界面上的顺序，只更新每项的状态，
+// 补上界面上没有的（如别的标签页传的），去掉服务端已经没有的。
+function applyServer(list) {
+  const byName = new Map(arr(list).map(f => [f.name, f]));
+  plItems = plItems.filter(it => {
+    if (isLocal(it)) return true;
+    const f = byName.get(it.name);
+    if (!f) { dropThumb(it); return false; }
+    byName.delete(it.name);
+    Object.assign(it, { state: f.status || "ready", size: f.size || it.size, progress: f.progress || 0, error: f.error || "" });
+    return true;
+  });
+  for (const f of byName.values()) plItems.push(fromServer(f));
+  plServerOrder = arr(list).filter(f => (f.status || "ready") === "ready").map(f => f.name);
+  if (!sameList(readyNames(), plServerOrder)) scheduleOrderSave();
+  renderPlaylist();
+  schedulePlPoll();
+}
+
+// ---- 渲染 ----
+const STATE_TEXT = { waiting: "等待上传", uploading: "上传中", processing: "服务器处理中…",
+  queued: "排队转码", transcoding: "转码中", failed: "转码失败", rejected: "未上传" };
+
+function rowInner(it, n) {
+  const thumb = it.type === "video" ? '<span class="vid">▶</span>'
+    : it.thumb ? `<img src="${esc(it.thumb)}" alt="" draggable="false" onerror="this.remove()">` : "";
+  let meta = `${it.type === "video" ? "视频" : "图片"} · ${esc(fmtSize(it.size || 0))}`;
+  if (it.state !== "ready") {
+    const pct = (it.state === "uploading" || it.state === "transcoding") ? ` ${it.progress || 0}%` : "";
+    meta += ` · <span class="stt">${STATE_TEXT[it.state] || esc(it.state)}${pct}</span>`;
+  }
+  if (it.error) meta += `<div class="bad" title="${esc(it.error)}">${esc(it.error.slice(0, 120))}</div>`;
+  const bar = it.state === "uploading" || it.state === "transcoding" ? `<div class="pbar"><i style="width:${it.progress || 0}%"></i></div>`
+    : it.state === "processing" || it.state === "queued" ? '<div class="pbar indeterminate"><i></i></div>' : "";
+  const btn = it.state === "processing" ? ""
+    : `<button class="sm ${it.state === "ready" ? "danger" : ""}" data-act="remove">${
+        it.state === "ready" ? "删除" : isBusy(it) || it.state === "queued" || it.state === "transcoding" ? "取消" : "移除"}</button>`;
+  return `<span class="grip" tabindex="0" role="button" aria-label="拖动调整顺序，或用上下方向键">⠿</span>
+    <span class="thumb">${thumb}</span>
+    <span class="info"><span class="nm">${n ? `<b>${n}.</b> ` : ""}${esc(it.label)}</span>
+      <span class="meta">${meta}</span>${bar}</span>${btn}`;
+}
+
+function renderPlaylist() {
+  const list = $("#plList");
+  if (!list) return;
+  if (plDrag) { // 拖动中不能整表重画，只更新各行内容，松手后再补
+    plNeedsRender = true;
+    plItems.forEach(it => updateRow(it, true));
+    renderSummary();
     return;
   }
-  box.innerHTML = pl.map((f, i) => `<div class="pl-item" draggable="true" data-i="${i}">
-      <span class="grip">☰</span><b>${i + 1}.</b> ${esc(f.name)}
-      <span class="badge">${f.type === "video" ? "视频" : "图片"}</span>
-      <span class="muted">${esc(fmtSize(f.size))}</span>
-      <span class="sp"></span>
-      <button class="sm" onclick="movePl(${i},-1,'${esc(id)}')">↑</button>
-      <button class="sm" onclick="movePl(${i},1,'${esc(id)}')">↓</button>
-      <button class="sm danger" onclick="deleteMedia('${esc(id)}','${esc(f.name)}')">删除</button>
-    </div>`).join("") +
-    plPending.map(f => `<div class="pl-item pending ${f.status === "failed" ? "failed" : ""}">
-      <span class="grip">⏳</span> ${esc(f.name)}
-      <span class="badge">${JOB_LABEL[f.status] || esc(f.status)}${f.status === "transcoding" && f.progress ? " " + f.progress + "%" : ""}</span>
-      ${f.status === "transcoding" ? `<progress max="100" value="${f.progress || 0}"></progress>` : ""}
-      ${f.error ? `<span class="bad" title="${esc(f.error)}">${esc(f.error.slice(0, 80))}</span>` : ""}
-      <span class="sp"></span>
-      <button class="sm danger" onclick="deleteMedia('${esc(id)}','${esc(f.name)}')">${f.status === "failed" ? "移除" : "取消"}</button>
-    </div>`).join("") +
-    (pl.length ? `<div class="row"><button class="primary" ${plDirty ? "" : "disabled"} id="plSave"
-        onclick="savePlaylistOrder('${esc(id)}')">保存播放顺序</button>
-      <span class="muted">拖动条目或用 ↑↓ 调整顺序${plPending.length ? "；转码完成的视频会自动加到末尾" : ""}</span></div>` : "");
-  bindPlDrag(id);
+  plNeedsRender = false;
+  let n = 0;
+  list.innerHTML = plItems.map(it =>
+    `<li class="pl-item st-${it.state}" data-key="${it.key}">${rowInner(it, it.state === "rejected" ? 0 : ++n)}</li>`).join("") ||
+    '<li class="pl-empty muted">还没有内容。媒体区暂时显示模板底色，不会黑屏。</li>';
+  renderSummary();
+  loadThumbs();
 }
 
-// schedulePlPoll 有转码任务时每 2 秒刷新一次进度；对话框关掉或任务都结束了就停。
-function schedulePlPoll(id) {
-  clearTimeout(plPoll);
-  if (!plPending.some(f => f.status !== "failed")) return;
-  plPoll = setTimeout(async () => {
-    if (!$("#overlay").classList.contains("show") || !$("#plBox")) return;
-    let list;
-    try { list = await api(`/api/v1/admin/devices/${id}/media`); } catch { return; }
-    if (plDirty) {
-      // 运营方正在调整顺序：只更新处理中的部分，别把还没保存的顺序冲掉
-      const ready = new Set(pl.map(f => f.name));
-      const fresh = arr(list).filter(f => f.status === "ready" && !ready.has(f.name));
-      pl = pl.concat(fresh);
-      plPending = arr(list).filter(f => f.status && f.status !== "ready");
-    } else {
-      setPlaylistData(list);
+// updateRow 只更新一行：full=false 时只动进度（上传进度事件很密），不重建 DOM。
+function updateRow(it, full) {
+  const li = document.querySelector(`#plList [data-key="${it.key}"]`);
+  if (!li) return;
+  if (full) {
+    const n = it.state === "rejected" ? 0 : plItems.filter(x => x.state !== "rejected").indexOf(it) + 1;
+    li.className = `pl-item st-${it.state}` + (plDrag && plDrag.li === li ? " dragging" : "");
+    li.innerHTML = rowInner(it, n);
+    return;
+  }
+  const bar = li.querySelector(".pbar > i"), stt = li.querySelector(".stt");
+  if (bar) bar.style.width = (it.progress || 0) + "%";
+  if (stt) stt.textContent = `${STATE_TEXT[it.state]} ${it.progress || 0}%`;
+}
+
+function renderSummary() {
+  const el = $("#plSum");
+  if (!el) return;
+  const c = s => plItems.filter(it => s.includes(it.state)).length;
+  const parts = [`共 ${plItems.filter(it => it.state !== "rejected").length} 项`];
+  if (c(["waiting", "uploading", "processing"])) parts.push(`上传中 ${c(["waiting", "uploading", "processing"])}`);
+  if (c(["queued", "transcoding"])) parts.push(`转码中 ${c(["queued", "transcoding"])}`);
+  if (c(["rejected", "failed"])) parts.push(`<span class="bad">失败 ${c(["rejected", "failed"])}</span>`);
+  el.innerHTML = parts.join(" · ");
+}
+
+function setSaveState(text) { const el = $("#plSaveState"); if (el) el.textContent = text; }
+
+// ---- 缩略图 ----
+// 本地刚选的图片直接用文件本身；服务端的图片取缩略图接口（要带 token，所以走 fetch）。
+let thumbLoading = 0;
+function loadThumbs() {
+  for (const it of plItems) {
+    if (thumbLoading >= 4) return;
+    if (it.type !== "image" || it.thumb || it.thumbTried || it.state !== "ready") continue;
+    const k = plDev + "/" + it.name;
+    if (thumbCache.has(k)) { it.thumb = thumbCache.get(k); updateRow(it, true); continue; }
+    it.thumbTried = true; thumbLoading++;
+    fetch(`/api/v1/admin/devices/${encodeURIComponent(plDev)}/media/${encodeURIComponent(it.name)}/thumb`,
+      { headers: { "X-Admin-Token": token() } })
+      .then(r => r.ok ? r.blob() : null)
+      .then(b => { if (b) { it.thumb = URL.createObjectURL(b); thumbCache.set(k, it.thumb); updateRow(it, true); } })
+      .catch(() => {})
+      .finally(() => { thumbLoading--; loadThumbs(); });
+  }
+}
+function dropThumb(it) {
+  if (!it.thumb) return;
+  if (it.name) thumbCache.delete(plDev + "/" + it.name);
+  URL.revokeObjectURL(it.thumb);
+}
+
+// ---- 上传：选中即入列，逐个上传，各自显示进度 ----
+function plPrecheck(f, type) {
+  if (!type) return "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等）";
+  if (type === "image" && f.size > 20 << 20) return "图片超过 20MB";
+  if (type === "video" && !info.transcode) return "服务端 ffmpeg 不可用，暂不能上传视频";
+  if (type === "video" && f.size > 500 << 20) return "视频超过 500MB";
+  return "";
+}
+
+function plAddFiles(files) {
+  for (const f of files) {
+    const type = IMAGE_RE.test(f.name) ? "image" : VIDEO_RE.test(f.name) ? "video" : "";
+    const it = { key: ++plSeq, label: f.name, name: "", type: type || "image", size: f.size,
+      state: "waiting", progress: 0, error: plPrecheck(f, type), file: f };
+    if (it.error) { it.state = "rejected"; it.file = null; }
+    else if (type === "image") it.thumb = URL.createObjectURL(f);
+    plItems.push(it);
+  }
+  renderPlaylist();
+  pumpUploads();
+}
+
+// 一次传一个：局域网带宽本来就是瓶颈，并发不会更快，进度反而看不清。
+function pumpUploads() {
+  if (plItems.some(it => it.state === "uploading" || it.state === "processing")) return;
+  const next = plItems.find(it => it.state === "waiting");
+  if (next) uploadOne(next);
+}
+
+function uploadOne(it) {
+  const dev = plDev;
+  const fd = new FormData();
+  fd.append("files", it.file, it.label);
+  const xhr = new XMLHttpRequest();
+  it.xhr = xhr; it.state = "uploading"; it.progress = 0;
+  updateRow(it, true); renderSummary();
+  xhr.open("POST", `/api/v1/admin/devices/${encodeURIComponent(dev)}/media`);
+  xhr.setRequestHeader("X-Admin-Token", token());
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    it.progress = Math.min(99, Math.round(e.loaded * 100 / e.total));
+    updateRow(it, false);
+  };
+  // 字节传完后服务端还要校验、缩图，可能要一两秒
+  xhr.upload.onload = () => { it.state = "processing"; updateRow(it, true); };
+  const done = () => { it.xhr = null; it.file = null; if (dev === plDev) { renderPlaylist(); pumpUploads(); } };
+  xhr.onload = () => {
+    if (xhr.status !== 200) {
+      it.state = "rejected";
+      it.error = xhr.status === 401 ? "Token 无效，请重新设置后再传" : (xhr.responseText || "HTTP " + xhr.status).trim();
+      return done();
     }
-    renderPlaylist(id);
+    let r;
+    try { r = JSON.parse(xhr.responseText); } catch { it.state = "rejected"; it.error = "服务器响应异常"; return done(); }
+    const bad = arr(r.rejected)[0];
+    if (bad) {
+      it.state = "rejected"; it.error = bad.reason;
+    } else {
+      it.name = arr(r.accepted)[0] || arr(r.transcoding)[0];
+      it.state = arr(r.accepted).length ? "ready" : "queued";
+      if (it.thumb && it.state === "ready") thumbCache.set(dev + "/" + it.name, it.thumb);
+    }
+    it.file = null;
+    if (dev === plDev) { plEpoch++; applyServer(r.playlist); }
+    done();
+  };
+  xhr.onerror = () => { it.state = "rejected"; it.error = "网络中断，上传失败"; done(); };
+  xhr.send(fd);
+}
+
+async function plRemove(key) {
+  const it = plItems.find(x => x.key === key);
+  if (!it) return;
+  if (isLocal(it)) { // 还没到服务端：取消上传、移出列表即可
+    if (it.xhr) { it.xhr.onload = it.xhr.onerror = null; it.xhr.abort(); }
+    plItems = plItems.filter(x => x !== it);
+    dropThumb(it);
+    renderPlaylist(); pumpUploads();
+    return;
+  }
+  const what = it.state === "ready" ? `删除 ${it.name}？文件会从服务器上删除，设备下次刷新后不再播放。`
+    : it.state === "failed" ? null : `取消 ${it.name} 的转码？`;
+  if (what && !confirm(what)) return;
+  const list = await api(`/api/v1/admin/devices/${encodeURIComponent(plDev)}/media/${encodeURIComponent(it.name)}`, { method: "DELETE" });
+  plItems = plItems.filter(x => x !== it);
+  dropThumb(it);
+  plEpoch++; applyServer(list);
+}
+
+// ---- 顺序自动保存 ----
+function scheduleOrderSave() {
+  clearTimeout(plSaveTimer);
+  setSaveState("顺序待保存…");
+  plSaveTimer = setTimeout(() => plDrag ? scheduleOrderSave() : saveOrder(plDev, readyNames()), 400);
+}
+
+function saveOrder(dev, names) {
+  clearTimeout(plSaveTimer);
+  plSaveChain = plSaveChain.then(async () => {
+    if (dev === plDev && sameList(names, plServerOrder)) { setSaveState(""); return; }
+    setSaveState("正在保存顺序…");
+    try {
+      const list = await api(`/api/v1/admin/devices/${encodeURIComponent(dev)}/media`, { method: "PUT", ...J(names) });
+      if (dev !== plDev) return;
+      plEpoch++; applyServer(list);
+      setSaveState("✓ 顺序已保存");
+    } catch {
+      // 多半是别处删了文件：重新取一次列表，界面以服务端为准
+      if (dev !== plDev) return;
+      try { plEpoch++; applyServer(await api(`/api/v1/admin/devices/${encodeURIComponent(dev)}/media`)); } catch { }
+      setSaveState("");
+    }
+  });
+}
+
+// 有转码任务时每 2 秒刷新进度；转码完成的视频会被服务端追加到末尾，applyServer 再按界面顺序提交。
+function schedulePlPoll() {
+  clearTimeout(plPollTimer);
+  if (!plItems.some(it => it.state === "queued" || it.state === "transcoding")) return;
+  const dev = plDev;
+  plPollTimer = setTimeout(async () => {
+    if (dev !== plDev) return;
+    const epoch = plEpoch;
+    let list;
+    try { list = await api(`/api/v1/admin/devices/${encodeURIComponent(dev)}/media`); } catch { return schedulePlPoll(); }
+    if (dev !== plDev) return;
+    if (epoch !== plEpoch) return schedulePlPoll(); // 期间有写操作，这份结果可能已过时
+    applyServer(list);
   }, 2000);
 }
 
-// bindPlDrag 用原生 HTML5 拖放实现排序（触屏上用 ↑↓ 按钮）。
-function bindPlDrag(id) {
-  let from = -1;
-  for (const el of document.querySelectorAll(".pl-item")) {
-    el.ondragstart = e => { from = +el.dataset.i; e.dataTransfer.effectAllowed = "move"; };
-    el.ondragover = e => { e.preventDefault(); el.classList.add("over"); };
-    el.ondragleave = () => el.classList.remove("over");
-    el.ondrop = e => {
-      e.preventDefault(); el.classList.remove("over");
-      const to = +el.dataset.i;
-      if (from < 0 || from === to) return;
-      pl.splice(to, 0, ...pl.splice(from, 1));
-      plDirty = true; renderPlaylist(id);
+// plCloseGuard 关闭对话框前：有文件没传完要确认；待保存的顺序立即提交。
+function plCloseGuard() {
+  const busy = plItems.filter(isBusy);
+  if (busy.length && !confirm(`还有 ${busy.length} 个文件没传完，关闭会取消上传。确定关闭？`)) return false;
+  for (const it of busy) if (it.xhr) { it.xhr.onload = it.xhr.onerror = null; it.xhr.abort(); }
+  if (plSaveTimer) saveOrder(plDev, readyNames());
+  clearTimeout(plPollTimer);
+  for (const it of plItems) if (it.thumb && !thumbCache.has(plDev + "/" + it.name)) URL.revokeObjectURL(it.thumb);
+  plDev = ""; plItems = [];
+  setTimeout(refresh, 300); // 让设备列表的"当前显示"状态跟上
+  return true;
+}
+window.addEventListener("beforeunload", e => { if (plItems.some(isBusy)) { e.preventDefault(); e.returnValue = ""; } });
+
+// ---- 拖文件进来 ----
+function bindFileDrop(box) {
+  const drop = $("#plDrop");
+  const hasFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
+  box.ondragover = e => { if (!hasFiles(e)) return; e.preventDefault(); drop.classList.add("hover"); };
+  box.ondragleave = e => { if (!box.contains(e.relatedTarget)) drop.classList.remove("hover"); };
+  box.ondrop = e => { if (!hasFiles(e)) return; e.preventDefault(); drop.classList.remove("hover"); plAddFiles(e.dataTransfer.files); };
+}
+
+// ---- 拖动排序 ----
+// 用 Pointer Events 自己实现，鼠标、触屏、触控笔一套代码：
+//   - 鼠标：按住左侧把手拖动；
+//   - 触屏（iOS/iPadOS/Android）：按住把手立即拖，或在条目上长按约 0.35 秒"拿起"后拖，
+//     与 iOS 原生列表一致；拿起时轻震（支持的设备），其余条目让位动画，靠近边缘自动滚动；
+//   - 键盘：焦点在把手上时用 ↑↓ 移动。
+// 不用 HTML5 拖放：它在 iOS Safari 上不能用来排序，且拖动时没有让位动画。
+function bindSortable(list) {
+  list.onclick = e => {
+    const b = e.target.closest("button[data-act=remove]");
+    if (b) plRemove(+b.closest(".pl-item").dataset.key);
+  };
+  list.onkeydown = e => {
+    if (!e.target.classList.contains("grip") || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    e.preventDefault();
+    const key = +e.target.closest(".pl-item").dataset.key;
+    const i = plItems.findIndex(x => x.key === key), j = i + (e.key === "ArrowUp" ? -1 : 1);
+    if (j < 0 || j >= plItems.length) return;
+    plItems.splice(j, 0, ...plItems.splice(i, 1));
+    renderPlaylist();
+    document.querySelector(`#plList [data-key="${key}"] .grip`)?.focus();
+    scheduleOrderSave();
+  };
+  list.onpointerdown = e => {
+    const li = e.target.closest(".pl-item");
+    if (!li || plDrag || e.button !== 0 || e.target.closest("button")) return;
+    const onGrip = !!e.target.closest(".grip");
+    if (e.pointerType === "mouse" && !onGrip) return;
+    const press = { li, id: e.pointerId, x: e.clientX, y: e.clientY, timer: 0 };
+    const cleanup = () => {
+      clearTimeout(press.timer);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
     };
-  }
+    const onMove = ev => {
+      if (ev.pointerId !== press.id) return;
+      const moved = Math.hypot(ev.clientX - press.x, ev.clientY - press.y);
+      if (e.pointerType === "mouse" || onGrip) { // 把手：移动一点就开始
+        if (moved > 3) { cleanup(); startDrag(press.li, press.id, press.y, ev.clientY); }
+      } else if (moved > 8) {
+        cleanup(); // 长按前就动了：用户是在滚动页面，不拦
+      }
+    };
+    if (onGrip) e.preventDefault(); // 防止选中文字
+    if (e.pointerType !== "mouse" && !onGrip) {
+      press.timer = setTimeout(() => { cleanup(); startDrag(press.li, press.id, press.y, press.y); }, 350);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
+  };
+  list.oncontextmenu = e => { if (e.target.closest(".pl-item")) e.preventDefault(); }; // 长按不弹菜单
 }
-function movePl(i, delta, id) {
-  const j = i + delta;
-  if (j < 0 || j >= pl.length) return;
-  [pl[i], pl[j]] = [pl[j], pl[i]];
-  plDirty = true; renderPlaylist(id);
-}
-async function savePlaylistOrder(id) {
-  setPlaylistData(await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) }));
-  plDirty = false; toast("播放顺序已保存"); renderPlaylist(id);
-}
-async function uploadDeviceMedia(id) {
-  const files = $("#plFiles").files;
-  if (!files.length) { toast("请先选择文件"); return; }
-  const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-  toast(`正在上传 ${files.length} 个文件…`);
-  const r = await api(`/api/v1/admin/devices/${id}/media`, { method: "POST", body: fd });
-  setPlaylistData(r.playlist); plDirty = false;
-  const bad = arr(r.rejected);
-  const okCount = arr(r.accepted).length + arr(r.transcoding).length;
-  if (bad.length) {
-    modal(`<h2>部分文件未通过校验</h2>
-      <p>已收下 ${okCount} 个；以下文件被拒收：</p>
-      <table>${bad.map(b => `<tr><td>${esc(b.name)}</td><td>${esc(b.reason)}</td></tr>`).join("")}</table>
-      <div class="actions"><button class="primary" onclick="contentDialog('${esc(id)}')">返回</button></div>`);
-    return;
-  }
-  toast(arr(r.transcoding).length
-    ? `已上传 ${okCount} 个文件，其中 ${arr(r.transcoding).length} 个视频正在后台转码`
-    : `已上传 ${okCount} 个文件`);
-  renderContentBody(id);
-}
-async function deleteMedia(id, name) {
-  if (!confirm(`从播放列表中删除 ${name}？文件会从服务器上删除。`)) return;
-  setPlaylistData(await api(`/api/v1/admin/devices/${id}/media/${encodeURIComponent(name)}`, { method: "DELETE" }));
-  plDirty = false; toast("已删除"); renderPlaylist(id);
+
+function startDrag(li, pointerId, startY, curY) {
+  const list = $("#plList"), scroller = $("#overlay");
+  const els = [...list.children].filter(el => el.classList.contains("pl-item"));
+  const from = els.indexOf(li);
+  if (from < 0) return;
+  const rects = els.map(el => el.getBoundingClientRect());
+  const gap = parseFloat(getComputedStyle(li).marginBottom) || 0;
+  const d = plDrag = { li, els, from, to: from, rects, step: rects[from].height + gap,
+    startY, y: curY, scroll0: scroller.scrollTop, raf: 0, pointerId };
+  try { li.setPointerCapture(pointerId); } catch { }
+  li.classList.add("dragging");
+  list.classList.add("sorting");
+  document.body.classList.add("pl-dragging");
+  navigator.vibrate?.(8);
+
+  const offset = () => d.y - d.startY + (scroller.scrollTop - d.scroll0);
+  const layout = () => {
+    const dy = offset();
+    li.style.transform = `translateY(${dy}px)`;
+    const center = rects[from].top + rects[from].height / 2 + dy;
+    let to = from;
+    els.forEach((el, i) => {
+      const mid = rects[i].top + rects[i].height / 2;
+      if (i < from && center < mid) to = Math.min(to, i);
+      if (i > from && center > mid) to = Math.max(to, i);
+    });
+    d.to = to;
+    els.forEach((el, i) => {
+      if (i === from) return;
+      const shift = from < to && i > from && i <= to ? -d.step : from > to && i >= to && i < from ? d.step : 0;
+      el.style.transform = shift ? `translateY(${shift}px)` : "";
+    });
+  };
+  // 拖到可视区上下边缘时自动滚动，长列表也能一次拖到位。只在朝那个方向拖过之后才滚：
+  // 在靠近底边的条目上长按"拿起"时，不能马上自己往下滚走。
+  const tick = () => {
+    const edge = 70, h = window.innerHeight, moved = d.y - d.startY;
+    const v = d.y < edge && moved < -12 ? -(edge - d.y) / 4
+      : d.y > h - edge && moved > 12 ? (d.y - (h - edge)) / 4 : 0;
+    if (v) scroller.scrollTop += v;
+    layout();
+    d.raf = requestAnimationFrame(tick);
+  };
+  const onMove = e => { if (e.pointerId === pointerId) d.y = e.clientY; };
+  const onTouchMove = e => e.preventDefault(); // iOS：拿起后不让页面跟着滚
+  const finish = e => {
+    if (e.pointerId !== pointerId) return;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    document.removeEventListener("touchmove", onTouchMove);
+    cancelAnimationFrame(d.raf);
+    const to = e.type === "pointercancel" ? from : d.to;
+    // 落位动画：被拖的那项滑到目标位置，再按新顺序重画
+    let target = 0;
+    if (to > from) for (let i = from + 1; i <= to; i++) target += rects[i].height + gap;
+    if (to < from) for (let i = to; i < from; i++) target -= rects[i].height + gap;
+    li.classList.remove("dragging");
+    li.classList.add("dropping");
+    li.style.transform = `translateY(${target}px)`;
+    if (to === from) els.forEach((el, i) => { if (i !== from) el.style.transform = ""; });
+    setTimeout(() => {
+      plDrag = null;
+      list.classList.remove("sorting");
+      document.body.classList.remove("pl-dragging");
+      if (to !== from) {
+        plItems.splice(to, 0, ...plItems.splice(from, 1));
+        scheduleOrderSave();
+      }
+      renderPlaylist();
+    }, 180);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+  document.addEventListener("touchmove", onTouchMove, { passive: false });
+  tick();
 }
 
 async function saveContent(id) {
@@ -515,8 +910,10 @@ async function saveContent(id) {
     if (!body.template_id) { toast("请选择模板"); return; }
   }
   await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
-  if (plDirty) await api(`/api/v1/admin/devices/${id}/media`, { method: "PUT", ...J(pl.map(f => f.name)) });
-  toast("已保存"); closeModal(); refresh();
+  const d = devices.find(x => x.id === id);
+  if (d) Object.assign(d.display, body); // 对话框不关时，再次保存/预览用的是新设置
+  if (plItems.some(isBusy)) { toast("模板设置已保存；文件仍在上传"); return; }
+  toast("已保存"); closeModal();
 }
 
 async function previewDevice(id) {
@@ -657,7 +1054,7 @@ function renderFirmware() {
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
     <td>${(f.size / 1048576).toFixed(1)} MB<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
     <td>${esc(fmtTime(f.uploaded_at))}</td>
-    <td>${devices.filter(d => d.agent_version === f.version).length} / ${devices.length} 台在用</td>
+    <td>${devices.filter(d => d.hw?.agent_version === f.version).length} / ${devices.length} 台在用</td>
     <td><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
         <button class="danger" onclick="deleteFirmware('${esc(f.version)}')">删除</button></td></tr>`).join("");
   $("#fwTable").innerHTML = `<tr><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序</td></tr>'}`;
@@ -674,7 +1071,7 @@ async function deleteFirmware(v) {
   await api(`/api/v1/admin/firmware/${v}`, { method: "DELETE" }); toast("已删除"); refresh();
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></label>`).join("");
+  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.hw?.agent_version || "?")}</span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>

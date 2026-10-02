@@ -94,6 +94,8 @@ systemctl daemon-reload && systemctl enable --now display-server
 | `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
 | `timezone` | 时段计划与测试卡显示所用的时区（IANA 名称，如 `Asia/Shanghai`、`Asia/Tokyo`），留空取服务器系统时区。全部时区数据已内嵌，不依赖系统 tzdata。样例里是 `Asia/Shanghai`，在其他地区部署时记得改 |
+| `poll_interval_s` | 设备轮询间隔，默认 10 秒（1~300）。决定后台改动多快上屏、多快发现设备离线（约 3 个周期没来即离线，至少 30 秒）。**所有设备照这里的值执行**：随每个响应下发，改完重启服务端，设备下一次请求就跟上，不用逐台改 |
+| `heartbeat_interval_s` | 设备心跳间隔，默认 60 秒（10~3600）。心跳只上报温度、硬解、输出分辨率等健康数据，不影响在线判断；同样由设备照办 |
 | `ffmpeg_path` | 可选，ffmpeg 路径；留空在**服务进程的** PATH 里找（systemd 下只有 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`）。不可用时不能上传视频（见 5.1） |
 
 `media_root` 与 `data_dir` 及其子目录在服务端启动时自动创建，不用手工 mkdir。
@@ -197,7 +199,7 @@ systemctl enable display-agent        # 确认无误后再设为开机自启
 mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/etc/display-agent/agent.json`
 的 `mpv_extra_args` 中加 `["--vo=gpu", "--gpu-context=drm"]`。
 
-### 3.4 确认分辨率、硬件解码与温度
+### 3.4 确认分辨率、解码方式与温度
 
 ```sh
 /usr/local/lib/display-agent/check-display.sh
@@ -209,20 +211,27 @@ mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/
 |---|---|---|
 | 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 首行 | 控制台分辨率不对 |
 | mpv 输出分辨率 | mpv 属性 `osd-dimensions` | 内容画面与模板对不上（已自动缩放，但会形变） |
-| 硬件解码 | mpv 属性 `hwdec-current`：`no` 即软解 | 卡顿、发热，严重时过热关机 |
+| 解码方式 | mpv 属性 `hwdec-current`：`no` 即软解（自带 mpv 的常态，见下） | — |
 | SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
 
-后三项也随心跳上报，**管理后台设备列表里直接能看到**：软解与 80°C 以上标红，
-输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台在软解或过热。
+后三项也随心跳上报，**管理后台设备列表里直接能看到**：80°C 以上标红，
+输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台过热。
 
-要手工确认 mpv 的解码方式，也可以在设备上直接播一段：
+#### 关于硬件解码：现状是软解，这是预期的
 
-```sh
-systemctl stop display-agent
-mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -iE "hwdec|Using hardware"
-# 期望看到类似 "Using hardware decoding (v4l2m2m-copy)" 或 drm 相关字样；
-# 只有 "Using software decoding" 则说明硬解没起来：确认 ls /dev/video* 里有 cedrus 设备、视频是 H.264
-```
+H3 的硬件解码器（主线内核驱动 cedrus）本身支持 H.264 和 H.265，但它是"无状态"解码器，
+播放器必须通过 V4L2 Request API 驱动它。**FFmpeg 上游至今没有合入这部分支持**（补丁只在
+LibreELEC 等社区版本里），Armbian/Debian 自带的 mpv 依赖官方 FFmpeg，所以 `--hwdec=auto-safe`
+找不到可用的硬解方式，退回软解，视频照常播放。FFmpeg 自带的 `v4l2m2m` 只适用于"有状态"
+解码器（如树莓派），对 cedrus 无效。
+
+因此服务端转码按**软解吃得消**的规格出片：1440×900 以内、≤ 30fps、码率约 2.5Mbps、
+x264 `fastdecode` 调优（解码 CPU 省三四成）。实际要盯的是温度，不是解码方式。
+
+想尝试硬解，需要在设备上换装打过 v4l2request 补丁的 FFmpeg 与 mpv（Armbian 社区有对应的软件源，
+据反馈 Debian 12 上 mpv 可用、Debian 13 上 mpv 不可用），然后在 `agent.json` 的 `mpv_extra_args`
+里加 `"--hwdec=v4l2request-copy"`。务必先在一台样机上验证画面与温度，再批量推广。
+`check-display.sh` 会报告 cedrus 是否加载、FFmpeg 是否支持 v4l2request。
 
 ## 4. 设备端：母镜像批量部署
 
@@ -245,23 +254,16 @@ mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -
 #### 注册成功，但轮询/心跳报 401 unauthorized
 
 签名请求带时间戳，服务端只认与自己相差 ±5 分钟以内的（防重放），注册请求不签名所以不受影响。
-服务端日志（`journalctl -u display-server | grep auth:`）和设备日志都会写明原因：
+服务端日志（`journalctl -u display-server | grep 'auth rejected'`）和设备日志都会写明原因：
 
 | 原因 | 说明 | 处理 |
 |---|---|---|
-| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 新版代理已自动按服务端时间签名，不再受影响（见下） |
+| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 代理按服务端时间签名，不受影响（见下） |
 | `bad signature` | 设备密钥与服务端登记的不一致 | 见下一节"另一把密钥" |
-| `unknown device` | 设备在后台被删除了 | 新版代理会自动重新注册 |
+| `unknown device` | 设备在后台被删除了 | 代理会自动重新注册 |
 
-新版代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不再依赖设备时钟**；
+代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不依赖设备时钟**；
 偏差超过 1 分钟会在日志里提示一次。
-
-**旧版代理的设备**收不到 OTA（OTA 本身也要签名轮询），先在设备上按服务端时间校一次钟，再从后台下发新版本：
-
-```sh
-date -u -s "$(curl -sI http://<服务器>:9000/admin | sed -n 's/^[Dd]ate: //p')"
-systemctl restart display-agent
-```
 
 想让设备日志时间也准，见第 9 节"无外网运行"里的局域网 NTP 配置（只影响日志时间，不影响播放与认证）。
 
@@ -272,15 +274,15 @@ systemctl restart display-agent
 本地缓存，同时把新密钥报给服务端。
 
 处理：管理后台该设备上会出现红色提示 →【核对并处理】→ 对照硬件序列号 / MAC，以及设备日志里
-`agent: 生成新身份 … key=xxxxxxxx` 的指纹 → 一致就点**接受新密钥**。设备一分钟内重新注册成功，
+`agent: new identity … key=xxxxxxxx` 的指纹 → 一致就点**接受新密钥**。设备一分钟内重新注册成功，
 **属性、播放列表、专属模板都保留**（不要用"删除设备"来解决，那会把这些配置一起删掉）。
 不一致说明是另一台机器撞了编号（给其中一台改主机名）或有人冒充，点忽略。
 
 设备日志里每次启动都会打印身份来源，便于判断：
 
 ```
-agent: 使用已有身份 device_id=scr-0017 key=a80470cb（/var/lib/display-agent/identity.json）   # 正常
-agent: 生成新身份 device_id=scr-0017 key=d9e2ca41（…）                                         # 首次启动，或身份文件丢了
+agent: using existing identity device_id=scr-0017 key=a80470cb (/var/lib/display-agent/identity.json)   # 正常
+agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                                                # 首次启动，或身份文件丢了
 ```
 
 代理已做的防护：身份文件写入后 fsync（防断电丢失）；文件损坏时另存为 `identity.json.bad-<时间>`
@@ -331,28 +333,60 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 - **设备**页每行【内容】：这台设备要显示什么都在这一个对话框里——
   - 模板：跟随全局，或给这台设备单独指定一个（可以"复制全局模板再改"）；
   - **左右对调**：同一个模板，把属性放到另一边。属性在左还是在右不需要建两个模板；
-  - 播放内容：多选上传图片/视频，拖动条目调整播放顺序，按顺序循环播放。
-    图片停留时长跟着模板走，视频播完即切，一律静音；
+  - 播放内容：点选或把文件拖进上传框，选中的文件**立即出现在列表里**、各自显示上传进度，
+    逐个上传；上传、转码过程中就可以拖动条目调整顺序（电脑上按住左侧把手拖；iPhone/iPad
+    上按住把手直接拖，或在条目上长按"拿起"再拖，与系统列表一致；键盘焦点在把手上时可用 ↑↓）。
+    **增删与排序即时生效**，不用另点保存；模板和左右对调要点【保存模板设置】。
+    按顺序循环播放，图片停留时长跟着模板走，视频播完即切，一律静音；
+    条目之间约 0.6 秒**淡出到黑再淡入**（设备端 mpv 脚本实现，不需要重新编码，模板属性区不受影响）；
 - **设备**页每行【属性】：`room=302` 之类的键值对，模板的 attribute 区域按 key 取值显示；
 - **模板与时段**页：改模板（表单，或【JSON】做更复杂的版式）、【设为全局】、配置时段计划
   `{模板, 星期, 起止时间}`，支持跨午夜；无命中回落全局模板；
-- 生效延迟 ≈ 设备的 `poll_interval_s`（局域网建议 5~10s，304 轮询开销可忽略）。
+- 生效延迟 ≈ 服务端 `server.json` 的 `poll_interval_s`（默认 10 秒，304 轮询开销可忽略）。
+
+**设备列表各列**：
+
+| 列 | 内容 | 多久更新 |
+|---|---|---|
+| 设备 | 编号、主机名/IP、程序版本，以及**解码方式 · SoC 温度 · 实际输出分辨率**（≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
+| 当前显示 | **等待刷新**（后台改了内容，设备还没来取）→ **正在刷新**（设备在下载新内容）→ **已显示最新内容**；离线设备显示"离线"。下面一行是内容来源与模板名；等待/正在刷新时再显示"设备 N 秒前联系过"，超过 2 个轮询周期没来就标黄"设备 N 秒未响应" | 设备每次轮询（`poll_interval_s`，默认 10 秒） |
+
+页面本身每 10 秒自动刷新一次（打开对话框时暂停），所以看到的状态最多再晚 10 秒；"N 秒前联系过"每秒走字。
+
+**在线/离线**：设备的任何请求（轮询、心跳、下载文件）都算联系过；约 3 个轮询周期（默认 30 秒）
+没有任何请求就显示离线（轮询间隔由服务端规定，设备照办）。
 
 **上传与转码**：
 
 | | 处理 | 为什么 |
 |---|---|---|
 | 图片 | png/jpg ≤ 20MB；超过 1440×900 的**自动等比缩小** | 设备只有 1GB 内存，解码后的位图是 宽×高×4 字节；在服务端缩一次，所有设备都省 |
-| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 原片码率动辄 10~20Mbps，即使能硬解，持续高码率也会让 H3 发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
+| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0，x264 `fastdecode`）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 设备是软解（见 3.4），原片动辄 1080p、10~20Mbps，软解不动、硬撑就发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
 
-转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后自动加到播放列表末尾
+转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后按你在列表里排好的位置加入播放
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
+
+服务端控制台（`journalctl -u display-server -f`）记录的是**服务端自己在做什么**，不刷设备心跳。
+服务端与设备端的日志一律是英文；后台界面上给运营方看的提示（如拒收原因）是中文：
+
+```
+upload started: device scr-0017, promo.mov (about 186.4MB)
+upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for transcoding as promo.mp4
+transcode started: device scr-0017, promo.mp4 (source 186.4MB, 62s)
+transcoding: device scr-0017, promo.mp4 50% (41s elapsed)
+transcode done: device scr-0017, promo.mp4 (186.4MB -> 19.2MB in 1m22s), added to playlist
+admin PUT /devices/scr-0017/media -> 200 (2ms)
+new content pushed: device scr-0017, version 3f9a…, 4 file(s) + template overlay
+device scr-0018 online (192.168.1.58, agent 1.3.0)
+```
+
+拒收（文件损坏、超限、ffmpeg 不可用）与转码失败也都会写明原因。
 
 服务端需要装 `ffmpeg`（`apt install ffmpeg`，或在 `server.json` 里用 `ffmpeg_path` 写绝对路径），
 并且要**以服务的运行用户能跑通**：`sudo -u display ffmpeg -version`。服务由 systemd 以 `display`
 用户、精简 PATH 启动，snap 版（`/snap/bin`，系统用户没有家目录会运行失败）、装在 `/root` 或家目录下、
 装在 `/opt` 等位置的 ffmpeg 在你的 shell 里能用，服务却用不了。不可用时后台顶部与
-`journalctl -u display-server` 会写明是哪一种原因；装好后约 30 秒内自动生效，无需重启服务端。
+`journalctl -u display-server` 会写明是哪一种原因；装好后重启服务端（`systemctl restart display-server`）生效。
 **没装时不能上传视频**（图片照常），管理后台顶部会醒目提示。未转码的原片码率控制不住，
 下发到设备就是过热隐患，所以宁可当场拒收。
 
@@ -455,7 +489,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 | 检查项 | 方法 |
 |---|---|
-| 分辨率 / 硬解 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示"硬解 xxx"、1440×900、温度正常 |
+| 分辨率 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示 1440×900、温度正常（播放视频时也低于 80°C） |
 | 开机自启 | `systemctl is-enabled display-agent` 为 enabled（安装脚本不会自动 enable） |
 | 网络连通 | `curl -sI http://<服务器>:9000` 有响应 |
 | 代理运行 | `systemctl status display-agent` active (running) |

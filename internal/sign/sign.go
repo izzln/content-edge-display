@@ -37,9 +37,11 @@ func Sign(secret, timestamp, method, path string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// Now 返回当前时间对应的 timestamp 字符串。
-func Now() string {
-	return strconv.FormatInt(time.Now().Unix(), 10)
+// Fingerprint 返回密钥指纹（sha256 前 8 位 hex）：设备日志里的 key= 与后台换密钥提示里显示的
+// 都是它，用来核对是不是同一把密钥，又不暴露密钥本身。
+func Fingerprint(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:4])
 }
 
 // Verify 校验签名及时间窗。

@@ -55,7 +55,7 @@ func TestTransportIgnoresProxyEnv(t *testing.T) {
 	t.Setenv("http_proxy", "http://127.0.0.1:1")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") }))
 	defer ts.Close()
-	c := &http.Client{Transport: newTransport(t.TempDir(), newServerClock())}
+	c := &http.Client{Transport: newTransport(t.TempDir(), newServerClock(), nil)}
 	resp, err := c.Get(strings.Replace(ts.URL, "127.0.0.1", "localhost", 1))
 	if err != nil {
 		t.Fatalf("应忽略代理直连：%v", err)
@@ -139,5 +139,44 @@ func TestRegisterRetryKeepsFeedingWatchdog(t *testing.T) {
 	a.registerLoop(ctx) // 第一次失败后要等 5 秒才重试；这期间看门狗不能断
 	if n := count(); n < 10 {
 		t.Fatalf("重试等待期间应持续喂狗，0.5 秒内只收到 %d 次", n)
+	}
+}
+
+// 轮询/心跳间隔跟着服务端走；离谱的值收进合理范围，没带头（旧版服务端）就保持原样。
+func TestScheduleFollowsServer(t *testing.T) {
+	var poll, hb string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if poll != "" {
+			w.Header().Set("X-Poll-Interval", poll)
+			w.Header().Set("X-Heartbeat-Interval", hb)
+		}
+	}))
+	defer srv.Close()
+	sched := newSchedule()
+	c := &http.Client{Transport: newTransport(t.TempDir(), newServerClock(), sched)}
+	get := func() {
+		resp, err := c.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if sched.Poll() != 10*time.Second || sched.Heartbeat() != 60*time.Second {
+		t.Fatalf("联系上服务端之前用默认 10s/60s：%s %s", sched.Poll(), sched.Heartbeat())
+	}
+	poll, hb = "5", "120"
+	get()
+	if sched.Poll() != 5*time.Second || sched.Heartbeat() != 120*time.Second {
+		t.Fatalf("应照服务端设定：%s %s", sched.Poll(), sched.Heartbeat())
+	}
+	poll, hb = "0", "999999"
+	get()
+	if sched.Poll() != time.Second || sched.Heartbeat() != time.Hour {
+		t.Fatalf("越界值应收进范围：%s %s", sched.Poll(), sched.Heartbeat())
+	}
+	poll = ""
+	get()
+	if sched.Poll() != time.Second {
+		t.Fatal("没带头时应保持上次的值")
 	}
 }

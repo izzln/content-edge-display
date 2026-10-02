@@ -116,10 +116,10 @@ func TestEndToEnd(t *testing.T) {
 	if !changed {
 		t.Fatal("expected manifest change after adding file")
 	}
-	if got := p.NowPlaying(); !strings.HasSuffix(got, "_01_intro.jpg") {
+	if got := nowPlaying(p); !strings.HasSuffix(got, "_01_intro.jpg") {
 		t.Fatalf("player not loaded: now playing %q", got)
 	}
-	if data, err := os.ReadFile(p.NowPlaying()); err != nil || string(data) != "image-content" {
+	if data, err := os.ReadFile(nowPlaying(p)); err != nil || string(data) != "image-content" {
 		t.Fatalf("cached file wrong: %v %q", err, data)
 	}
 
@@ -138,7 +138,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// 5. 内容替换 → 旧缓存被清理
-	oldCached := p.NowPlaying()
+	oldCached := nowPlaying(p)
 	os.Remove(filepath.Join(devDir, "01_intro.jpg"))
 	os.WriteFile(filepath.Join(devDir, "02_video.mp4"), []byte("video-content"), 0o644)
 	changed, err = a.PollOnce(ctx)
@@ -151,7 +151,7 @@ func TestEndToEnd(t *testing.T) {
 	if _, err := os.Stat(oldCached); !os.IsNotExist(err) {
 		t.Fatalf("old cache not cleaned up: %v", err)
 	}
-	if got := p.NowPlaying(); !strings.HasSuffix(got, "_02_video.mp4") {
+	if got := nowPlaying(p); !strings.HasSuffix(got, "_02_video.mp4") {
 		t.Fatalf("unexpected now playing: %q", got)
 	}
 }
@@ -175,8 +175,8 @@ func TestHeartbeatVisibleInAdmin(t *testing.T) {
 	if len(statuses) != 1 || !statuses[0].Online {
 		t.Fatalf("device not online in admin view: %+v", statuses)
 	}
-	if statuses[0].Heartbeat.Version != a.Version() {
-		t.Fatalf("version mismatch: admin=%q agent=%q", statuses[0].Heartbeat.Version, a.Version())
+	if hb := statuses[0].Heartbeat; hb == nil || hb.AgentVersion != Version {
+		t.Fatalf("heartbeat not reported: %+v", hb)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestDownloadResume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := a.download(ctx, item, dst); err != nil {
+	if err := a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(dst)
@@ -220,7 +220,7 @@ func TestDownloadRejectsBadChecksum(t *testing.T) {
 	item.SHA256 = strings.Repeat("f", 64) // 篡改期望校验和
 
 	dst := filepath.Join(a.mediaDir(), "ffffffffffff_a.jpg")
-	if err := a.download(ctx, item, dst); err == nil {
+	if err := a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst); err == nil {
 		t.Fatal("expected checksum error")
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
@@ -250,8 +250,8 @@ func TestRestoreFromLocalCache(t *testing.T) {
 	if a2.Version() != ver {
 		t.Fatalf("restored version mismatch: %q vs %q", a2.Version(), ver)
 	}
-	if !strings.HasSuffix(p2.NowPlaying(), "_a.jpg") {
-		t.Fatalf("player not restored: %q", p2.NowPlaying())
+	if !strings.HasSuffix(nowPlaying(p2), "_a.jpg") {
+		t.Fatalf("player not restored: %q", nowPlaying(p2))
 	}
 	_ = p
 }
@@ -334,4 +334,12 @@ func TestLayoutBecomesOverlayScene(t *testing.T) {
 	if p2.Scene().Overlay == nil {
 		t.Fatal("重启恢复后叠加层丢失，画面会变成整屏视频")
 	}
+}
+
+// nowPlaying 返回 null 播放器当前画面的第一个条目路径。
+func nowPlaying(p *player.Null) string {
+	if items := p.Scene().Items; len(items) > 0 {
+		return items[0].Path
+	}
+	return ""
 }

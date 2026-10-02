@@ -7,8 +7,6 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/png"
-	"io"
 	"os"
 	"sort"
 	"strings"
@@ -40,7 +38,7 @@ func New(fontPath string) (*Renderer, error) {
 	}
 	f, err := opentype.Parse(data)
 	if err != nil {
-		return nil, fmt.Errorf("font_path: 解析字体失败: %w", err)
+		return nil, fmt.Errorf("font_path: cannot parse font: %w", err)
 	}
 	return &Renderer{font: f}, nil
 }
@@ -109,29 +107,20 @@ func (r *Renderer) RenderTestCard(w, h int, deviceID string, attrs map[string]st
 	canvas := image.NewRGBA(image.Rect(0, 0, w, h))
 	fill(canvas, canvas.Bounds(), color.RGBA{0x00, 0x66, 0xCC, 0xFF})
 
-	lines := []struct {
+	type line struct {
 		text string
 		size int
-	}{
-		{"测 试", h / 4},
-		{deviceID, h / 12},
 	}
-	var attrLine []string
-	for k, v := range attrs {
-		attrLine = append(attrLine, k+"="+v)
+	lines := []line{{"测 试", h / 4}, {deviceID, h / 12}}
+	if len(attrs) > 0 {
+		var kv []string
+		for k, v := range attrs {
+			kv = append(kv, k+"="+v)
+		}
+		sort.Strings(kv) // map 遍历无序，排序保证同一输入渲染结果字节级一致（版本号稳定）
+		lines = append(lines, line{strings.Join(kv, "  "), h / 18})
 	}
-	if len(attrLine) > 0 {
-		// map 遍历无序，排序保证同一输入渲染结果字节级一致（版本号稳定）。
-		sort.Strings(attrLine)
-		lines = append(lines, struct {
-			text string
-			size int
-		}{strings.Join(attrLine, "  "), h / 18})
-	}
-	lines = append(lines, struct {
-		text string
-		size int
-	}{"至 " + until.Format("15:04:05"), h / 20})
+	lines = append(lines, line{"至 " + until.Format("15:04:05"), h / 20})
 
 	total := 0
 	for _, l := range lines {
@@ -147,11 +136,6 @@ func (r *Renderer) RenderTestCard(w, h int, deviceID string, attrs map[string]st
 		y += l.size * 3 / 2
 	}
 	return canvas, nil
-}
-
-// EncodePNG 把渲染结果写为 PNG。
-func EncodePNG(w io.Writer, img image.Image) error {
-	return png.Encode(w, img)
 }
 
 // drawText 在 rect 内绘制单行文字（水平按 align，垂直居中）。

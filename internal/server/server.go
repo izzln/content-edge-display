@@ -3,6 +3,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,12 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/png"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,9 +29,6 @@ import (
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
 )
-
-// OnlineWindow 内有心跳视为设备在线。
-const OnlineWindow = 5 * time.Minute
 
 // placeholderToken 是配置样例里的占位口令。仓库是公开的，样例值人人可见，
 // 带着它启动等于没有口令，所以直接拒绝启动。
@@ -50,6 +49,27 @@ type Config struct {
 	// /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin）。不可用时不能上传视频（后台会提示原因），
 	// 因为未转码的原片码率过高，会让设备过热关机。
 	FFmpegPath string `json:"ffmpeg_path,omitempty"`
+	// 设备的轮询与心跳间隔：在这里统一规定，设备从响应头学到后照办（见 manifest.HeaderPollInterval）。
+	// 轮询决定后台改动多快上屏、多快发现设备离线；心跳只上报温度/硬解等健康数据。
+	PollIntervalS      int `json:"poll_interval_s,omitempty"`      // 默认 10
+	HeartbeatIntervalS int `json:"heartbeat_interval_s,omitempty"` // 默认 60
+}
+
+// checkIntervals 填充轮询/心跳间隔的默认值并检查范围。
+func (c *Config) checkIntervals() error {
+	if c.PollIntervalS == 0 {
+		c.PollIntervalS = manifest.DefaultPollIntervalS
+	}
+	if c.HeartbeatIntervalS == 0 {
+		c.HeartbeatIntervalS = manifest.DefaultHeartbeatIntervalS
+	}
+	if c.PollIntervalS < manifest.MinPollIntervalS || c.PollIntervalS > manifest.MaxPollIntervalS {
+		return fmt.Errorf("config: poll_interval_s must be %d-%d seconds", manifest.MinPollIntervalS, manifest.MaxPollIntervalS)
+	}
+	if c.HeartbeatIntervalS < manifest.MinHeartbeatIntervalS || c.HeartbeatIntervalS > manifest.MaxHeartbeatIntervalS {
+		return fmt.Errorf("config: heartbeat_interval_s must be %d-%d seconds", manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS)
+	}
+	return nil
 }
 
 // resolvePath 把相对路径按 base 目录展开；绝对路径与空值原样返回。
@@ -94,49 +114,72 @@ func LoadConfig(path string) (*Config, error) {
 	if strings.ContainsRune(cfg.FFmpegPath, os.PathSeparator) {
 		cfg.FFmpegPath = resolvePath(base, cfg.FFmpegPath)
 	}
+	if err := cfg.checkIntervals(); err != nil {
+		return nil, err
+	}
 	if cfg.EnrollToken == "" {
-		return nil, errors.New("config: enroll_token 不能为空，否则没有任何设备能接入（用 make tokens 生成）")
+		return nil, errors.New("config: enroll_token is empty, no device could enroll (generate one with make tokens)")
 	}
 	for name, tok := range map[string]string{"admin_token": cfg.AdminToken, "enroll_token": cfg.EnrollToken} {
 		if tok == placeholderToken {
-			return nil, fmt.Errorf("config: %s 还是配置样例里的占位值 %q，这个值是公开的，请用 make tokens 生成后替换",
+			return nil, fmt.Errorf("config: %s is still the public placeholder %q from the sample config; generate one with make tokens",
 				name, placeholderToken)
 		}
 	}
 	return &cfg, nil
 }
 
-// Heartbeat 是设备心跳上报体。
-type Heartbeat struct {
-	Version    string `json:"version"`
-	UptimeS    int64  `json:"uptime"`
-	DiskFreeMB int64  `json:"disk_free_mb"`
-	TempC      int    `json:"temp_c,omitempty"`
-	Playing    string `json:"playing"`
-	PlayerVer  string `json:"player_ver"`
-	IP         string `json:"ip,omitempty"`
-	// HWDec 是设备端 mpv 实际使用的硬解方式；"no" = 软解（H3 上带不动 1440×900，
-	// 会卡顿发热甚至过热关机），空串 = 问不到（如 null 播放器）。
-	HWDec string `json:"hwdec,omitempty"`
-	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
-	OutputW int `json:"output_w,omitempty"`
-	OutputH int `json:"output_h,omitempty"`
-}
-
 // DeviceStatus 是管理接口返回的设备状态。
 type DeviceStatus struct {
 	ID           string              `json:"id"`
 	Online       bool                `json:"online"`
-	LastSeen     *time.Time          `json:"last_seen,omitempty"`
-	Heartbeat    *Heartbeat          `json:"heartbeat,omitempty"`
+	LastSeen     *time.Time          `json:"last_seen,omitempty"` // 最近一次任何请求（轮询/心跳/下载）
+	PollS        int                 `json:"poll_interval_s"`     // 设备多久该来一次
+	OfflineS     int                 `json:"offline_after_s"`     // 多久没来算离线
+	Heartbeat    *manifest.Heartbeat `json:"heartbeat,omitempty"`
 	Attrs        map[string]string   `json:"attrs"`
 	Display      store.DisplayConfig `json:"display"`
 	TestUntil    *time.Time          `json:"test_until,omitempty"`
 	ActiveSource string              `json:"active_source"` // test/override/schedule/global
+	Sync         string              `json:"sync"`          // offline/waiting/syncing/latest，见 syncState
 	ActiveTpl    string              `json:"active_template,omitempty"`
-	AgentVersion string              `json:"agent_version,omitempty"`
 	UpdateTarget *store.UpdateTarget `json:"update_target,omitempty"`
 	HW           *store.Device       `json:"hw,omitempty"`
+}
+
+// deviceSync 记录设备最近一次取清单时的情况。设备每次轮询都带着自己已应用的版本
+// （If-None-Match），所以不用等心跳就能知道它显示的是不是最新内容。
+type deviceSync struct {
+	expected string // 那次轮询时服务端算出的版本
+	applied  string // 设备当时已应用的版本
+	served   string // 最近一次下发（200）给它的版本
+	key      string // 那次轮询时这台设备显示输入的指纹，见 content.key
+}
+
+// 设备内容状态。
+const (
+	syncOffline = "offline" // 设备离线
+	syncWaiting = "waiting" // 配置改过了，设备还没来取（≤ 一个轮询周期）
+	syncSyncing = "syncing" // 设备已取到新清单，正在下载/切换
+	syncLatest  = "latest"  // 设备显示的就是最新内容
+)
+
+// syncState 判断设备的内容状态（调用方持有 s.mu）。key 是这台设备显示输入的当前指纹（content.key），
+// 与它上次轮询时的指纹不同，说明它该显示的内容变了而它还没来取。只看这台设备自己的输入：
+// 改别的设备、改没被用到的模板都不影响它；时段计划到点切换、测试屏到期也能及时体现。
+func (s *Server) syncState(deviceID string, online bool, key string) string {
+	if !online {
+		return syncOffline
+	}
+	st, ok := s.sync[deviceID]
+	switch {
+	case !ok || st.key != key:
+		return syncWaiting
+	case st.applied != st.expected:
+		return syncSyncing
+	default:
+		return syncLatest
+	}
 }
 
 // Server 持有配置与运行期状态。
@@ -149,15 +192,16 @@ type Server struct {
 
 	mu         sync.Mutex
 	lastSeen   map[string]time.Time
-	lastHB     map[string]Heartbeat
-	authLogged map[string]time.Time // 认证失败日志节流
+	lastHB     map[string]manifest.Heartbeat
+	sync       map[string]deviceSync // 设备取内容的进度（后台"当前显示"列）
+	authLogged map[string]time.Time  // 认证失败日志节流
 
 	encMu      sync.Mutex
-	encoder    videoEncoder                 // nil 表示当前没有可用的 ffmpeg：不收视频
-	encoderErr string                       // 不可用的原因（日志与后台提示用）
-	encTried   time.Time                    // 上次探测时间
-	findEnc    func() (videoEncoder, error) // 探测 ffmpeg（测试可替换）
+	encoder    videoEncoder // nil 表示没有可用的 ffmpeg：不收视频
+	encoderErr string       // 不可用的原因（日志与后台提示用）
 	jobs       *jobQueue
+	uploadMu   sync.Mutex
+	uploading  map[string]bool // 正在上传的 设备/文件名，见 claimMediaName
 	stop       context.CancelFunc
 	stopped    chan struct{} // 转码协程退出后关闭
 
@@ -166,6 +210,9 @@ type Server struct {
 
 // New 创建服务端：加载状态文件、准备数据目录、初始化渲染器。
 func New(cfg *Config) (*Server, error) {
+	if err := cfg.checkIntervals(); err != nil {
+		return nil, err
+	}
 	st, err := store.Open(filepath.Join(cfg.DataDir, "state.json"))
 	if err != nil {
 		return nil, err
@@ -182,7 +229,8 @@ func New(cfg *Config) (*Server, error) {
 		store:      st,
 		loc:        loc,
 		lastSeen:   make(map[string]time.Time),
-		lastHB:     make(map[string]Heartbeat),
+		lastHB:     make(map[string]manifest.Heartbeat),
+		sync:       make(map[string]deviceSync),
 		authLogged: make(map[string]time.Time),
 		now:        time.Now,
 	}
@@ -199,21 +247,23 @@ func New(cfg *Config) (*Server, error) {
 		return nil, err
 	}
 	if cfg.FontPath == "" {
-		log.Printf("warning: font_path 未配置，模板/测试卡中的中文将无法正常显示（请安装 CJK 字体并配置，如 fonts-noto-cjk）")
+		log.Printf("warning: font_path is not set; CJK text in templates and test cards will render as boxes (install a CJK font such as fonts-noto-cjk and set font_path)")
 	}
 	if err := s.seedDefaults(); err != nil {
 		return nil, err
 	}
 
 	s.jobs = newJobQueue()
-	s.findEnc = func() (videoEncoder, error) {
-		enc, err := transcode.Find(cfg.FFmpegPath)
-		if err != nil {
-			return nil, err // 注意别把 nil 的 *Encoder 包进接口
-		}
-		return enc, nil
+	// ffmpeg 只在启动时检测一次；装好或改了 ffmpeg_path 后重启服务端生效。
+	if enc, err := transcode.Find(cfg.FFmpegPath); err != nil {
+		s.encoderErr = err.Error()
+		log.Printf("warning: ffmpeg unavailable, video uploads are disabled: %v. "+
+			"Run apt install ffmpeg, or set ffmpeg_path in server.json to an absolute path "+
+			"executable by the service user, then restart the server", err)
+	} else {
+		s.encoder = enc
+		log.Printf("video transcoding enabled: %s", enc.Version())
 	}
-	s.videoEncoder()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.stop, s.stopped = cancel, make(chan struct{})
 	go func() {
@@ -223,39 +273,20 @@ func New(cfg *Config) (*Server, error) {
 	return s, nil
 }
 
-// encoderRetry 是 ffmpeg 不可用时重新探测的最短间隔：运营方装好 ffmpeg 后不用重启服务端。
-const encoderRetry = 30 * time.Second
-
-// videoEncoder 返回可用的转码器，没有则为 nil。不可用时按 encoderRetry 节流重新探测。
+// videoEncoder 返回可用的转码器，没有则为 nil。
 func (s *Server) videoEncoder() videoEncoder {
 	s.encMu.Lock()
 	defer s.encMu.Unlock()
-	if s.encoder != nil || s.findEnc == nil || time.Since(s.encTried) < encoderRetry {
-		return s.encoder
-	}
-	s.encTried = time.Now()
-	enc, err := s.findEnc()
-	if err != nil {
-		if s.encoderErr != err.Error() { // 同一原因只记一次，别刷屏
-			log.Printf("warning: ffmpeg 不可用，暂不能上传视频：%v。"+
-				"请 apt install ffmpeg，或在 server.json 的 ffmpeg_path 里写 ffmpeg 的绝对路径"+
-				"（该文件须能被服务的运行用户执行）", err)
-		}
-		s.encoderErr = err.Error()
-		return nil
-	}
-	s.encoder, s.encoderErr = enc, ""
-	log.Printf("视频转码已启用：%s", enc.Version())
-	return enc
+	return s.encoder
 }
 
-// setEncoder 直接指定转码器（测试用）；nil 表示模拟"没有 ffmpeg"且不再探测。
+// setEncoder 直接指定转码器（测试用）；nil 表示模拟"没有 ffmpeg"。
 func (s *Server) setEncoder(enc videoEncoder) {
 	s.encMu.Lock()
 	defer s.encMu.Unlock()
-	s.encoder, s.findEnc = enc, nil
+	s.encoder, s.encoderErr = enc, ""
 	if enc == nil {
-		s.encoderErr = "测试：未配置转码器"
+		s.encoderErr = "test: no encoder configured"
 	}
 }
 
@@ -272,10 +303,10 @@ func (s *Server) Close() {
 func (s *Server) seedDefaults() error {
 	return s.store.Update(func(st *store.State) error {
 		if t, seeded := store.SeedDefaultTemplate(st); seeded {
-			log.Printf("首次启动：已创建默认模板 %s（%s）", t.ID, t.Name)
+			log.Printf("first start: created default template %s (%s)", t.ID, t.Name)
 		}
 		if store.EnsureGlobalTemplate(st) {
-			log.Printf("全局默认模板设为 %s", st.Global.TemplateID)
+			log.Printf("global default template set to %s", st.Global.TemplateID)
 		}
 		return nil
 	})
@@ -299,13 +330,10 @@ func (s *Server) Handler() http.Handler {
 
 // allDevices 返回全部已注册设备，按 ID 排序。
 func (s *Server) allDevices() []store.Device {
-	out := []store.Device{}
+	var out []store.Device
 	s.store.View(func(st *store.State) {
-		for _, d := range st.Devices {
-			out = append(out, d)
-		}
+		out = sortedValues(st.Devices, func(a, b store.Device) int { return strings.Compare(a.ID, b.ID) })
 	})
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -327,6 +355,36 @@ func (s *Server) authenticate(r *http.Request) (store.Device, error) {
 	return dev, nil
 }
 
+// announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳（设备照办，见 manifest.HeaderPollInterval）。
+func (s *Server) announceSchedule(w http.ResponseWriter) {
+	w.Header().Set(manifest.HeaderPollInterval, strconv.Itoa(s.cfg.PollIntervalS))
+	w.Header().Set(manifest.HeaderHeartbeatInterval, strconv.Itoa(s.cfg.HeartbeatIntervalS))
+}
+
+// offlineAfter 返回设备多久没有任何请求就算离线：约 3 个轮询周期（轮询间隔由服务端规定，
+// 设备照办），至少 30 秒。要连续几次没来才算，偶尔一次请求失败不会让状态来回跳。
+func (s *Server) offlineAfter() time.Duration {
+	return max(3*time.Duration(s.cfg.PollIntervalS)*time.Second, 30*time.Second)
+}
+
+// noteContact 记下设备最近一次联系，用于判断在线。任何签名通过的请求都算：轮询、心跳、下载文件——
+// 设备下载大文件时轮询会暂停，只看轮询的话"正在刷新"的设备反而会被判离线。
+func (s *Server) noteContact(dev store.Device, r *http.Request) {
+	now := s.now()
+	s.mu.Lock()
+	seen, known := s.lastSeen[dev.ID]
+	back := !known || now.Sub(seen) > s.offlineAfter()
+	s.lastSeen[dev.ID] = now
+	s.mu.Unlock()
+	if back {
+		ip := dev.IP
+		if ip == "" {
+			ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+		}
+		log.Printf("device %s online (%s, agent %s)", dev.ID, ip, cmp.Or(dev.AgentVersion, "?"))
+	}
+}
+
 // deviceAuth 校验设备请求；失败时回 401 并说明原因、记日志（同一设备同一原因每分钟最多一条）。
 //
 // 只回一句 "unauthorized" 的话，现场根本无从判断是时钟不准、密钥不对还是设备被删了——
@@ -334,6 +392,8 @@ func (s *Server) authenticate(r *http.Request) (store.Device, error) {
 func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Device, bool) {
 	dev, err := s.authenticate(r)
 	if err == nil {
+		s.noteContact(dev, r)
+		s.announceSchedule(w)
 		return dev, true
 	}
 	id := r.Header.Get(sign.HeaderDeviceID)
@@ -350,7 +410,7 @@ func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Devic
 	key := id + "|" + strings.SplitN(reason, ":", 2)[0]
 	if s.now().Sub(s.authLogged[key]) >= time.Minute {
 		s.authLogged[key] = s.now()
-		log.Printf("auth: rejected device=%q %s %s: %s", id, r.Method, r.URL.Path, reason)
+		log.Printf("auth rejected: device %q %s %s: %s", id, r.Method, r.URL.Path, reason)
 	}
 	s.mu.Unlock()
 	http.Error(w, "unauthorized: "+reason, http.StatusUnauthorized)
@@ -371,7 +431,7 @@ func (s *Server) serveDeviceFile(dirOf func(deviceID string) string) http.Handle
 			return
 		}
 		name := r.PathValue("file")
-		if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") || strings.Contains(name, "\\") {
+		if !manifest.SafeFileName(name) {
 			http.Error(w, "bad file name", http.StatusBadRequest)
 			return
 		}
@@ -388,25 +448,43 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	m, err := s.buildManifest(dev)
+	c, err := s.content(dev.ID, s.now())
+	var m *manifest.Manifest
+	if err == nil {
+		m, err = s.buildManifest(dev.ID, c)
+	}
 	if err != nil {
-		log.Printf("manifest build for %s failed: %v", dev.ID, err)
+		log.Printf("manifest build failed: device %s: %v", dev.ID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	etag := `"` + m.Version + `"`
-	w.Header().Set("ETag", etag)
+	applied := strings.Trim(strings.TrimSpace(r.Header.Get("If-None-Match")), `"`)
+	s.mu.Lock()
+	prev := s.sync[dev.ID]
+	st := deviceSync{expected: m.Version, applied: applied, served: prev.served, key: c.key()}
+	if applied != m.Version {
+		st.served = m.Version
+	}
+	s.sync[dev.ID] = st
+	s.mu.Unlock()
+
+	w.Header().Set("ETag", `"`+m.Version+`"`)
 	w.Header().Set("Cache-Control", "no-cache")
-	if inm := strings.TrimSpace(r.Header.Get("If-None-Match")); inm != "" {
-		if inm == etag || inm == m.Version {
-			w.WriteHeader(http.StatusNotModified)
-			return
+	if applied == m.Version {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if prev.served != m.Version { // 下载失败重试时会重复取同一版本，只记第一次
+		what := fmt.Sprintf("%d file(s)", len(m.Items))
+		if m.Layout != nil {
+			what += " + template overlay"
 		}
+		if len(m.Commands) > 0 {
+			what += fmt.Sprintf(", %d command(s)", len(m.Commands))
+		}
+		log.Printf("new content pushed: device %s, version %s, %s", dev.ID, m.Version, what)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(m); err != nil {
-		log.Printf("manifest encode for %s failed: %v", dev.ID, err)
-	}
+	writeJSON(w, m)
 }
 
 // 渲染画布尺寸（与显示屏一致）。
@@ -420,13 +498,13 @@ func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Temp
 		if t, found := s.store.Template(disp.TemplateID); found {
 			return t, "override", true
 		}
-		log.Printf("device %s: override template %q missing, ignoring", deviceID, disp.TemplateID)
+		log.Printf("device %s: template %q no longer exists, ignoring", deviceID, disp.TemplateID)
 	}
 	if sc, hit := store.ActiveSchedule(s.store.Schedules(), now.In(s.loc)); hit {
 		if t, found := s.store.Template(sc.TemplateID); found {
 			return t, "schedule", true
 		}
-		log.Printf("schedule %s: template %q missing, ignoring", sc.ID, sc.TemplateID)
+		log.Printf("schedule %s: template %q no longer exists, ignoring", sc.ID, sc.TemplateID)
 	}
 	if t, found := s.store.Template(s.store.Global().TemplateID); found {
 		return t, "global", true
@@ -434,78 +512,117 @@ func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Temp
 	return store.Template{}, "", false
 }
 
-// mediaItems 构建设备媒体区的播放条目（顺序见 playlist）；模板没有媒体区时为空。
-func (s *Server) mediaItems(deviceID string, tpl store.Template) ([]manifest.Item, error) {
-	if _, ok := tpl.MediaRegion(); !ok {
-		return nil, nil
-	}
-	names, err := s.playlist(deviceID)
-	if err != nil {
-		return nil, err
-	}
-	return manifest.BuildItems(s.deviceMediaDir(deviceID), deviceID, names, tpl.ImageDurationS, s.hashes)
+// content 是决定一台设备此刻该显示什么的全部输入。清单只由它生成（buildManifest），
+// 后台的"等待刷新"也只看它的指纹（key）——两边用的是同一份数据，指纹不可能漏掉清单的输入。
+type content struct {
+	TestUntil time.Time         `json:"test_until,omitzero"` // 非零：显示测试卡
+	Source    string            `json:"source"`              // test/override/schedule/global
+	Template  store.Template    `json:"template"`
+	Attrs     map[string]string `json:"attrs"`
+	Mirror    bool              `json:"mirror"`
+	Media     []mediaFile       `json:"media"` // 媒体区的播放列表；模板没有媒体区时为空
+	Update    *manifest.Command `json:"update,omitempty"`
 }
 
-// buildManifest 生成设备清单：测试屏 > 模板（专属/时段/全局），并附带待执行指令。
+// mediaFile 是播放列表里的一个文件。带上大小与修改时间：同名文件被替换也算内容变了。
+type mediaFile struct {
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mtime"`
+}
+
+// content 汇总设备此刻的显示输入。只读状态与文件元数据，不渲染、不算哈希，后台每次刷新都能算。
+func (s *Server) content(deviceID string, now time.Time) (content, error) {
+	c := content{Attrs: s.store.Attrs(deviceID)}
+	if cmd, ok := s.updateCommand(deviceID, now); ok {
+		c.Update = &cmd
+	}
+	if until := s.store.TestUntil(deviceID); now.Before(until) {
+		c.TestUntil, c.Source = until, "test"
+		return c, nil
+	}
+	tpl, source, ok := s.resolveTemplate(deviceID, now)
+	if !ok {
+		return c, errors.New("no usable template (global default template missing)")
+	}
+	c.Template, c.Source, c.Mirror = tpl, source, s.store.Display(deviceID).Mirror
+	if _, ok := tpl.MediaRegion(); ok {
+		names, err := s.playlist(deviceID)
+		if err != nil {
+			return c, err
+		}
+		dir := s.deviceMediaDir(deviceID)
+		for _, n := range names {
+			if fi, err := os.Stat(filepath.Join(dir, n)); err == nil {
+				c.Media = append(c.Media, mediaFile{Name: n, Size: fi.Size(), ModTime: fi.ModTime()})
+			}
+		}
+	}
+	return c, nil
+}
+
+// key 是 content 的指纹。
+func (c content) key() string {
+	b, _ := json.Marshal(c) // map 按键排序输出，结果确定
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
+// buildManifest 由显示输入生成设备清单：测试卡，或模板（+ 媒体区播放列表），并附带待执行指令。
 //
 // 模板有媒体区且媒体区有内容时下发 layout：清单条目就是媒体文件本身（视频不转码），
 // 模板的静态部分作为“媒体区挖空”的叠加图随 layout 下发，由设备端贴在画面上。
-// 模板没有媒体区、或媒体区还没放内容时，退回到把整块模板渲染成一张整屏图的成熟路径，
+// 模板没有媒体区、或媒体区还没放内容时，把整块模板渲染成一张整屏图，
 // 这样“刚建好还没传内容”的设备显示的是版式而不是黑屏。
-func (s *Server) buildManifest(dev store.Device) (*manifest.Manifest, error) {
-	now := s.now()
+func (s *Server) buildManifest(deviceID string, c content) (*manifest.Manifest, error) {
 	var (
-		items  []manifest.Item
+		img    image.Image
+		kind   string // 渲染图的种类：test 测试卡 / tpl 整屏模板 / ovl 叠加图
+		media  []manifest.Item
 		layout *manifest.Layout
-		keep   []string // 本份清单用到的渲染文件名
 	)
-
-	if until := s.store.TestUntil(dev.ID); now.Before(until) {
-		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, s.store.Attrs(dev.ID), until.In(s.loc))
+	if !c.TestUntil.IsZero() {
+		card, err := s.renderer.RenderTestCard(canvasW, canvasH, deviceID, c.Attrs, c.TestUntil.In(s.loc))
 		if err != nil {
 			return nil, fmt.Errorf("render test card: %w", err)
 		}
-		it, err := s.renderedItem(dev.ID, "test", img)
-		if err != nil {
-			return nil, err
-		}
-		items, keep = []manifest.Item{it}, []string{it.Name}
-	} else if tpl, _, ok := s.resolveTemplate(dev.ID, now); !ok {
-		return nil, errors.New("没有可用的模板（全局默认模板缺失）")
+		img, kind = card, "test"
 	} else {
-		media, err := s.mediaItems(dev.ID, tpl)
+		names := make([]string, len(c.Media))
+		for i, f := range c.Media {
+			names[i] = f.Name
+		}
+		var err error
+		media, err = manifest.BuildItems(s.deviceMediaDir(deviceID), deviceID, names, c.Template.ImageDurationS, s.hashes)
 		if err != nil {
 			return nil, err
 		}
-		rendered, err := s.renderer.Render(tpl, s.store.Attrs(dev.ID), s.store.Display(dev.ID).Mirror, len(media) > 0)
+		rendered, err := s.renderer.Render(c.Template, c.Attrs, c.Mirror, len(media) > 0)
 		if err != nil {
-			return nil, fmt.Errorf("render template %s: %w", tpl.ID, err)
+			return nil, fmt.Errorf("render template %s: %w", c.Template.ID, err)
 		}
-		kind := "tpl" // 整屏静态图
-		if len(media) > 0 {
-			kind = "ovl" // 叠加图
-		}
-		png, err := s.renderedItem(dev.ID, kind, rendered.Image)
-		if err != nil {
-			return nil, err
-		}
-		keep = []string{png.Name}
+		img, kind = rendered.Image, "tpl"
 		if len(media) > 0 {
 			r := rendered.MediaRegion
-			items, layout = media, &manifest.Layout{
-				CanvasW: tpl.W, CanvasH: tpl.H,
-				Media:   manifest.Rect{X: r.Min.X, Y: r.Min.Y, W: r.Dx(), H: r.Dy()},
-				Overlay: png,
+			kind, layout = "ovl", &manifest.Layout{
+				CanvasW: c.Template.W, CanvasH: c.Template.H,
+				Media: manifest.Rect{X: r.Min.X, Y: r.Min.Y, W: r.Dx(), H: r.Dy()},
 			}
-		} else {
-			items = []manifest.Item{png}
 		}
 	}
-	s.pruneRendered(dev.ID, keep)
+	png, err := s.renderedItem(deviceID, kind, img)
+	if err != nil {
+		return nil, err
+	}
+	s.pruneRendered(deviceID, png.Name)
 
+	items := []manifest.Item{png}
+	if layout != nil {
+		items, layout.Overlay = media, png
+	}
 	cmds := []manifest.Command{}
-	if cmd, ok := s.updateCommand(dev.ID, now); ok {
-		cmds = append(cmds, cmd)
+	if c.Update != nil {
+		cmds = append(cmds, *c.Update)
 	}
 	return &manifest.Manifest{
 		Version:  manifest.Version(items, cmds, layout),
@@ -522,7 +639,7 @@ func (s *Server) buildManifest(dev store.Device) (*manifest.Manifest, error) {
 // 要么是叠加图（不进播放列表）。媒体区里图片的停留时长来自模板，写在媒体条目上。
 func (s *Server) renderedItem(deviceID, kind string, img image.Image) (manifest.Item, error) {
 	var buf bytes.Buffer
-	if err := render.EncodePNG(&buf, img); err != nil {
+	if err := png.Encode(&buf, img); err != nil {
 		return manifest.Item{}, err
 	}
 	sum := sha256.Sum256(buf.Bytes())
@@ -552,25 +669,19 @@ func (s *Server) renderedItem(deviceID, kind string, img image.Image) (manifest.
 	}, nil
 }
 
-// pruneRendered 删除设备渲染目录里本份清单不再引用的 PNG
-// （模板改了、属性改了、或在“整屏图”与“叠加图”之间切换后留下的旧文件）。
-func (s *Server) pruneRendered(deviceID string, keep []string) {
+// pruneRendered 删除设备渲染目录里除 keep 之外的 PNG
+// （模板改了、属性改了、或在测试卡/整屏图/叠加图之间切换后留下的旧文件）。
+func (s *Server) pruneRendered(deviceID, keep string) {
 	dir := filepath.Join(s.renderedDir(), deviceID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	alive := make(map[string]bool, len(keep))
-	for _, n := range keep {
-		alive[n] = true
-	}
 	for _, e := range entries {
-		n := e.Name()
 		// .tmp 是别的请求正在写入的文件，不碰。
-		if alive[n] || strings.HasSuffix(n, ".tmp") {
-			continue
+		if n := e.Name(); n != keep && !strings.HasSuffix(n, ".tmp") {
+			os.Remove(filepath.Join(dir, n))
 		}
-		os.Remove(filepath.Join(dir, n))
 	}
 }
 
@@ -579,31 +690,26 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var hb Heartbeat
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&hb); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	var hb manifest.Heartbeat
+	if !decodeJSON(w, r, 64<<10, &hb) {
 		return
 	}
 	s.mu.Lock()
-	s.lastSeen[dev.ID] = s.now()
 	s.lastHB[dev.ID] = hb
 	s.mu.Unlock()
 	// 持久化程序版本/IP（仅变化时写盘）：服务端重启后升级状态仍可判断。
-	if dev.AgentVersion != hb.PlayerVer || (hb.IP != "" && dev.IP != hb.IP) {
+	if dev.AgentVersion != hb.AgentVersion || (hb.IP != "" && dev.IP != hb.IP) {
 		if err := s.store.Update(func(st *store.State) error {
 			d := st.Devices[dev.ID]
-			d.AgentVersion = hb.PlayerVer
+			d.AgentVersion = hb.AgentVersion
 			if hb.IP != "" {
 				d.IP = hb.IP
 			}
 			st.Devices[dev.ID] = d
 			return nil
 		}); err != nil {
-			log.Printf("heartbeat: persist device %s failed: %v", dev.ID, err)
+			log.Printf("saving version/IP of device %s failed: %v", dev.ID, err)
 		}
 	}
-	log.Printf("heartbeat device=%s version=%s agent=%s uptime=%ds disk_free=%dMB temp=%dC hwdec=%s out=%dx%d playing=%q",
-		dev.ID, hb.Version, hb.PlayerVer, hb.UptimeS, hb.DiskFreeMB, hb.TempC,
-		hb.HWDec, hb.OutputW, hb.OutputH, hb.Playing)
 	w.WriteHeader(http.StatusNoContent)
 }

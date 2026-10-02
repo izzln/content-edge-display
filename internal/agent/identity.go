@@ -2,7 +2,6 @@ package agent
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,9 +10,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/manifest"
+	"github.com/izzln/content-edge-display/internal/sign"
 )
 
 // Identity 是设备的持久化身份。
@@ -34,8 +35,6 @@ var defaultHostnames = map[string]bool{
 	"orangepione": true, "orangepi": true, "armbian": true, "localhost": true, "debian": true,
 }
 
-var hostnameIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
-
 // loadOrCreateIdentity 解析设备身份。编号优先级：
 // 配置文件显式 device_id > cache_dir/identity.json > 主机名（非默认值）> SoC 序列号/MAC 派生；
 // 密钥首次随机生成。两者持久化到 identity.json，重启/重试不变。
@@ -51,8 +50,8 @@ func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 		if err := json.Unmarshal(data, &id); err != nil || id.Secret == "" {
 			bad := fmt.Sprintf("%s.bad-%d", path, time.Now().Unix())
 			os.Rename(path, bad)
-			log.Printf("agent: WARNING %s 内容无效（%v），已另存为 %s 并生成新身份；"+
-				"服务端会拒绝新密钥，需在管理后台对该设备点「接受新密钥」", path, err, bad)
+			log.Printf("agent: WARNING %s is invalid (%v); moved to %s and generating a new identity. "+
+				"The server will reject the new key until it is accepted in the admin UI", path, err, bad)
 			id = Identity{}
 		}
 	case os.IsNotExist(err):
@@ -73,9 +72,9 @@ func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 			return Identity{}, err
 		}
 		id.Secret, changed = hex.EncodeToString(b), true
-		log.Printf("agent: 生成新身份 device_id=%s key=%s（%s）", id.DeviceID, id.Fingerprint(), path)
+		log.Printf("agent: new identity device_id=%s key=%s (%s)", id.DeviceID, sign.Fingerprint(id.Secret), path)
 	} else {
-		log.Printf("agent: 使用已有身份 device_id=%s key=%s（%s）", id.DeviceID, id.Fingerprint(), path)
+		log.Printf("agent: using existing identity device_id=%s key=%s (%s)", id.DeviceID, sign.Fingerprint(id.Secret), path)
 	}
 	if changed {
 		if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
@@ -90,12 +89,6 @@ func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 }
 
 func identityPath(cfg *Config) string { return filepath.Join(cfg.CacheDir, "identity.json") }
-
-// Fingerprint 返回密钥指纹（sha256 前 8 位），用于日志与后台核对，不暴露密钥本身。
-func (id Identity) Fingerprint() string {
-	sum := sha256.Sum256([]byte(id.Secret))
-	return hex.EncodeToString(sum[:4])
-}
 
 // writeFileSync 原子且持久地写文件：写临时文件 → fsync → 改名 → fsync 目录。
 // 只 rename 不 fsync 的话，首次注册后不久断电，文件可能是空的或根本不存在。
@@ -129,7 +122,7 @@ func writeFileSync(path string, data []byte, perm os.FileMode) error {
 // deriveDeviceID 从主机名或硬件序列号派生设备编号。
 func deriveDeviceID(hw HardwareInfo) string {
 	host := strings.ToLower(strings.TrimSpace(hw.Hostname))
-	if host != "" && !defaultHostnames[host] && hostnameIDPattern.MatchString(host) {
+	if host != "" && !defaultHostnames[host] && manifest.DeviceIDPattern.MatchString(host) {
 		return host
 	}
 	if s := strings.ToLower(hw.HWSerial); len(s) >= 8 {

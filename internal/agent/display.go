@@ -40,8 +40,8 @@ func DRMModeArgs(mode string) []string {
 			return []string{"--drm-mode=" + mode}
 		}
 	}
-	log.Printf("agent: 显示屏不提供 %s 模式（可用：%s），按 EDID 首选模式输出；"+
-		"叠加图会按实际分辨率缩放。要强制该模式，在 /boot/armbianEnv.txt 的 video= 参数末尾加 ,e 后重启",
+	log.Printf("agent: the display does not offer mode %s (available: %s); using the EDID preferred mode "+
+		"and scaling the overlay. To force the mode, append ,e to the video= parameter in /boot/armbianEnv.txt and reboot",
 		wh, strings.Join(available, " "))
 	return nil
 }

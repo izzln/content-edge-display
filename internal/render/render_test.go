@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"image"
 	"image/color"
+	"image/png"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func mediaTemplate() store.Template {
 func encode(t *testing.T, img image.Image) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := EncodePNG(&buf, img); err != nil {
+	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()

@@ -42,12 +42,13 @@ type Agent struct {
 	updateFailedAt map[string]time.Time
 	verified       bool         // 本次运行是否已确认过版本（首个成功心跳后）
 	clock          *serverClock // 签名用的时间以服务端为准，见 clock.go
+	sched          *schedule    // 轮询/心跳间隔由服务端规定，见 schedule.go
 }
 
 // New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
-	clock := newServerClock()
-	tr := newTransport(cfg.CacheDir, clock)
+	clock, sched := newServerClock(), newSchedule()
+	tr := newTransport(cfg.CacheDir, clock, sched)
 	return &Agent{
 		cfg:            cfg,
 		player:         p,
@@ -56,6 +57,7 @@ func New(cfg *Config, p player.Player) *Agent {
 		startedAt:      time.Now(),
 		updateFailedAt: map[string]time.Time{},
 		clock:          clock,
+		sched:          sched,
 	}
 }
 
@@ -100,6 +102,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	pollTimer := time.NewTimer(0)
 	hbTimer := time.NewTimer(0)
+	hbEvery := a.sched.Heartbeat()
 	wdTicker := time.NewTicker(watchdogInterval) // 不依赖轮询/心跳间隔的配置值
 	defer pollTimer.Stop()
 	defer hbTimer.Stop()
@@ -131,6 +134,11 @@ func (a *Agent) Run(ctx context.Context) error {
 				}
 			}
 			pollTimer.Reset(a.pollDelay())
+			// 服务端改了心跳间隔：立即按新间隔重排，不等旧间隔走完（旧的可能长达一小时）
+			if every := a.sched.Heartbeat(); every != hbEvery {
+				hbEvery = every
+				hbTimer.Reset(every)
+			}
 		case <-wdTicker.C:
 			sdNotify("WATCHDOG=1")
 		case <-hbTimer.C:
@@ -138,7 +146,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.Heartbeat(ctx); err != nil {
 				log.Printf("agent: heartbeat failed: %v", err)
 			}
-			hbTimer.Reset(time.Duration(a.cfg.HeartbeatIntervalS) * time.Second)
+			hbEvery = a.sched.Heartbeat()
+			hbTimer.Reset(hbEvery)
 		}
 	}
 }
@@ -199,15 +208,15 @@ var errKeyConflict = errors.New("key conflict")
 
 // Register 发送一次注册请求（幂等）。
 func (a *Agent) Register(ctx context.Context) error {
-	body, err := json.Marshal(map[string]string{
-		"device_id":     a.identity.DeviceID,
-		"secret":        a.identity.Secret,
-		"enroll_token":  a.cfg.EnrollToken,
-		"hostname":      a.hw.Hostname,
-		"hw_serial":     a.hw.HWSerial,
-		"mac":           a.hw.MAC,
-		"ip":            localIP(a.cfg.ServerURL),
-		"agent_version": Version,
+	body, err := json.Marshal(manifest.RegisterRequest{
+		DeviceID:     a.identity.DeviceID,
+		Secret:       a.identity.Secret,
+		EnrollToken:  a.cfg.EnrollToken,
+		Hostname:     a.hw.Hostname,
+		HWSerial:     a.hw.HWSerial,
+		MAC:          a.hw.MAC,
+		IP:           localIP(a.cfg.ServerURL),
+		AgentVersion: Version,
 	})
 	if err != nil {
 		return err
@@ -233,10 +242,10 @@ func (a *Agent) Register(ctx context.Context) error {
 	case http.StatusConflict:
 		// 本机密钥与服务端记录不符：要么 identity.json 丢过（重装系统、换卡、手工删除），
 		// 要么另一台机器用了同一个编号。设备已把新密钥报给服务端，后台会显示待确认。
-		return fmt.Errorf("%w: device_id=%s 在服务端登记的是另一把密钥（本机 key=%s，身份文件 %s）。"+
-			"若确为本机（重装/换卡/身份文件丢失），请在管理后台该设备上点「接受新密钥」；"+
-			"若是另一台机器撞了编号，请给其中一台改主机名", errKeyConflict,
-			a.identity.DeviceID, a.identity.Fingerprint(), identityPath(a.cfg))
+		return fmt.Errorf("%w: device_id=%s is registered on the server with a different key (local key=%s, identity file %s). "+
+			"If this really is this device (reinstalled, new SD card, identity file lost), accept the new key in the admin UI; "+
+			"if another machine uses the same ID, change the hostname of one of them", errKeyConflict,
+			a.identity.DeviceID, sign.Fingerprint(a.identity.Secret), identityPath(a.cfg))
 	default:
 		return fmt.Errorf("register: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
@@ -244,7 +253,7 @@ func (a *Agent) Register(ctx context.Context) error {
 
 // pollDelay 返回下一次轮询间隔（失败时指数退避）。
 func (a *Agent) pollDelay() time.Duration {
-	d := time.Duration(a.cfg.PollIntervalS) * time.Second
+	d := a.sched.Poll()
 	for i := 0; i < a.failures && d < maxPollBackoff; i++ {
 		d *= 2
 	}
@@ -314,7 +323,7 @@ func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
 		if fi, err := os.Stat(dst); err == nil && fi.Size() == item.Size {
 			continue // 文件名内嵌哈希前缀 + 尺寸一致，视为已就绪
 		}
-		if err := a.download(ctx, item, dst); err != nil {
+		if err := a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst); err != nil {
 			return fmt.Errorf("download %s: %w", item.Name, err)
 		}
 	}
@@ -421,19 +430,16 @@ func derivedFromReferenced(name string, referenced map[string]bool) bool {
 // Heartbeat 上报一次心跳；本次运行首个成功心跳会确认当前版本（清除 pending-verify）。
 func (a *Agent) Heartbeat(ctx context.Context) error {
 	stats := a.player.Stats()
-	hb := map[string]any{
-		"version":      a.version,
-		"uptime":       uptimeSeconds(a.startedAt),
-		"disk_free_mb": diskFreeMB(a.cfg.CacheDir),
-		"playing":      a.player.NowPlaying(),
-		"player_ver":   Version,
-		"ip":           localIP(a.cfg.ServerURL),
-		"temp_c":       socTempC(),
-		"hwdec":        stats.HWDec,
-		"output_w":     stats.OutputW,
-		"output_h":     stats.OutputH,
-	}
-	body, err := json.Marshal(hb)
+	body, err := json.Marshal(manifest.Heartbeat{
+		AgentVersion: Version,
+		IP:           localIP(a.cfg.ServerURL),
+		UptimeS:      uptimeSeconds(a.startedAt),
+		DiskFreeMB:   diskFreeMB(a.cfg.CacheDir),
+		TempC:        socTempC(),
+		HWDec:        stats.HWDec,
+		OutputW:      stats.OutputW,
+		OutputH:      stats.OutputH,
+	})
 	if err != nil {
 		return err
 	}

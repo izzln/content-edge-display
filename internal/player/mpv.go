@@ -3,6 +3,7 @@ package player
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -41,6 +42,7 @@ type MPV struct {
 	socketPath   string
 	playlistPath string
 	extraArgs    []string
+	fadeScript   string // 过渡脚本路径；空表示不带过渡
 	reqID        atomic.Int64
 
 	mu         sync.Mutex
@@ -97,26 +99,24 @@ func imageDurationFor(items []Item) string {
 	return "" // 没有图片，保持现值
 }
 
+// fadeScript 是播放项之间"淡出到黑 → 淡入"的 mpv Lua 脚本，随代理二进制分发（OTA 即可更新）。
+//
+//go:embed fade.lua
+var fadeScript []byte
+
+// FadeSeconds 是切换时淡出、淡入各自的时长。
+const FadeSeconds = 0.6
+
 func (p *MPV) Start(ctx context.Context) error {
+	// 每次启动都重写一遍，保证脚本与当前程序版本一致；写不了就不带过渡效果，照常播放。
+	p.fadeScript = filepath.Join(filepath.Dir(p.playlistPath), "display-fade.lua")
+	if err := os.WriteFile(p.fadeScript, fadeScript, 0o644); err != nil {
+		log.Printf("player(mpv): cannot write transition script (%v); playing without fades", err)
+		p.fadeScript = ""
+	}
 	go p.supervise(ctx)
 	go p.ensureLoop(ctx)
 	return nil
-}
-
-// mpvEnv 返回启动 mpv 的环境变量。
-//
-// mpv 启动时会探测 Wayland，XDG_RUNTIME_DIR 未设置或指向不存在的目录就报
-// "XDG_RUNTIME_DIR is invalid or not set"。systemd 系统服务没有登录会话、不会设置它；
-// 新装的 systemd 单元里已经补上，但 OTA 只换二进制、改不了单元文件，所以这里再兜一次：
-// 缺失或无效时指向 mpv IPC socket 所在的运行目录（本服务专用，已存在）。
-func mpvEnv(runtimeDir string) []string {
-	env := os.Environ()
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			return env
-		}
-	}
-	return append(env, "XDG_RUNTIME_DIR="+runtimeDir)
 }
 
 // supervise 拉起 mpv 并在其退出后自动重启（进程级守护的最内层）。
@@ -132,6 +132,8 @@ func (p *MPV) supervise(ctx context.Context) {
 			"--osd-level=0",
 			"--no-terminal",
 			"--loop-playlist=inf",
+			// 有可用的硬解就用；Armbian 自带的 mpv 驱动不了 H3 的 cedrus（需要 v4l2request 补丁），
+			// 实际会软解。换装打过补丁的 mpv 时，在 mpv_extra_args 里加 --hwdec=v4l2request-copy 覆盖。
 			"--hwdec=auto-safe",
 			// 内容一律撑满播放区（超出部分裁掉），且一律静音。
 			"--panscan=1",
@@ -146,13 +148,16 @@ func (p *MPV) supervise(ctx context.Context) {
 		if dur := p.snapshotImageDur(); dur != "" {
 			args = append(args, "--image-display-duration="+dur)
 		}
+		if p.fadeScript != "" {
+			args = append(args, "--script="+p.fadeScript,
+				"--script-opts=display-fade="+strconv.FormatFloat(FadeSeconds, 'f', -1, 64))
+		}
 		if _, err := os.Stat(p.playlistPath); err == nil {
 			args = append(args, "--playlist="+p.playlistPath)
 		}
 		args = append(args, p.extraArgs...)
 
 		cmd := exec.CommandContext(ctx, "mpv", args...)
-		cmd.Env = mpvEnv(filepath.Dir(p.socketPath))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		log.Printf("player(mpv): starting mpv")
@@ -389,15 +394,6 @@ func (p *MPV) Load(scene Scene) error {
 	// 立即推一次（mpv 已在运行时可秒级生效）；失败也无妨，ensureLoop 会持续重试。
 	p.signal()
 	return nil
-}
-
-func (p *MPV) NowPlaying() string {
-	data, err := p.command("get_property", "path")
-	if err != nil {
-		return ""
-	}
-	s, _ := data.(string)
-	return s
 }
 
 func (p *MPV) snapshotImageDur() string {

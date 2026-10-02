@@ -59,8 +59,6 @@ cat > /etc/display-agent/agent.json <<EOF
   "enroll_token": "$ENROLL_TOKEN",
   "cache_dir": "/var/lib/display-agent",
   "install_dir": "$INSTALL_DIR",
-  "poll_interval_s": 10,
-  "heartbeat_interval_s": 60,
   "player": "mpv",
   "display_mode": "$HDMI_MODE",
   "mpv_socket": "/run/display-agent/mpv.sock",

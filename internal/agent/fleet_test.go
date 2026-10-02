@@ -15,6 +15,7 @@ import (
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/player"
 	"github.com/izzln/content-edge-display/internal/server"
+	"github.com/izzln/content-edge-display/internal/sign"
 )
 
 func TestDeriveDeviceID(t *testing.T) {
@@ -88,6 +89,8 @@ func newEnrollEnv(t *testing.T) (*Agent, *server.Server, http.Handler) {
 		DataDir:     t.TempDir(),
 		EnrollToken: "enroll-me",
 		AdminToken:  "admin",
+		// 轮询间隔由服务端规定：调到最短，让跑 Run 主循环的测试不必久等
+		PollIntervalS: 1,
 	}
 	srv, err := server.New(srvCfg)
 	if err != nil {
@@ -143,7 +146,7 @@ func TestRegisterThenPoll(t *testing.T) {
 	if len(statuses) != 1 || statuses[0].ID != a.DeviceID() || !statuses[0].Online {
 		t.Fatalf("device not online in admin: %+v", statuses)
 	}
-	if statuses[0].AgentVersion != Version {
+	if statuses[0].HW.AgentVersion != Version {
 		t.Fatalf("agent version not reported: %+v", statuses[0])
 	}
 }
@@ -264,7 +267,7 @@ func TestCacheDirLockIsExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lockCacheDir(dir); err == nil || !strings.Contains(err.Error(), "另一个 display-agent") {
+	if _, err := lockCacheDir(dir); err == nil || !strings.Contains(err.Error(), "another display-agent") {
 		t.Fatalf("第二个进程应被拒绝：%v", err)
 	}
 	unlock()
@@ -308,7 +311,7 @@ func TestLostIdentityRecoversAfterAdminAccepts(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := a.Register(ctx)
-	if !errors.Is(err, errKeyConflict) || !strings.Contains(err.Error(), a.identity.Fingerprint()) {
+	if !errors.Is(err, errKeyConflict) || !strings.Contains(err.Error(), sign.Fingerprint(a.identity.Secret)) {
 		t.Fatalf("应报密钥冲突并给出本机指纹：%v", err)
 	}
 
@@ -330,7 +333,6 @@ func TestLostIdentityRecoversAfterAdminAccepts(t *testing.T) {
 // 运营方在后台删了一台正在运行的设备：设备不能一直 401 下去，要自己重新注册回来。
 func TestDeletedDeviceReRegistersItself(t *testing.T) {
 	a, srv, h := newEnrollEnv(t)
-	a.cfg.PollIntervalS = 1
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)

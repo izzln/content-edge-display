@@ -1,9 +1,10 @@
 // Package transcode 把运营方上传的素材归一化成设备能稳定播放的形态。
 //
-// 为什么非转码不可：H3 的硬解能力有限，更要命的是**码率**——一段 20Mbps 的 1080p
-// 原片即使能硬解，持续高码率也会让芯片发热，到 85°C 开始降频、再高直接关机。
-// 所以上传时统一压到 1440×900 以内、4Mbps 以内、30fps 以内的 H.264，
-// 顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
+// 为什么非转码不可：设备上的 mpv 是**软解**的——H3 的硬件解码器（cedrus）需要 V4L2 Request API，
+// Armbian/Debian 自带的 FFmpeg/mpv 不支持（补丁至今未进 FFmpeg 上游），所以视频全靠 4 个 A7 核心解。
+// 原片动辄 1080p、10~20Mbps，软解不动，硬撑就发热，到 85°C 开始降频、再高直接关机。
+// 所以上传时统一压成软解吃得消的 H.264：1440×900 以内、30fps 以内、码率 4Mbps 以内，
+// 并用 x264 的 fastdecode 调优；顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
 //
 // 图片同理但不用 ffmpeg：纯 Go 缩到画布尺寸即可，省得设备上解一张几千万像素的图。
 package transcode
@@ -28,7 +29,7 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
-// Spec 是转码目标。字段都有下限保护，零值按 DefaultSpec 处理。
+// Spec 是转码目标，取值见 DefaultSpec。
 type Spec struct {
 	MaxW, MaxH  int // 输出不超过这个尺寸（等比缩小，不放大）
 	MaxFPS      int // 帧率上限
@@ -42,26 +43,6 @@ type Spec struct {
 // 内容多为静态画面与缓慢运镜），同时把解码与发热压在 H3 吃得消的范围内。
 func DefaultSpec() Spec {
 	return Spec{MaxW: 1440, MaxH: 900, MaxFPS: 30, BitrateK: 2500, MaxBitrateK: 4000}
-}
-
-func (s Spec) withDefaults() Spec {
-	d := DefaultSpec()
-	if s.MaxW <= 0 {
-		s.MaxW = d.MaxW
-	}
-	if s.MaxH <= 0 {
-		s.MaxH = d.MaxH
-	}
-	if s.MaxFPS <= 0 {
-		s.MaxFPS = d.MaxFPS
-	}
-	if s.BitrateK <= 0 {
-		s.BitrateK = d.BitrateK
-	}
-	if s.MaxBitrateK <= 0 {
-		s.MaxBitrateK = d.MaxBitrateK
-	}
-	return s
 }
 
 // Encoder 封装一个可用的 ffmpeg。
@@ -84,15 +65,15 @@ func Find(bin string) (*Encoder, error) {
 	path, err := exec.LookPath(bin)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) && !strings.ContainsRune(bin, os.PathSeparator) {
-			return nil, fmt.Errorf("在 PATH 里找不到 %s（服务进程的 PATH=%s，运行用户 %s）", bin, os.Getenv("PATH"), currentUser())
+			return nil, fmt.Errorf("%s not found in PATH (service PATH=%s, user %s)", bin, os.Getenv("PATH"), currentUser())
 		}
-		return nil, fmt.Errorf("%s 不可用（运行用户 %s）：%v", bin, currentUser(), err)
+		return nil, fmt.Errorf("%s is not usable (user %s): %v", bin, currentUser(), err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, path, "-hide_banner", "-version").CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("找到了 %s，但以用户 %s 运行失败（%v）：%s", path, currentUser(), err, firstLine(out))
+		return nil, fmt.Errorf("found %s but it fails to run as user %s (%v): %s", path, currentUser(), err, firstLine(out))
 	}
 	e := &Encoder{bin: path, version: firstLine(out)}
 	e.fpsMax = e.supportsFPSMax()
@@ -133,41 +114,13 @@ func (e *Encoder) Version() string {
 // Video 把 src 转成设备能稳定播放的 H.264 MP4 写到 dst。
 // onProgress 以已处理的秒数回调（可为 nil），用于在后台显示进度。
 func (e *Encoder) Video(ctx context.Context, src, dst string, spec Spec, onProgress func(seconds float64)) error {
-	spec = spec.withDefaults()
 	// 写到同目录的隐藏文件里，完成后再改名：转码可能要几分钟，半成品如果是可见文件，
 	// 会被当成就绪内容列进播放列表、甚至下发给设备。媒体目录扫描会跳过 . 开头的文件。
 	// 后缀保留 .mp4，ffmpeg 靠它选封装格式。
 	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp.mp4")
 	defer os.Remove(tmp)
 
-	// scale 用 min(,) 包住：只缩不放，原本就小的素材不要被拉大（拉大只会更糊更费码率）。
-	// force_divisible_by=2 保证宽高是偶数，yuv420p 必需。
-	vf := fmt.Sprintf("scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-		spec.MaxW, spec.MaxH)
-
-	args := []string{
-		"-hide_banner", "-nostdin", "-y",
-		"-i", src,
-		"-vf", vf,
-		"-c:v", "libx264",
-		"-profile:v", "high", "-level", "4.0", // H3 硬解吃得下的档次
-		"-preset", "veryfast",
-		"-pix_fmt", "yuv420p",
-		"-b:v", strconv.Itoa(spec.BitrateK) + "k",
-		"-maxrate", strconv.Itoa(spec.MaxBitrateK) + "k",
-		"-bufsize", strconv.Itoa(spec.MaxBitrateK*2) + "k",
-		"-g", "60", // 2 秒一个关键帧，循环播放时跳转快
-		"-an",                     // 屏幕一律静音，音轨纯属浪费码率
-		"-movflags", "+faststart", // moov 放文件头
-		"-map_metadata", "-1", // 不带入原始元数据（可能含拍摄地点等）
-		"-progress", "pipe:1", "-nostats", "-loglevel", "error",
-	}
-	if e.fpsMax {
-		args = append(args, "-fpsmax", strconv.Itoa(spec.MaxFPS))
-	}
-	args = append(args, tmp)
-
-	cmd := exec.CommandContext(ctx, e.bin, args...)
+	cmd := exec.CommandContext(ctx, e.bin, e.videoArgs(src, tmp, spec)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -186,9 +139,41 @@ func (e *Encoder) Video(ctx context.Context, src, dst string, spec Spec, onProgr
 		if len(msg) > 400 {
 			msg = msg[:400] + "…"
 		}
-		return fmt.Errorf("转码失败：%s", msg)
+		return fmt.Errorf("ffmpeg failed: %s", msg)
 	}
 	return os.Rename(tmp, dst)
+}
+
+// videoArgs 返回把 src 转成 dst 的 ffmpeg 参数。
+func (e *Encoder) videoArgs(src, dst string, spec Spec) []string {
+	// scale 用 min(,) 包住：只缩不放，原本就小的素材不要被拉大（拉大只会更糊更费码率）。
+	// force_divisible_by=2 保证宽高是偶数，yuv420p 必需。
+	vf := fmt.Sprintf("scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+		spec.MaxW, spec.MaxH)
+	args := []string{
+		"-hide_banner", "-nostdin", "-y",
+		"-i", src,
+		"-vf", vf,
+		"-c:v", "libx264",
+		"-profile:v", "high", "-level", "4.0",
+		"-preset", "veryfast",
+		// fastdecode：关掉 CABAC、环路滤波和加权预测，解码 CPU 省三四成；代价是同画质下文件大 10~20%。
+		// 设备是软解，这笔账划算——解码越轻越不容易发热、掉帧。
+		"-tune", "fastdecode",
+		"-pix_fmt", "yuv420p",
+		"-b:v", strconv.Itoa(spec.BitrateK) + "k",
+		"-maxrate", strconv.Itoa(spec.MaxBitrateK) + "k",
+		"-bufsize", strconv.Itoa(spec.MaxBitrateK*2) + "k",
+		"-g", "60", // 2 秒一个关键帧，循环播放时跳转快
+		"-an",                     // 屏幕一律静音，音轨纯属浪费码率
+		"-movflags", "+faststart", // moov 放文件头
+		"-map_metadata", "-1", // 不带入原始元数据（可能含拍摄地点等）
+		"-progress", "pipe:1", "-nostats", "-loglevel", "error",
+	}
+	if e.fpsMax {
+		args = append(args, "-fpsmax", strconv.Itoa(spec.MaxFPS))
+	}
+	return append(args, dst)
 }
 
 // Duration 返回素材时长（秒），用于把转码进度换算成百分比；拿不到返回 0。
@@ -273,6 +258,29 @@ func ShrinkImage(path string, maxW, maxH int) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// Thumbnail 把图片等比缩到 maxW×maxH 以内，以 JPEG 写出（后台列表的缩略图）。
+// 透明部分垫白，免得 PNG 的透明区在 JPEG 里变黑。
+func Thumbnail(w io.Writer, path string, maxW, maxH int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	src, _, err := image.Decode(f)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	b := src.Bounds()
+	tw, th := b.Dx(), b.Dy()
+	if tw > maxW || th > maxH {
+		tw, th = fitWithin(tw, th, maxW, maxH)
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
+	xdraw.Draw(dst, dst.Bounds(), image.White, image.Point{}, xdraw.Src)
+	xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), src, b, xdraw.Over, nil)
+	return jpeg.Encode(w, dst, &jpeg.Options{Quality: 80})
 }
 
 // fitWithin 等比缩小到 maxW×maxH 以内。

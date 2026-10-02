@@ -24,7 +24,7 @@ import (
 // 文件名带上目标尺寸：分辨率变了会生成新文件，不会用到旧的。
 func rasterize(pngPath string, w, h int) (string, error) {
 	if w <= 0 || h <= 0 {
-		return "", fmt.Errorf("overlay: 目标尺寸非法 %dx%d", w, h)
+		return "", fmt.Errorf("overlay: invalid target size %dx%d", w, h)
 	}
 	raw := fmt.Sprintf("%s.%dx%d.bgra", pngPath, w, h)
 	if fi, err := os.Stat(raw); err == nil && fi.Size() == int64(w)*int64(h)*4 {

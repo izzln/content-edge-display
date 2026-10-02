@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +49,7 @@ func jsonReq(method, path string, body any) *http.Request {
 // signedAs 以任意设备身份签名。
 func signedAs(id, secret, method, path string) *http.Request {
 	r := httptest.NewRequest(method, path, nil)
-	ts := sign.Now()
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	r.Header.Set(sign.HeaderDeviceID, id)
 	r.Header.Set(sign.HeaderTimestamp, ts)
 	r.Header.Set(sign.HeaderSign, sign.Sign(secret, ts, method, r.URL.Path))
@@ -217,7 +218,7 @@ func TestFirmwareUploadRejectsWrongFile(t *testing.T) {
 
 func heartbeatAs(t *testing.T, h http.Handler, agentVer string) {
 	t.Helper()
-	body := strings.NewReader(`{"version":"v","uptime":1,"disk_free_mb":1,"playing":"","player_ver":"` + agentVer + `"}`)
+	body := strings.NewReader(`{"uptime":1,"disk_free_mb":1,"agent_version":"` + agentVer + `"}`)
 	r := signedRequest("POST", "/api/v1/device/heartbeat", body)
 	r.Header.Set("Content-Type", "application/json")
 	do(t, h, r, http.StatusNoContent)
@@ -389,7 +390,7 @@ func TestRekeyRequestAcceptAndIgnore(t *testing.T) {
 			rk = st.HW.Rekey
 		}
 	}
-	if rk == nil || rk.Fingerprint != keyFingerprint(newKey) || rk.Hostname != "scr-0017" {
+	if rk == nil || rk.Fingerprint != sign.Fingerprint(newKey) || rk.Hostname != "scr-0017" {
 		t.Fatalf("后台应能看到待确认的换密钥请求：%+v", rk)
 	}
 	// 未接受前：旧密钥照常可用，新密钥不行

@@ -524,31 +524,18 @@ func TestPlaylistChangeKeepsOverlay(t *testing.T) {
 	}
 }
 
-// systemd 系统服务没有 XDG_RUNTIME_DIR，mpv 每次启动都会报 "XDG_RUNTIME_DIR is invalid or not set"；
-// 缺失或无效时要补成运行目录，已有效时不能覆盖。
-func TestMpvEnvProvidesRuntimeDir(t *testing.T) {
-	runDir := t.TempDir()
-	lookup := func(env []string) string {
-		v := ""
-		for _, kv := range env {
-			if strings.HasPrefix(kv, "XDG_RUNTIME_DIR=") {
-				v = strings.TrimPrefix(kv, "XDG_RUNTIME_DIR=") // 后出现的生效
-			}
-		}
-		return v
+// 切换过渡脚本随程序分发：启动时写到播放列表旁边，内容与程序内嵌的一致（OTA 后自动更新）。
+func TestStartWritesTransitionScript(t *testing.T) {
+	p, _, playlistPath := newTestMPV(t)
+	os.WriteFile(filepath.Join(filepath.Dir(playlistPath), "display-fade.lua"), []byte("-- 旧版本"), 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 不真的拉起 mpv
+	p.Start(ctx)
+	data, err := os.ReadFile(p.fadeScript)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	os.Unsetenv("XDG_RUNTIME_DIR")
-	if got := lookup(mpvEnv(runDir)); got != runDir {
-		t.Fatalf("未设置时应补成 %s，得到 %q", runDir, got)
-	}
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(runDir, "no-such"))
-	if got := lookup(mpvEnv(runDir)); got != runDir {
-		t.Fatalf("指向不存在的目录时应改成 %s，得到 %q", runDir, got)
-	}
-	valid := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", valid)
-	if got := lookup(mpvEnv(runDir)); got != valid {
-		t.Fatalf("已有效时不应覆盖，得到 %q", got)
+	if string(data) != string(fadeScript) || !strings.Contains(string(data), "brightness") {
+		t.Fatal("启动时应写入当前版本的过渡脚本")
 	}
 }

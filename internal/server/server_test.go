@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -175,7 +178,7 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 	s, _ := newTestServer(t)
 	h := s.Handler()
 
-	body := strings.NewReader(`{"version":"abc","uptime":42,"disk_free_mb":100,"playing":"x.jpg","player_ver":"0.1.0"}`)
+	body := strings.NewReader(`{"uptime":42,"disk_free_mb":100,"agent_version":"0.1.0"}`)
 	r := signedRequest("POST", "/api/v1/device/heartbeat", body)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -202,7 +205,7 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 			dev1 = &statuses[i]
 		}
 	}
-	if dev1 == nil || !dev1.Online || dev1.Heartbeat == nil || dev1.Heartbeat.Version != "abc" {
+	if dev1 == nil || !dev1.Online || dev1.Heartbeat == nil || dev1.Heartbeat.AgentVersion != "0.1.0" || dev1.Heartbeat.UptimeS != 42 {
 		t.Fatalf("unexpected device status: %+v", dev1)
 	}
 }
@@ -286,5 +289,270 @@ func TestTestCardUsesConfiguredTimezone(t *testing.T) {
 	s.now = func() time.Time { return fixed }
 	if render(tokyo) == render(time.UTC) {
 		t.Fatal("配置的时区不同，测试卡上的结束时间应不同")
+	}
+}
+
+// 后台"当前显示"列：等待刷新 → 正在刷新 → 已显示最新内容。
+func TestDeviceSyncState(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.AdminToken = adminToken
+	h := s.Handler()
+	state := func() string {
+		w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
+		var list []DeviceStatus
+		json.Unmarshal(w.Body.Bytes(), &list)
+		for _, d := range list {
+			if d.ID == testDeviceID {
+				return d.Sync
+			}
+		}
+		t.Fatal("device missing")
+		return ""
+	}
+	poll := func(applied string) string {
+		r := signedRequest("GET", "/api/v1/device/manifest", nil)
+		if applied != "" {
+			r.Header.Set("If-None-Match", `"`+applied+`"`)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return strings.Trim(w.Header().Get("ETag"), `"`)
+	}
+	if got := state(); got != syncOffline {
+		t.Fatalf("没有心跳时应为离线，得到 %s", got)
+	}
+	heartbeatAs(t, h, "1.0.0")
+	if got := state(); got != syncWaiting {
+		t.Fatalf("还没来取过内容时应为等待刷新，得到 %s", got)
+	}
+	v1 := poll("")
+	if got := state(); got != syncSyncing {
+		t.Fatalf("取到新清单、还没应用时应为正在刷新，得到 %s", got)
+	}
+	poll(v1)
+	if got := state(); got != syncLatest {
+		t.Fatalf("设备报告已应用最新版本时应为已显示最新内容，得到 %s", got)
+	}
+	// 运营方改了内容：设备下次轮询前是"等待刷新"，取到后"正在刷新"，应用后"最新"
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "999"}), http.StatusOK)
+	if got := state(); got != syncWaiting {
+		t.Fatalf("改了配置后应为等待刷新，得到 %s", got)
+	}
+	v2 := poll(v1)
+	if v2 == v1 {
+		t.Fatal("改了属性，版本号应变化")
+	}
+	if got := state(); got != syncSyncing {
+		t.Fatalf("取到新清单后应为正在刷新，得到 %s", got)
+	}
+	poll(v2)
+	if got := state(); got != syncLatest {
+		t.Fatalf("应用后应为已显示最新内容，得到 %s", got)
+	}
+
+	// 只看这台设备自己的内容：改别的设备、新建一个没人用的模板，都不能让它变成"等待刷新"
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/dev-002/attributes", map[string]string{"room": "1"}), http.StatusOK)
+	do(t, h, adminReq("POST", "/api/v1/admin/templates", mediaTemplate("")), http.StatusOK)
+	if got := state(); got != syncLatest {
+		t.Fatalf("别的设备/没用到的模板改动不应影响本设备，得到 %s", got)
+	}
+	// 给它传了新图片：等待刷新
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"new.jpg", tinyPNG(t)}))
+	if got := state(); got != syncWaiting {
+		t.Fatalf("播放列表变了应为等待刷新，得到 %s", got)
+	}
+}
+
+// 指纹（content.key）必须覆盖清单的全部输入：任何一次让清单版本变化的改动，指纹都得跟着变，
+// 否则后台会把还没刷新的设备显示成"已显示最新内容"。逐项改一遍核对。
+func TestContentKeyCoversManifestInputs(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	snapshot := func() (string, string) {
+		c, err := s.content(testDeviceID, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := s.buildManifest(testDeviceID, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Version, c.key()
+	}
+	gid := globalTemplateID(t, s)
+	put := func(path string, body any) { do(t, h, adminReq("PUT", path, body), http.StatusOK) }
+	steps := []struct {
+		desc   string
+		change func()
+	}{
+		{"属性", func() { put("/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "302"}) }},
+		{"上传图片", func() {
+			parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.png", tinyPNG(t)}, upload{"b.png", tinyPNG(t)}))
+		}},
+		{"调整顺序", func() { put("/api/v1/admin/devices/"+testDeviceID+"/media", []string{"b.png", "a.png"}) }},
+		{"同名文件内容变了", func() {
+			img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+			putMediaFile(t, s, "a.png", encodePNG(t, img))
+			future := now.Add(time.Minute)
+			os.Chtimes(filepath.Join(s.deviceMediaDir(testDeviceID), "a.png"), future, future)
+		}},
+		{"左右对调", func() {
+			put("/api/v1/admin/devices/"+testDeviceID+"/display", map[string]any{"mode": "global", "mirror": true})
+			// 回归：后台"保存模板设置"不能冲掉排好的播放顺序
+			if got := s.store.Display(testDeviceID).Playlist; strings.Join(got, ",") != "b.png,a.png" {
+				t.Errorf("保存模板设置后播放顺序被改成了 %v", got)
+			}
+		}},
+		{"改全局模板内容", func() {
+			tpl := mediaTemplate(gid)
+			tpl["image_duration_s"] = 25
+			put("/api/v1/admin/templates/"+gid, tpl)
+		}},
+		{"时段计划到点", func() {
+			w := do(t, h, adminReq("POST", "/api/v1/admin/templates", splitTemplate()), http.StatusOK)
+			var created store.Template
+			json.Unmarshal(w.Body.Bytes(), &created)
+			loc := now.In(s.loc)
+			start := loc.Add(time.Hour).Format("15:04")
+			end := loc.Add(2 * time.Hour).Format("15:04")
+			put("/api/v1/admin/schedules", []store.Schedule{{TemplateID: created.ID, Start: start, End: end}})
+			now = now.Add(time.Hour + time.Minute) // 时间走到时段里：没有任何写入，清单也会变
+		}},
+		{"测试屏", func() {
+			do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusOK)
+		}},
+		{"测试屏到期", func() { now = now.Add(2 * time.Minute) }},
+	}
+	ver, key := snapshot()
+	for _, st := range steps {
+		st.change()
+		v2, k2 := snapshot()
+		if v2 != ver && k2 == key {
+			t.Errorf("%s：清单版本变了但指纹没变", st.desc)
+		}
+		if v2 == ver {
+			t.Errorf("%s：这一步本应改变清单（测试写错了？）", st.desc)
+		}
+		ver, key = v2, k2
+	}
+}
+
+// 控制台记录服务端自己的工作（上传、转码、下发），不再逐条打印设备心跳。
+func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	s, h := newAdminTestServer(t)
+	s.setEncoder(&fakeEncoder{})
+	heartbeatAs(t, h, "1.0.0")
+	heartbeatAs(t, h, "1.0.0")
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.jpg", tinyPNG(t)}, upload{"b.mp4", fakeVideo}, upload{"c.txt", []byte("x")}))
+	waitMedia(t, h, "转码完成", func(fs []MediaFile) bool {
+		f, ok := byName(fs, "b.mp4")
+		return ok && f.Status == mediaReady
+	})
+	deviceManifest(t, h)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "1"}), http.StatusOK)
+
+	out := buf.String()
+	for _, want := range []string{
+		"device dev-001 online", "upload started: device dev-001, a.jpg", "upload done: device dev-001, a.jpg",
+		"queued for transcoding as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4",
+		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 200",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("控制台应有 %q\n%s", want, out)
+		}
+	}
+	if strings.Count(out, " online ") != 1 || strings.Contains(out, "heartbeat") {
+		t.Errorf("心跳不应逐条记日志（上线只记一次）：\n%s", out)
+	}
+}
+
+// 在线判断：任何签名通过的请求都算联系过（不只心跳），约 3 个轮询周期没来就算离线；
+// 轮询/心跳间隔由服务端规定，随每个设备响应下发。
+func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.AdminToken = adminToken
+	s.cfg.PollIntervalS, s.cfg.HeartbeatIntervalS = 10, 60
+	h := s.Handler()
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	status := func() DeviceStatus {
+		w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
+		var list []DeviceStatus
+		json.Unmarshal(w.Body.Bytes(), &list)
+		for _, d := range list {
+			if d.ID == testDeviceID {
+				return d
+			}
+		}
+		t.Fatal("device missing")
+		return DeviceStatus{}
+	}
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		var r *http.Request
+		if body == "" {
+			r = signedRequestAt(now, method, path, nil)
+		} else {
+			r = signedRequestAt(now, method, path, strings.NewReader(body))
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	// 只轮询、还没心跳过（如服务端刚重启）：也算在线
+	w := send("GET", "/api/v1/device/manifest", "")
+	if w.Header().Get("X-Poll-Interval") != "10" || w.Header().Get("X-Heartbeat-Interval") != "60" {
+		t.Fatalf("响应头应下发间隔：%v", w.Header())
+	}
+	if st := status(); !st.Online || st.Heartbeat != nil {
+		t.Fatalf("轮询过就应在线（且没有伪造的空心跳）：%+v", st)
+	}
+	// 设备照服务端规定的 10 秒轮询 → 30 秒没来就离线
+	if st := status(); st.PollS != 10 || st.OfflineS != 30 {
+		t.Fatalf("离线阈值应为 3 个轮询周期：%+v", st)
+	}
+	now = now.Add(25 * time.Second)
+	if !status().Online {
+		t.Fatal("25 秒没来（不到 3 个轮询周期）仍应在线")
+	}
+	// 304 也算联系过，并且同样带着间隔
+	w = send("GET", "/api/v1/device/manifest", "")
+	etag := w.Header().Get("ETag")
+	r := signedRequestAt(now, "GET", "/api/v1/device/manifest", nil)
+	r.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotModified || w.Header().Get("X-Poll-Interval") != "10" {
+		t.Fatalf("304 也要带间隔：%d %v", w.Code, w.Header())
+	}
+	now = now.Add(31 * time.Second)
+	if st := status(); st.Online || st.Sync != syncOffline {
+		t.Fatalf("31 秒没有任何请求应判离线：%+v", st)
+	}
+
+	// 注册响应也带间隔：设备注册后马上就照办
+	b, _ := json.Marshal(map[string]string{"device_id": "dev-new", "secret": "s", "enroll_token": "enroll-me"})
+	rr := httptest.NewRequest("POST", "/api/v1/device/register", strings.NewReader(string(b)))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, rr)
+	if w.Header().Get("X-Poll-Interval") != "10" {
+		t.Fatalf("注册响应应带间隔：%d %v", w.Code, w.Header())
+	}
+}
+
+func TestIntervalConfigBounds(t *testing.T) {
+	for _, c := range []Config{{PollIntervalS: 301}, {HeartbeatIntervalS: 5}, {PollIntervalS: -1}} {
+		if err := c.checkIntervals(); err == nil {
+			t.Errorf("%+v 应被拒绝", c)
+		}
+	}
+	c := Config{}
+	if err := c.checkIntervals(); err != nil || c.PollIntervalS != 10 || c.HeartbeatIntervalS != 60 {
+		t.Fatalf("默认值应为 10/60：%+v %v", c, err)
 	}
 }

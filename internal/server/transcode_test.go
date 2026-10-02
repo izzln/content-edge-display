@@ -249,22 +249,12 @@ func TestRealFFmpegEndToEnd(t *testing.T) {
 	}
 }
 
-// 装好 ffmpeg 后不用重启服务端：不可用时会节流重新探测；探测失败的原因要能在后台看到。
-func TestEncoderRedetectionAndReason(t *testing.T) {
+// ffmpeg 不可用的原因要能在后台看到（原因在启动时检测一次）。
+func TestInfoReportsFFmpegError(t *testing.T) {
 	s, h := newAdminTestServer(t)
-	calls := 0
-	var result videoEncoder
 	s.encMu.Lock()
-	s.findEnc = func() (videoEncoder, error) {
-		calls++
-		if result == nil {
-			return nil, errors.New("在 PATH 里找不到 ffmpeg（服务进程的 PATH=/usr/bin，运行用户 display）")
-		}
-		return result, nil
-	}
-	s.encoder, s.encTried = nil, time.Time{}
+	s.encoder, s.encoderErr = nil, "在 PATH 里找不到 ffmpeg（服务进程的 PATH=/usr/bin，运行用户 display）"
 	s.encMu.Unlock()
-
 	var info struct {
 		Transcode bool   `json:"transcode"`
 		Err       string `json:"ffmpeg_error"`
@@ -272,24 +262,6 @@ func TestEncoderRedetectionAndReason(t *testing.T) {
 	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
 	if info.Transcode || !strings.Contains(info.Err, "运行用户 display") {
 		t.Fatalf("后台应拿到具体原因：%+v", info)
-	}
-	// 节流：紧接着再问不会重新探测
-	s.videoEncoder()
-	if calls != 1 {
-		t.Fatalf("间隔内不应重复探测，探测了 %d 次", calls)
-	}
-	// 运营方装好了 ffmpeg；过了节流间隔后自动启用
-	result = &fakeEncoder{}
-	s.encMu.Lock()
-	s.encTried = time.Now().Add(-encoderRetry)
-	s.encMu.Unlock()
-	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
-	if !info.Transcode {
-		t.Fatalf("装好 ffmpeg 后应自动启用，不用重启：%+v", info)
-	}
-	res := parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.mp4", fakeVideo}))
-	if len(res.Transcoding) != 1 {
-		t.Fatalf("启用后应能上传视频：%+v", res)
 	}
 }
 

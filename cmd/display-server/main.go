@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "server.json", "配置文件路径")
+	configPath := flag.String("config", "server.json", "path to the config file")
 	flag.Parse()
 
 	cfg, err := server.LoadConfig(*configPath)

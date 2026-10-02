@@ -37,12 +37,3 @@ func (p *Null) Scene() Scene {
 }
 
 func (p *Null) Stats() Stats { return Stats{} }
-
-func (p *Null) NowPlaying() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.scene.Items) == 0 {
-		return ""
-	}
-	return p.scene.Items[0].Path
-}
