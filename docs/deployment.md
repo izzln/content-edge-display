@@ -253,14 +253,25 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 
 | 原因 | 说明 | 处理 |
 |---|---|---|
-| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 代理按服务端时间签名，不受影响（见下） |
+| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 代理自动把设备时钟校到服务端时间（见下） |
 | `bad signature` | 设备密钥与服务端登记的不一致 | 见下一节"另一把密钥" |
 | `unknown device` | 设备在后台被删除了 | 代理会自动重新注册 |
 
-代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不依赖设备时钟**；
-偏差超过 1 分钟会在日志里提示一次。
+代理从服务端每个响应（包括不签名的注册响应）的 `Date` 头学到时间，签名一律按服务端时间来，
+**认证不依赖设备时钟**。偏差超过 1 分钟、而设备又没有被 NTP 同步时，代理会**直接把设备的系统时钟
+校到服务端时间**（日志：`agent: system clock set from the server (was off by …)`），设备日志时间也就准了。
+设备已由 NTP 同步时不动它（此时说明是服务器时间不准，日志会提示检查服务器时钟）。
 
-想让设备日志时间也准，见第 9 节"无外网运行"里的局域网 NTP 配置（只影响日志时间，不影响播放与认证）。
+#### 轮询/心跳报 connection reset by peer / EOF
+
+这是 TCP 连接被对端断开，不是认证问题（认证失败一定是 401 并写明原因）。代理每次请求失败后都会
+丢掉连接池里的旧连接、下次用新连接重试；服务端空闲连接保持 120 秒、比设备端（90 秒）晚关，
+避免"服务端刚关、设备正好复用"的竞争。仍然持续出现时按顺序查：
+
+1. `server_url` 指向的确实是 display-server（端口 9000 常被别的程序占用：`ss -ltnp | grep 9000`）；
+2. 服务端日志里有没有 `http: panic serving`（服务端处理请求时崩了），有的话把那几行发给开发；
+3. 服务器的防火墙（ufw、firewalld、fail2ban）有没有拦设备的 IP；
+4. 局域网里有没有 IP 冲突（另一台机器占了服务器的地址也会表现为连接被随机重置）。
 
 #### 设备报"在服务端登记的是另一把密钥"
 
@@ -343,8 +354,9 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 
 | 列 | 内容 | 多久更新 |
 |---|---|---|
-| 设备 | 编号、主机名/IP、程序版本，以及**解码方式 · SoC 温度 · 实际输出分辨率**（≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
-| 当前显示 | **等待刷新**（后台改了内容，设备还没来取）→ **正在刷新**（设备在下载新内容）→ **已显示最新内容**；离线设备显示"离线"。下面一行是内容来源与模板名；等待/正在刷新时再显示"设备 N 秒前联系过"，超过 2 个轮询周期没来就标黄"设备 N 秒未响应" | 设备每次轮询（`poll_interval_s`，默认 10 秒） |
+| 状态 | 在线/离线；在线时显示"N 秒前联系过"，超过 2 个轮询周期没来就标黄"N 秒未响应"，到离线阈值提示"可能已离线"；离线时显示最后在线时间 | 每秒走字 |
+| 设备 | 编号、主机名/IP、程序版本，以及**解码方式 · SoC 温度 · 实际输出分辨率**（软解与 ≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
+| 当前显示 | **等待刷新**（后台改了内容，设备还没来取）→ **正在刷新**（设备在下载新内容）→ **已显示最新内容**；离线设备显示"离线"。下面一行是内容来源与模板名 | 设备每次轮询（`poll_interval_s`，默认 10 秒） |
 
 页面本身每 10 秒自动刷新一次（打开对话框时暂停），所以看到的状态最多再晚 10 秒；"N 秒前联系过"每秒走字。
 
@@ -356,10 +368,11 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 | | 处理 | 为什么 |
 |---|---|---|
 | 图片 | png/jpg ≤ 20MB；超过 1440×900 的**自动等比缩小** | 设备只有 1GB 内存，解码后的位图是 宽×高×4 字节；在服务端缩一次，所有设备都省 |
-| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0，x264 `fastdecode`）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 设备是软解（见 3.4），原片动辄 1080p、10~20Mbps，软解不动、硬撑就发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
+| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0，x264 `fastdecode`）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 设备用 cedrus 硬解（见 3.4），只认常规档次的 H.264/H.265、1080p 以内；原片动辄 10~20Mbps，持续高码率即使硬解也会发热，到 85°C 降频、更高直接关机。`fastdecode` 是给硬解失效时兜底。H.265 原片也照收——反正会被转成 H.264 |
 
 转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后按你在列表里排好的位置加入播放
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
+服务端控制台每 30 秒报一次转码进度。
 
 服务端控制台（`journalctl -u display-server -f`）记录的是**服务端自己在做什么**，不刷设备心跳。
 服务端与设备端的日志一律是英文；后台界面上给运营方看的提示（如拒收原因）是中文：
@@ -368,7 +381,8 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 upload started: device scr-0017, promo.mov (about 186.4MB)
 upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for transcoding as promo.mp4
 transcode started: device scr-0017, promo.mp4 (source 186.4MB, 62s)
-transcoding: device scr-0017, promo.mp4 50% (41s elapsed)
+transcoding: device scr-0017, promo.mp4 37% (30s elapsed)
+transcoding: device scr-0017, promo.mp4 74% (1m0s elapsed)
 transcode done: device scr-0017, promo.mp4 (186.4MB -> 19.2MB in 1m22s), added to playlist
 admin PUT /devices/scr-0017/media -> 200 (2ms)
 new content pushed: device scr-0017, version 3f9a…, 4 file(s) + template overlay
@@ -515,7 +529,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 | 情况 | 不处理会怎样 | 现在的做法 |
 |---|---|---|
-| 设备没有 RTC、连不上外网 NTP，时钟偏了 | 签名请求全部 401，设备收不到任何更新 | 设备按服务端响应里的时间签名，认证不依赖设备时钟 |
+| 设备没有 RTC、连不上外网 NTP，时钟偏了 | 签名请求全部 401，设备收不到任何更新 | 设备按服务端响应里的时间签名，并把自己的系统时钟校到服务端时间 |
 | 局域网 DNS 是路由器转发到运营商，外网一断域名就解析不了 | 设备找不到服务端 | 设备记住上次解析成功的地址（`cache_dir/server-addr`），解析失败时用它 |
 | 服务端暂时连不上（服务器关机、交换机故障） | 注册重试的等待超过看门狗 90 秒，代理连同播放进程被杀，屏幕每隔一分半黑一下 | 等待期间持续喂看门狗；屏幕一直播放本地缓存 |
 | 设备开机时网络还没就绪（网线没插、DHCP 拿不到地址） | 服务要等 network-online 超时（最长约 2 分钟），这期间黑屏 | 不再等网络，开机立即播放本地缓存，网络就绪后再注册、拉清单 |
@@ -527,13 +541,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 - **服务器时钟**：时段计划、测试屏到期、定时下发程序都按服务器时间计算。服务器有主板 RTC，断网后
   时间仍会走，但会慢慢漂移，且没人察觉。管理后台每次打开都会拿浏览器所在电脑的时间比对，相差 2 分钟
-  以上会在顶部提示。可在服务器上跑一个局域网 NTP 服务，让设备日志时间也一并准确（可选，不影响播放与认证）：
-  ```sh
-  # 服务器（安装时联网装好）：apt install chrony，然后在 /etc/chrony/chrony.conf 加
-  allow 192.168.0.0/16
-  local stratum 10
-  # 设备：/etc/systemd/timesyncd.conf 的 [Time] 下写 NTP=<服务器IP>，然后 systemctl restart systemd-timesyncd
-  ```
+  以上会在顶部提示。设备的时钟由代理自动校到服务器时间，所以服务器准了，全部设备就都准了。
   服务器时间偏了且没有可用的时间源时，手工校准：`date -s "2026-10-02 09:30:00"` 后 `hwclock -w`。
 - **server_url 用的域名**：设备**第一次注册时**必须能解析（局域网 DNS 静态记录，或在母镜像的
   `/etc/hosts` 里写死）。之后 DNS 失效会用缓存的地址；但服务器换了 IP 而 DNS 又不可用时，设备找不到新地址。

@@ -84,6 +84,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.ResolveIdentity(); err != nil {
 		return err
 	}
+	a.clock.setSystem = setSystemClock // 以服务方式运行时才校准系统时钟（见 clock.go）
 	log.Printf("agent: device_id=%s version=%s host=%s serial=%s", a.identity.DeviceID, Version, a.hw.Hostname, a.hw.HWSerial)
 
 	if err := a.player.Start(ctx); err != nil {
@@ -126,6 +127,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				}
 			case err != nil:
 				a.failures++
+				a.dropConnections()
 				log.Printf("agent: poll failed (attempt %d): %v", a.failures, err)
 			default:
 				a.failures = 0
@@ -144,12 +146,19 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-hbTimer.C:
 			sdNotify("WATCHDOG=1")
 			if err := a.Heartbeat(ctx); err != nil {
+				a.dropConnections()
 				log.Printf("agent: heartbeat failed: %v", err)
 			}
 			hbEvery = a.sched.Heartbeat()
 			hbTimer.Reset(hbEvery)
 		}
 	}
+}
+
+// dropConnections 丢掉连接池里的空闲连接：请求失败（尤其 connection reset / EOF）多半是复用了
+// 一条已被对端或中间设备断掉的长连接，下次重试要用新连接，而不是再撞同一条死连接。
+func (a *Agent) dropConnections() {
+	a.api.CloseIdleConnections()
 }
 
 // ResolveIdentity 采集硬件信息并确定设备编号/密钥（可单独调用，便于测试）。

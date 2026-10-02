@@ -443,6 +443,10 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
+	// 转码进度按时间间隔报：调成 0，每次进度回调都报（在服务端创建前改、关闭后再恢复，避免与转码协程竞争）
+	old := progressLogInterval
+	progressLogInterval = 0
+	t.Cleanup(func() { progressLogInterval = old })
 
 	s, h := newAdminTestServer(t)
 	s.setEncoder(&fakeEncoder{})
@@ -459,7 +463,7 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"device dev-001 online", "upload started: device dev-001, a.jpg", "upload done: device dev-001, a.jpg",
-		"queued for transcoding as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4",
+		"queued for transcoding as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4", "transcoding: device dev-001, b.mp4 50%",
 		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 200",
 	} {
 		if !strings.Contains(out, want) {

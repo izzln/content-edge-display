@@ -67,3 +67,36 @@ func TestServerClockOffset(t *testing.T) {
 		t.Fatalf("解析不了的 Date 头应忽略：%v", got)
 	}
 }
+
+// 没有 NTP 同步、偏差明显时，把系统时钟校到服务端时间；已由 NTP 同步、或偏差很小时不动。
+func TestSystemClockSetFromServer(t *testing.T) {
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	server := base.Add(72 * time.Hour) // 设备断电重启后时间停在三天前
+	cases := []struct {
+		name   string
+		synced bool
+		server time.Time
+		set    bool
+	}{
+		{"unsynced, large skew", false, server, true},
+		{"NTP-synced", true, server, false},
+		{"small skew", false, base.Add(20 * time.Second), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := base
+			var setTo time.Time
+			c := newServerClock()
+			c.local = func() time.Time { return now }
+			c.synced = func() bool { return tc.synced }
+			c.setSystem = func(t time.Time) error { setTo, now = t, t; return nil }
+			c.observe(http.Header{"Date": []string{tc.server.Format(http.TimeFormat)}})
+			if got := !setTo.IsZero(); got != tc.set {
+				t.Fatalf("set system clock = %v, want %v", got, tc.set)
+			}
+			if !c.Now().Equal(tc.server) {
+				t.Fatalf("签名用的时间应等于服务端时间：%v", c.Now())
+			}
+		})
+	}
+}
