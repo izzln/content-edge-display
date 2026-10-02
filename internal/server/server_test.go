@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"image"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -347,6 +348,90 @@ func TestDeviceSyncState(t *testing.T) {
 	poll(v2)
 	if got := state(); got != syncLatest {
 		t.Fatalf("应用后应为已显示最新内容，得到 %s", got)
+	}
+
+	// 只看这台设备自己的内容：改别的设备、新建一个没人用的模板，都不能让它变成"等待刷新"
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/dev-002/attributes", map[string]string{"room": "1"}), http.StatusOK)
+	do(t, h, adminReq("POST", "/api/v1/admin/templates", mediaTemplate("")), http.StatusOK)
+	if got := state(); got != syncLatest {
+		t.Fatalf("别的设备/没用到的模板改动不应影响本设备，得到 %s", got)
+	}
+	// 给它传了新图片：等待刷新
+	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"new.jpg", tinyPNG(t)}))
+	if got := state(); got != syncWaiting {
+		t.Fatalf("播放列表变了应为等待刷新，得到 %s", got)
+	}
+}
+
+// 指纹（contentKey）必须覆盖清单的全部输入：任何一次让清单版本变化的改动，指纹都得跟着变，
+// 否则后台会把还没刷新的设备显示成"已显示最新内容"。逐项改一遍核对。
+func TestContentKeyCoversManifestInputs(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	dev, _ := s.store.Device(testDeviceID)
+	snapshot := func() (string, string) {
+		m, err := s.buildManifest(dev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Version, s.contentKey(testDeviceID, now)
+	}
+	gid := globalTemplateID(t, s)
+	put := func(path string, body any) { do(t, h, adminReq("PUT", path, body), http.StatusOK) }
+	steps := []struct {
+		desc   string
+		change func()
+	}{
+		{"属性", func() { put("/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "302"}) }},
+		{"上传图片", func() {
+			parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.png", tinyPNG(t)}, upload{"b.png", tinyPNG(t)}))
+		}},
+		{"调整顺序", func() { put("/api/v1/admin/devices/"+testDeviceID+"/media", []string{"b.png", "a.png"}) }},
+		{"同名文件内容变了", func() {
+			img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+			putMediaFile(t, s, "a.png", encodePNG(t, img))
+			future := now.Add(time.Minute)
+			os.Chtimes(filepath.Join(s.deviceMediaDir(testDeviceID), "a.png"), future, future)
+		}},
+		{"左右对调", func() {
+			put("/api/v1/admin/devices/"+testDeviceID+"/display", map[string]any{"mode": "global", "mirror": true})
+			// 回归：后台"保存模板设置"不能冲掉排好的播放顺序
+			if got := s.store.Display(testDeviceID).Playlist; strings.Join(got, ",") != "b.png,a.png" {
+				t.Errorf("保存模板设置后播放顺序被改成了 %v", got)
+			}
+		}},
+		{"改全局模板内容", func() {
+			tpl := mediaTemplate(gid)
+			tpl["image_duration_s"] = 25
+			put("/api/v1/admin/templates/"+gid, tpl)
+		}},
+		{"时段计划到点", func() {
+			w := do(t, h, adminReq("POST", "/api/v1/admin/templates", splitTemplate()), http.StatusOK)
+			var created store.Template
+			json.Unmarshal(w.Body.Bytes(), &created)
+			loc := now.In(s.loc)
+			start := loc.Add(time.Hour).Format("15:04")
+			end := loc.Add(2 * time.Hour).Format("15:04")
+			put("/api/v1/admin/schedules", []store.Schedule{{TemplateID: created.ID, Start: start, End: end}})
+			now = now.Add(time.Hour + time.Minute) // 时间走到时段里：没有任何写入，清单也会变
+		}},
+		{"测试屏", func() {
+			do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusOK)
+		}},
+		{"测试屏到期", func() { now = now.Add(2 * time.Minute) }},
+	}
+	ver, key := snapshot()
+	for _, st := range steps {
+		st.change()
+		v2, k2 := snapshot()
+		if v2 != ver && k2 == key {
+			t.Errorf("%s：清单版本变了但指纹没变", st.desc)
+		}
+		if v2 == ver {
+			t.Errorf("%s：这一步本应改变清单（测试写错了？）", st.desc)
+		}
+		ver, key = v2, k2
 	}
 }
 

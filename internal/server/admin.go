@@ -155,6 +155,7 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	devices := s.allDevices()
 	statuses := make([]DeviceStatus, 0, len(devices))
 	for _, d := range devices {
+		key := s.contentKey(d.ID, now) // 读状态与文件元数据，放在 s.mu 外面
 		st := DeviceStatus{
 			ID:           d.ID,
 			Attrs:        s.store.Attrs(d.ID),
@@ -171,7 +172,7 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 		if hb, ok := s.lastHB[d.ID]; ok {
 			st.Heartbeat = &hb
 		}
-		st.Sync = s.syncState(d.ID, st.Online)
+		st.Sync = s.syncState(d.ID, st.Online, key)
 		s.mu.Unlock()
 		if until := s.store.TestUntil(d.ID); now.Before(until) {
 			st.TestUntil, st.ActiveSource = &until, "test"
@@ -297,6 +298,9 @@ func (s *Server) handlePutDisplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.store.Update(func(st *store.State) error {
+		// 播放顺序归播放列表接口管（上传/拖动排序），这里只改模板与左右对调。
+		// 整个替换的话，后台"保存模板设置"会把排好的顺序冲掉，退回按文件名排。
+		d.Playlist = st.Displays[dev.ID].Playlist
 		st.Displays[dev.ID] = d
 		return nil
 	})

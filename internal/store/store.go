@@ -176,7 +176,6 @@ type Store struct {
 	mu   sync.RWMutex
 	path string
 	s    State
-	gen  uint64 // 每次成功写入加一：用来判断设备上次取内容之后配置是否又改过
 }
 
 // Open 加载（或初始化）状态文件。
@@ -240,15 +239,7 @@ func (st *Store) Update(fn func(*State) error) error {
 	if err := fn(&st.s); err != nil {
 		return err
 	}
-	st.gen++
 	return st.persistLocked()
-}
-
-// Gen 返回写入计数（只在内存里，服务端重启后从 0 开始）。
-func (st *Store) Gen() uint64 {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	return st.gen
 }
 
 func (st *Store) persistLocked() error {

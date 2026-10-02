@@ -173,7 +173,7 @@ type deviceSync struct {
 	expected string // 那次轮询时服务端算出的版本
 	applied  string // 设备当时已应用的版本
 	served   string // 最近一次下发（200）给它的版本
-	gen      uint64 // 那次轮询时的配置写入计数
+	key      string // 那次轮询时这台设备清单的输入指纹，见 contentKey
 }
 
 // 设备内容状态。
@@ -184,15 +184,16 @@ const (
 	syncLatest  = "latest"  // 设备显示的就是最新内容
 )
 
-// syncState 判断设备的内容状态（调用方持有 s.mu）。
-// 按时间自动发生的变化（时段计划切换、测试屏到期）不改配置，在设备下次轮询时体现为"正在刷新"。
-func (s *Server) syncState(deviceID string, online bool) string {
+// syncState 判断设备的内容状态（调用方持有 s.mu）。key 是这台设备清单输入的当前指纹（contentKey），
+// 与它上次轮询时的指纹不同，说明它该显示的内容变了而它还没来取。只看这台设备自己的输入：
+// 改别的设备、改没被用到的模板都不影响它；时段计划到点切换、测试屏到期也能及时体现。
+func (s *Server) syncState(deviceID string, online bool, key string) string {
 	if !online {
 		return syncOffline
 	}
 	st, ok := s.sync[deviceID]
 	switch {
-	case !ok || st.gen != s.store.Gen():
+	case !ok || st.key != key:
 		return syncWaiting
 	case st.applied != st.expected:
 		return syncSyncing
@@ -482,7 +483,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	gen := s.store.Gen() // 先取：构建期间若又有改动，状态会保持"等待刷新"直到下次轮询
+	key := s.contentKey(dev.ID, s.now()) // 先取：构建期间若又有改动，状态会保持"等待刷新"直到下次轮询
 	m, err := s.buildManifest(dev)
 	if err != nil {
 		log.Printf("manifest build for %s failed: %v", dev.ID, err)
@@ -492,7 +493,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	applied := strings.Trim(strings.TrimSpace(r.Header.Get("If-None-Match")), `"`)
 	s.mu.Lock()
 	prev := s.sync[dev.ID]
-	s.sync[dev.ID] = deviceSync{expected: m.Version, applied: applied, served: prev.served, gen: gen}
+	s.sync[dev.ID] = deviceSync{expected: m.Version, applied: applied, served: prev.served, key: key}
 	s.mu.Unlock()
 
 	w.Header().Set("ETag", `"`+m.Version+`"`)
@@ -557,6 +558,32 @@ func (s *Server) mediaItems(deviceID string, tpl store.Template) ([]manifest.Ite
 		return nil, err
 	}
 	return manifest.BuildItems(s.deviceMediaDir(deviceID), deviceID, names, tpl.ImageDurationS, s.hashes)
+}
+
+// contentKey 汇总决定设备清单的全部输入，得出一个指纹：测试屏、生效的模板（专属/时段/全局，
+// 含模板内容）、属性、左右对调、播放列表（文件名/大小/修改时间）、待执行的更新指令。
+// 只读状态与文件元数据，不渲染、不算哈希，后台每次刷新设备列表时都能算。
+// 任何会改变清单版本的输入都必须在这里，否则后台会把没刷新的设备显示成"已显示最新内容"。
+func (s *Server) contentKey(deviceID string, now time.Time) string {
+	h := sha256.New()
+	enc := json.NewEncoder(h)
+	if until := s.store.TestUntil(deviceID); now.Before(until) {
+		enc.Encode([]any{"test", until.Unix(), s.store.Attrs(deviceID)})
+	} else {
+		tpl, _, _ := s.resolveTemplate(deviceID, now)
+		enc.Encode([]any{"tpl", tpl, s.store.Attrs(deviceID), s.store.Display(deviceID).Mirror})
+		if _, ok := tpl.MediaRegion(); ok {
+			names, _ := s.playlist(deviceID)
+			for _, n := range names {
+				if fi, err := os.Stat(filepath.Join(s.deviceMediaDir(deviceID), n)); err == nil {
+					fmt.Fprintf(h, "%s\x00%d\x00%d\n", n, fi.Size(), fi.ModTime().UnixNano())
+				}
+			}
+		}
+	}
+	cmd, ok := s.updateCommand(deviceID, now)
+	enc.Encode([]any{"cmd", ok, cmd})
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 // buildManifest 生成设备清单：测试屏 > 模板（专属/时段/全局），并附带待执行指令。
