@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/player"
@@ -324,4 +325,45 @@ func TestLostIdentityRecoversAfterAdminAccepts(t *testing.T) {
 	if _, err := a.PollOnce(ctx); err != nil {
 		t.Fatalf("重新注册后应能正常拉取清单：%v", err)
 	}
+}
+
+// 运营方在后台删了一台正在运行的设备：设备不能一直 401 下去，要自己重新注册回来。
+func TestDeletedDeviceReRegistersItself(t *testing.T) {
+	a, srv, h := newEnrollEnv(t)
+	a.cfg.PollIntervalS = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	waitUntil := func(desc string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("超时：%s", desc)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	registered := func() bool {
+		r := httptest.NewRequest("GET", "/api/v1/admin/devices", nil)
+		r.Header.Set("X-Admin-Token", "admin")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return strings.Contains(w.Body.String(), `"id":"`)
+	}
+	waitUntil("首次注册", registered)
+
+	req := httptest.NewRequest("DELETE", "/api/v1/admin/devices/"+a.DeviceID(), nil)
+	req.Header.Set("X-Admin-Token", "admin")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("删除设备失败：%d", w.Code)
+	}
+	waitUntil("被删除后自动重新注册", registered)
+	_ = srv
+	cancel()
+	<-done
 }

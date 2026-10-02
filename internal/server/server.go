@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -146,9 +147,10 @@ type Server struct {
 	renderer *render.Renderer
 	loc      *time.Location
 
-	mu       sync.Mutex
-	lastSeen map[string]time.Time
-	lastHB   map[string]Heartbeat
+	mu         sync.Mutex
+	lastSeen   map[string]time.Time
+	lastHB     map[string]Heartbeat
+	authLogged map[string]time.Time // 认证失败日志节流
 
 	encMu      sync.Mutex
 	encoder    videoEncoder                 // nil 表示当前没有可用的 ffmpeg：不收视频
@@ -175,13 +177,14 @@ func New(cfg *Config) (*Server, error) {
 		}
 	}
 	s := &Server{
-		cfg:      cfg,
-		hashes:   manifest.NewHashCache(),
-		store:    st,
-		loc:      loc,
-		lastSeen: make(map[string]time.Time),
-		lastHB:   make(map[string]Heartbeat),
-		now:      time.Now,
+		cfg:        cfg,
+		hashes:     manifest.NewHashCache(),
+		store:      st,
+		loc:        loc,
+		lastSeen:   make(map[string]time.Time),
+		lastHB:     make(map[string]Heartbeat),
+		authLogged: make(map[string]time.Time),
+		now:        time.Now,
 	}
 	// 首次启动时把需要的目录都建出来（media_root 也在内：设备媒体文件放这里）。
 	// incoming/ 是待转码原片的暂存区：转码任务只在内存里，重启后它们已无人认领，清掉。
@@ -306,11 +309,14 @@ func (s *Server) allDevices() []store.Device {
 	return out
 }
 
+// errUnknownDevice 表示请求里的设备编号没有登记（从未注册，或在后台被删除了）。
+var errUnknownDevice = errors.New("unknown device")
+
 // authenticate 校验设备签名请求头，返回设备。
 func (s *Server) authenticate(r *http.Request) (store.Device, error) {
 	dev, ok := s.store.Device(r.Header.Get(sign.HeaderDeviceID))
 	if !ok {
-		return store.Device{}, errors.New("unknown device")
+		return store.Device{}, errUnknownDevice
 	}
 	err := sign.Verify(dev.Secret,
 		r.Header.Get(sign.HeaderTimestamp), r.Method, r.URL.Path,
@@ -321,14 +327,43 @@ func (s *Server) authenticate(r *http.Request) (store.Device, error) {
 	return dev, nil
 }
 
+// deviceAuth 校验设备请求；失败时回 401 并说明原因、记日志（同一设备同一原因每分钟最多一条）。
+//
+// 只回一句 "unauthorized" 的话，现场根本无从判断是时钟不准、密钥不对还是设备被删了——
+// 而这三种的处理办法完全不同。原因写进响应体，设备端据此记日志或自动重新注册。
+func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Device, bool) {
+	dev, err := s.authenticate(r)
+	if err == nil {
+		return dev, true
+	}
+	id := r.Header.Get(sign.HeaderDeviceID)
+	reason := err.Error()
+	switch {
+	case errors.Is(err, sign.ErrExpired):
+		ts, _ := strconv.ParseInt(r.Header.Get(sign.HeaderTimestamp), 10, 64)
+		reason = fmt.Sprintf("clock skew: device time %s, server time %s (allowed ±%s)",
+			time.Unix(ts, 0).In(s.loc).Format(time.DateTime), s.now().In(s.loc).Format(time.DateTime), sign.MaxClockSkew)
+	case errors.Is(err, sign.ErrMismatch):
+		reason = "bad signature: device key does not match the registered key"
+	}
+	s.mu.Lock()
+	key := id + "|" + strings.SplitN(reason, ":", 2)[0]
+	if s.now().Sub(s.authLogged[key]) >= time.Minute {
+		s.authLogged[key] = s.now()
+		log.Printf("auth: rejected device=%q %s %s: %s", id, r.Method, r.URL.Path, reason)
+	}
+	s.mu.Unlock()
+	http.Error(w, "unauthorized: "+reason, http.StatusUnauthorized)
+	return store.Device{}, false
+}
+
 // serveDeviceFile 生成设备下载文件的处理器（媒体、渲染图、固件共用）：
 // 校验签名；路径里带 {device} 的只允许访问自己的目录；文件名不得含路径成分。
 // http.ServeFile 原生支持 Range，设备端据此断点续传。
 func (s *Server) serveDeviceFile(dirOf func(deviceID string) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		dev, err := s.authenticate(r)
-		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		dev, ok := s.deviceAuth(w, r)
+		if !ok {
 			return
 		}
 		if d := r.PathValue("device"); d != "" && d != dev.ID {
@@ -349,9 +384,8 @@ func (s *Server) deviceMediaDir(deviceID string) string {
 }
 
 func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
-	dev, err := s.authenticate(r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	dev, ok := s.deviceAuth(w, r)
+	if !ok {
 		return
 	}
 	m, err := s.buildManifest(dev)
@@ -427,7 +461,7 @@ func (s *Server) buildManifest(dev store.Device) (*manifest.Manifest, error) {
 	)
 
 	if until := s.store.TestUntil(dev.ID); now.Before(until) {
-		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, s.store.Attrs(dev.ID), until)
+		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, s.store.Attrs(dev.ID), until.In(s.loc))
 		if err != nil {
 			return nil, fmt.Errorf("render test card: %w", err)
 		}
@@ -541,9 +575,8 @@ func (s *Server) pruneRendered(deviceID string, keep []string) {
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	dev, err := s.authenticate(r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	dev, ok := s.deviceAuth(w, r)
+	if !ok {
 		return
 	}
 	var hb Heartbeat

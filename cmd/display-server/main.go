@@ -5,6 +5,9 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	// 内嵌时区数据：server.json 写了 timezone 而服务器没装 tzdata 包（精简系统、离线装机常见）时，
+	// time.LoadLocation 会失败、服务端拒绝启动。内嵌后约增加 450KB。
+	_ "time/tzdata"
 
 	"github.com/izzln/content-edge-display/internal/server"
 )

@@ -2,8 +2,10 @@
 # 由 install-agent.sh 安装；OTA 布局见 deploy/golden-image.md
 [Unit]
 Description=Content Edge Display Agent
-After=network-online.target
-Wants=network-online.target
+# 刻意不依赖 network-online.target：网线没插、DHCP 拿不到地址时，那个目标要等到超时
+# （systemd-networkd-wait-online 默认 2 分钟）才放行，这期间屏幕是黑的。代理自己能处理没网的情况：
+# 先播本地缓存，网络就绪后再注册、拉清单。
+After=network.target
 
 [Service]
 Type=notify

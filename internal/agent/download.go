@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
 )
@@ -41,6 +42,10 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 	if err != nil {
 		return err
 	}
+	// 不设总超时（几百 MB 的视频在慢网上要下很久），改为停滞检测：stallTimeout 内一个字节都没收到
+	// 就放弃，下次轮询从 .part 续传。
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req, err := a.newRequest(ctx, http.MethodGet, u.EscapedPath(), nil)
 	if err != nil {
 		return err
@@ -48,7 +53,7 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 	if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
-	resp, err := a.http.Do(req)
+	resp, err := a.dl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -61,12 +66,12 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 	case http.StatusOK: // 服务器不认续传或从头下载
 		f, err = os.Create(part)
 	default:
-		return fmt.Errorf("unexpected status %s", resp.Status)
+		return statusError(resp)
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, newProgressReader(resp.Body, cancel)); err != nil {
 		f.Close()
 		return err
 	}
@@ -97,4 +102,37 @@ func fileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// stallTimeout 是下载停滞多久算失败；必须小于 systemd 看门狗的 90 秒。
+const stallTimeout = 60 * time.Second
+
+// progressReader 在下载过程中做两件事：
+//   - 有数据进来就喂 systemd 看门狗。大文件下载可能持续几分钟，主循环这段时间不会回到喂狗点，
+//     不喂的话 90 秒后 systemd 认定假死，连同 mpv 一起杀掉重启——屏幕黑一下，下载从头再来；
+//   - 超过 stallTimeout 没收到任何数据就取消请求（服务端或网络卡死），让主循环继续。
+type progressReader struct {
+	r      io.Reader
+	stall  time.Duration
+	timer  *time.Timer
+	lastWD time.Time
+}
+
+func newProgressReader(r io.Reader, cancel context.CancelFunc) *progressReader {
+	return &progressReader{r: r, stall: stallTimeout, timer: time.AfterFunc(stallTimeout, cancel)}
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.timer.Reset(p.stall)
+		if time.Since(p.lastWD) > 10*time.Second {
+			sdNotify("WATCHDOG=1")
+			p.lastWD = time.Now()
+		}
+	}
+	if err != nil {
+		p.timer.Stop()
+	}
+	return n, err
 }

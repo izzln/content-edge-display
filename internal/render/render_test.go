@@ -168,3 +168,28 @@ func TestNewBadFontPath(t *testing.T) {
 		t.Fatal("expected error for missing font file")
 	}
 }
+
+// 测试卡上的结束时间按传入的时区显示，不能被换成服务器操作系统的时区
+// （系统时区是 UTC、配置是 Asia/Tokyo 时，会差 9 小时）。
+func TestRenderTestCardUsesGivenTimezone(t *testing.T) {
+	r := newRenderer(t)
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instant := time.Date(2026, 10, 2, 3, 0, 0, 0, time.UTC) // 东京 12:00
+	render := func(at time.Time) [32]byte {
+		img, err := r.RenderTestCard(1440, 900, "dev-001", nil, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sha256.Sum256(encode(t, img))
+	}
+	asTokyo := render(instant.In(tokyo))
+	if asTokyo == render(instant.In(time.UTC)) {
+		t.Fatal("同一时刻按不同时区应显示不同的钟点")
+	}
+	if asTokyo != render(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)) {
+		t.Fatal("应显示东京时间 12:00:00")
+	}
+}

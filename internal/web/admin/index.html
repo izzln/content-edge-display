@@ -131,7 +131,7 @@ document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
   for (const t of ["devices", "templates", "firmware"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
 });
 
-let devices = [], templates = [], global = {}, schedules = [], firmware = [], info = {};
+let devices = [], templates = [], global = {}, schedules = [], firmware = [], info = {}, infoFetchedAt = 0;
 const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
 const tplById = id => templates.find(t => t.id === id);
 const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段", global: "全局" };
@@ -145,6 +145,7 @@ async function refresh() {
     // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
     [devices, templates, global, schedules, firmware, info] =
       [arr(d), arr(t), g || {}, arr(s), arr(f), i || {}];
+    infoFetchedAt = Date.now();
   } catch { return; }
   try {
     renderDevices(); renderTemplates(); renderSchedules(); renderFirmware();
@@ -178,6 +179,17 @@ function renderDevices() {
     ? `当前全局默认模板：<b>${esc(g.name)}</b>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}
        <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
     : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
+  // 服务器时钟偏差：时段计划按服务器时间切换。离线环境下服务器没有 NTP，漂移不会有人察觉；
+  // 浏览器所在的电脑通常时间是准的，拿它比一下。
+  if (info.server_time) {
+    const skewMin = Math.round((info.server_time - infoFetchedAt) / 60000);
+    if (Math.abs(skewMin) >= 2) {
+      $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务器时间与本机相差约 <b>${Math.abs(skewMin)} 分钟</b>
+        （服务器：${esc(new Date(info.server_time).toLocaleString())}，时区 ${esc(info.timezone || "")}）。
+        时段计划会按服务器时间切换，请校准服务器时钟（无外网时见部署文档"无外网运行"一节）。
+        设备播放与认证不受影响。</div>`;
+    }
+  }
   if (!info.transcode) {
     $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端的 ffmpeg 不可用，暂时<b>不能上传视频</b>
       （未转码的原片码率过高，会让设备过热关机）。
