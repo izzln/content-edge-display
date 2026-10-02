@@ -205,7 +205,7 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 			dev1 = &statuses[i]
 		}
 	}
-	if dev1 == nil || !dev1.Online || dev1.Heartbeat == nil || dev1.Heartbeat.Version != "abc" {
+	if dev1 == nil || !dev1.Online || dev1.Heartbeat == nil || dev1.Heartbeat.AgentVersion != "0.1.0" || dev1.Heartbeat.UptimeS != 42 {
 		t.Fatalf("unexpected device status: %+v", dev1)
 	}
 }
@@ -363,19 +363,22 @@ func TestDeviceSyncState(t *testing.T) {
 	}
 }
 
-// 指纹（contentKey）必须覆盖清单的全部输入：任何一次让清单版本变化的改动，指纹都得跟着变，
+// 指纹（content.key）必须覆盖清单的全部输入：任何一次让清单版本变化的改动，指纹都得跟着变，
 // 否则后台会把还没刷新的设备显示成"已显示最新内容"。逐项改一遍核对。
 func TestContentKeyCoversManifestInputs(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	now := time.Now()
 	s.now = func() time.Time { return now }
-	dev, _ := s.store.Device(testDeviceID)
 	snapshot := func() (string, string) {
-		m, err := s.buildManifest(dev)
+		c, err := s.content(testDeviceID, now)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return m.Version, s.contentKey(testDeviceID, now)
+		m, err := s.buildManifest(testDeviceID, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m.Version, c.key()
 	}
 	gid := globalTemplateID(t, s)
 	put := func(path string, body any) { do(t, h, adminReq("PUT", path, body), http.StatusOK) }

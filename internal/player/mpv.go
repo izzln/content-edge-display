@@ -411,15 +411,6 @@ func (p *MPV) Load(scene Scene) error {
 	return nil
 }
 
-func (p *MPV) NowPlaying() string {
-	data, err := p.command("get_property", "path")
-	if err != nil {
-		return ""
-	}
-	s, _ := data.(string)
-	return s
-}
-
 func (p *MPV) snapshotImageDur() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

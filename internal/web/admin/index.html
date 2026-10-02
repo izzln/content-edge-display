@@ -185,8 +185,8 @@ async function refresh() {
 }
 
 // ================= 设备 =================
-// healthLine 把设备上报的解码方式、温度、输出分辨率翻译成一眼能看懂的提示。
-// 这三项出问题的现场表现分别是：卡顿发热、过热关机、画面错位。
+// healthLine 把设备心跳翻译成一眼能看懂的提示：解码方式、温度、输出分辨率、运行时长、剩余空间。
+// 对应的现场问题分别是：卡顿发热、过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
 function healthLine(hb) {
   const parts = [];
   if (hb.hwdec === "no") parts.push('<span class="bad" title="H3 软解带不动 1440×900，会卡顿、发热甚至过热关机">软解</span>');
@@ -199,6 +199,14 @@ function healthLine(hb) {
     parts.push(ok ? `${hb.output_w}×${hb.output_h}`
       : `<span class="warn" title="显示屏实际输出与模板画布不一致（叠加图会被缩放）；检查 /boot/armbianEnv.txt 的 video= 参数">输出 ${hb.output_w}×${hb.output_h}</span>`);
   }
+  if (hb.uptime > 0) {
+    const h = hb.uptime / 3600;
+    parts.push(h < 1
+      ? `<span class="warn" title="设备刚重启过；反复出现时留意温度（H3 过热会自动关机）">${Math.max(1, Math.round(hb.uptime / 60))} 分钟前启动</span>`
+      : `运行 ${h < 48 ? Math.round(h) + " 小时" : Math.round(h / 24) + " 天"}`);
+  }
+  if (hb.disk_free_mb >= 0 && hb.disk_free_mb < 500)
+    parts.push(`<span class="bad" title="缓存分区快满了，新内容可能下载失败">剩余 ${hb.disk_free_mb} MB</span>`);
   return parts.length ? `<div class="muted">${parts.join(" · ")}</div>` : "";
 }
 
@@ -247,10 +255,11 @@ function renderDevices() {
     if (d.online && d.last_seen) show += `<div class="contact" data-seen="${Date.parse(d.last_seen)}" data-poll="${d.poll_interval_s}"
       data-offline="${d.offline_after_s}" data-sync="${esc(d.sync)}"></div>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
-    let ver = `<div class="muted">程序 ${esc(d.agent_version || "?")}`;
+    const agentVer = d.hw?.agent_version;
+    let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
     if (d.update_target) {
       const t = d.update_target;
-      ver += d.agent_version === t.version
+      ver += agentVer === t.version
         ? ` <span class="okc">✓ 已更新到 ${esc(t.version)}</span>`
         : ` → <span class="warn">${esc(t.version)}${t.not_before && new Date(t.not_before) > new Date() ? " (定时 " + esc(fmtTime(t.not_before)) + ")" : " (待更新)"}</span>`;
     }
@@ -1045,7 +1054,7 @@ function renderFirmware() {
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
     <td>${(f.size / 1048576).toFixed(1)} MB<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
     <td>${esc(fmtTime(f.uploaded_at))}</td>
-    <td>${devices.filter(d => d.agent_version === f.version).length} / ${devices.length} 台在用</td>
+    <td>${devices.filter(d => d.hw?.agent_version === f.version).length} / ${devices.length} 台在用</td>
     <td><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
         <button class="danger" onclick="deleteFirmware('${esc(f.version)}')">删除</button></td></tr>`).join("");
   $("#fwTable").innerHTML = `<tr><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序</td></tr>'}`;
@@ -1062,7 +1071,7 @@ async function deleteFirmware(v) {
   await api(`/api/v1/admin/firmware/${v}`, { method: "DELETE" }); toast("已删除"); refresh();
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></label>`).join("");
+  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.hw?.agent_version || "?")}</span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>

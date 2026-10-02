@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -94,14 +92,8 @@ func (s *Server) updateCommand(deviceID string, now time.Time) (manifest.Command
 func (s *Server) handleListFirmware(w http.ResponseWriter, r *http.Request) {
 	var out []store.Firmware
 	s.store.View(func(st *store.State) {
-		for _, f := range st.Firmware {
-			out = append(out, f)
-		}
+		out = sortedValues(st.Firmware, func(a, b store.Firmware) int { return b.UploadedAt.Compare(a.UploadedAt) }) // 新的在前
 	})
-	sort.Slice(out, func(i, j int) bool { return out[i].UploadedAt.After(out[j].UploadedAt) })
-	if out == nil {
-		out = []store.Firmware{}
-	}
 	writeJSON(w, out)
 }
 
@@ -153,11 +145,9 @@ func (s *Server) handleUploadFirmware(w http.ResponseWriter, r *http.Request) {
 		Version: version, File: name, SHA256: hex.EncodeToString(h.Sum(nil)),
 		Size: n, Notes: r.FormValue("notes"), UploadedAt: s.now(),
 	}
-	if err := s.store.Update(func(st *store.State) error { st.Firmware[version] = fw; return nil }); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if s.update(w, func(st *store.State) { st.Firmware[version] = fw }) {
+		writeJSON(w, fw)
 	}
-	writeJSON(w, fw)
 }
 
 func (s *Server) handleDeleteFirmware(w http.ResponseWriter, r *http.Request) {
@@ -175,13 +165,10 @@ func (s *Server) handleDeleteFirmware(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var file string
-	err := s.store.Update(func(st *store.State) error {
+	if !s.update(w, func(st *store.State) {
 		file = st.Firmware[version].File
 		delete(st.Firmware, version)
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}) {
 		return
 	}
 	if file != "" {
@@ -200,8 +187,7 @@ type RolloutRequest struct {
 // handleRollout 为指定（或全部）设备设置更新目标；version 为空则取消。
 func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 	var req RolloutRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
 	if req.Version != "" {
@@ -224,7 +210,7 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := s.now()
-	err := s.store.Update(func(st *store.State) error {
+	if s.update(w, func(st *store.State) {
 		for _, id := range targets {
 			if req.Version == "" {
 				delete(st.Updates, id)
@@ -232,11 +218,7 @@ func (s *Server) handleRollout(w http.ResponseWriter, r *http.Request) {
 				st.Updates[id] = store.UpdateTarget{Version: req.Version, NotBefore: req.NotBefore, CreatedAt: now}
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	}) {
+		writeJSON(w, map[string]any{"devices": targets, "version": req.Version, "not_before": req.NotBefore})
 	}
-	writeJSON(w, map[string]any{"devices": targets, "version": req.Version, "not_before": req.NotBefore})
 }

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/jpeg" // image.DecodeConfig 需要
@@ -392,8 +391,7 @@ func (s *Server) handleReorderDeviceMedia(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var names []string
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&names); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 64<<10, &names) {
 		return
 	}
 	onDisk, err := manifest.ListMedia(s.deviceMediaDir(dev.ID))
@@ -438,7 +436,7 @@ func (s *Server) handleDeviceMediaThumb(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	name := r.PathValue("file")
-	if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") || manifest.TypeOf(name) != "image" {
+	if !manifest.SafeFileName(name) || manifest.TypeOf(name) != "image" {
 		http.NotFound(w, r)
 		return
 	}
@@ -472,7 +470,7 @@ func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	name := r.PathValue("file")
-	if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+	if !manifest.SafeFileName(name) {
 		http.Error(w, "bad file name", http.StatusBadRequest)
 		return
 	}

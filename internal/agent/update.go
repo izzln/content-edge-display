@@ -81,7 +81,7 @@ func (a *Agent) applyUpdate(ctx context.Context, cmd manifest.Command) error {
 			a.updateFailedAt[cmd.Version] = time.Now()
 			return fmt.Errorf("download: %w", err)
 		}
-	} else if sum, err := fileSHA256(dst); err != nil || sum != cmd.SHA256 {
+	} else if sum, err := manifest.FileSHA256(dst); err != nil || sum != cmd.SHA256 {
 		os.Remove(dst)
 		a.updateFailedAt[cmd.Version] = time.Now()
 		return fmt.Errorf("existing file checksum mismatch, removed; will retry")

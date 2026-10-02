@@ -23,7 +23,7 @@ type Overlay struct {
 
 // Scene 是设备当前应呈现的完整画面。
 //
-// Overlay 为 nil 时整屏播放 Items（无模板的目录轮播、测试卡、以及已渲染成整屏图的模板）。
+// Overlay 为 nil 时整屏播放 Items（测试卡、以及已渲染成整屏图的模板）。
 // Overlay 非 nil 时播放区被限制在 Media 矩形内并按 cover 撑满，叠加层盖在其余部分之上——
 // 这样模板区域里可以直接放视频，不需要服务端转码。
 type Scene struct {
@@ -40,8 +40,6 @@ type Player interface {
 	Start(ctx context.Context) error
 	// Load 用新画面替换当前画面（Items 为空表示黑屏待机）。
 	Load(scene Scene) error
-	// NowPlaying 返回当前播放条目的本地路径，未知时为空串。
-	NowPlaying() string
 	// Stats 返回随心跳上报的播放器运行状态（如实际解码方式、输出分辨率）。
 	// 问不到的项留空，不影响心跳。
 	Stats() Stats
@@ -51,9 +49,8 @@ type Player interface {
 type Stats struct {
 	// HWDec 是 mpv 实际使用的硬解方式；"no" 表示退化成了软解。
 	// H3 软解 1440×900 带不动，会卡顿、发热甚至过热关机，所以这一项要能在后台看到。
-	HWDec string `json:"hwdec,omitempty"`
+	HWDec string
 	// OutputW/H 是显示屏实际输出分辨率。与模板画布不一致时叠加图会被缩放，
 	// 对不上通常说明内核没吃下 video= 参数或换了块屏。
-	OutputW int `json:"output_w,omitempty"`
-	OutputH int `json:"output_h,omitempty"`
+	OutputW, OutputH int
 }

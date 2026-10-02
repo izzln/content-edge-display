@@ -15,6 +15,7 @@ import (
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/player"
 	"github.com/izzln/content-edge-display/internal/server"
+	"github.com/izzln/content-edge-display/internal/sign"
 )
 
 func TestDeriveDeviceID(t *testing.T) {
@@ -145,7 +146,7 @@ func TestRegisterThenPoll(t *testing.T) {
 	if len(statuses) != 1 || statuses[0].ID != a.DeviceID() || !statuses[0].Online {
 		t.Fatalf("device not online in admin: %+v", statuses)
 	}
-	if statuses[0].AgentVersion != Version {
+	if statuses[0].HW.AgentVersion != Version {
 		t.Fatalf("agent version not reported: %+v", statuses[0])
 	}
 }
@@ -310,7 +311,7 @@ func TestLostIdentityRecoversAfterAdminAccepts(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := a.Register(ctx)
-	if !errors.Is(err, errKeyConflict) || !strings.Contains(err.Error(), a.identity.Fingerprint()) {
+	if !errors.Is(err, errKeyConflict) || !strings.Contains(err.Error(), sign.Fingerprint(a.identity.Secret)) {
 		t.Fatalf("应报密钥冲突并给出本机指纹：%v", err)
 	}
 

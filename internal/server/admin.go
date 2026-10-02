@@ -4,16 +4,16 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
 	"github.com/izzln/content-edge-display/internal/web"
@@ -136,8 +136,36 @@ func (r *statusRecorder) WriteHeader(code int) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("admin: encode response failed: %v", err)
+		log.Printf("输出 JSON 失败：%v", err)
 	}
+}
+
+// decodeJSON 读取至多 limit 字节的 JSON 请求体；格式不对时回 400 并返回 false。
+func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(v); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// update 修改并持久化状态；写盘失败时回 500 并返回 false。
+func (s *Server) update(w http.ResponseWriter, fn func(*store.State)) bool {
+	if err := s.store.Update(func(st *store.State) error { fn(st); return nil }); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+// sortedValues 返回 map 的全部值并排序；空 map 返回 []（JSON 输出 [] 而不是 null）。
+func sortedValues[K comparable, V any](m map[K]V, cmp func(a, b V) int) []V {
+	out := make([]V, 0, len(m))
+	for _, v := range m {
+		out = append(out, v)
+	}
+	slices.SortFunc(out, cmp)
+	return out
 }
 
 func (s *Server) pathDevice(w http.ResponseWriter, r *http.Request) (store.Device, bool) {
@@ -155,12 +183,16 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	devices := s.allDevices()
 	statuses := make([]DeviceStatus, 0, len(devices))
 	for _, d := range devices {
-		key := s.contentKey(d.ID, now) // 读状态与文件元数据，放在 s.mu 外面
+		c, _ := s.content(d.ID, now) // 读状态与文件元数据，放在 s.mu 外面
 		st := DeviceStatus{
 			ID:           d.ID,
-			Attrs:        s.store.Attrs(d.ID),
+			Attrs:        c.Attrs,
 			Display:      s.store.Display(d.ID),
-			AgentVersion: d.AgentVersion,
+			ActiveSource: c.Source,
+			ActiveTpl:    c.Template.ID,
+		}
+		if !c.TestUntil.IsZero() {
+			st.TestUntil, st.ActiveTpl = &c.TestUntil, ""
 		}
 		s.mu.Lock()
 		offline := s.offlineAfter(d.ID)
@@ -172,13 +204,8 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 		if hb, ok := s.lastHB[d.ID]; ok {
 			st.Heartbeat = &hb
 		}
-		st.Sync = s.syncState(d.ID, st.Online, key)
+		st.Sync = s.syncState(d.ID, st.Online, c.key())
 		s.mu.Unlock()
-		if until := s.store.TestUntil(d.ID); now.Before(until) {
-			st.TestUntil, st.ActiveSource = &until, "test"
-		} else if tpl, source, ok := s.resolveTemplate(d.ID, now); ok {
-			st.ActiveSource, st.ActiveTpl = source, tpl.ID
-		}
 		if u, ok := s.store.UpdateTarget(d.ID); ok {
 			st.UpdateTarget = &u
 		}
@@ -200,16 +227,13 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.Update(func(st *store.State) error {
+	if !s.update(w, func(st *store.State) {
 		delete(st.Devices, dev.ID)
 		delete(st.DeviceAttrs, dev.ID)
 		delete(st.Displays, dev.ID)
 		delete(st.Updates, dev.ID)
 		delete(st.TestUntil, dev.ID)
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}) {
 		return
 	}
 	s.mu.Lock()
@@ -231,8 +255,7 @@ func (s *Server) handlePutAttrs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var attrs map[string]string
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&attrs); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 64<<10, &attrs) {
 		return
 	}
 	for k, v := range attrs {
@@ -241,15 +264,9 @@ func (s *Server) handlePutAttrs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err := s.store.Update(func(st *store.State) error {
-		st.DeviceAttrs[dev.ID] = attrs
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if s.update(w, func(st *store.State) { st.DeviceAttrs[dev.ID] = attrs }) {
+		writeJSON(w, attrs)
 	}
-	writeJSON(w, attrs)
 }
 
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
@@ -260,27 +277,22 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DurationS int `json:"duration_s"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 4<<10, &req) {
 		return
 	}
 	until := time.Time{} // duration<=0 表示取消测试
 	if req.DurationS > 0 {
 		until = s.now().Add(time.Duration(req.DurationS) * time.Second)
 	}
-	err := s.store.Update(func(st *store.State) error {
+	if s.update(w, func(st *store.State) {
 		if until.IsZero() {
 			delete(st.TestUntil, dev.ID)
 		} else {
 			st.TestUntil[dev.ID] = until
 		}
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	}) {
+		writeJSON(w, map[string]any{"test_until": until})
 	}
-	writeJSON(w, map[string]any{"test_until": until})
 }
 
 func (s *Server) handlePutDisplay(w http.ResponseWriter, r *http.Request) {
@@ -289,26 +301,21 @@ func (s *Server) handlePutDisplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d store.DisplayConfig
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&d); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 64<<10, &d) {
 		return
 	}
 	if err := store.ValidateDisplay(&d, s.store.Template); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	err := s.store.Update(func(st *store.State) error {
+	if s.update(w, func(st *store.State) {
 		// 播放顺序归播放列表接口管（上传/拖动排序），这里只改模板与左右对调。
 		// 整个替换的话，后台"保存模板设置"会把排好的顺序冲掉，退回按文件名排。
 		d.Playlist = st.Displays[dev.ID].Playlist
 		st.Displays[dev.ID] = d
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	}) {
+		writeJSON(w, d)
 	}
-	writeJSON(w, d)
 }
 
 // ---- 全局模板 / 时段计划 ----
@@ -319,19 +326,16 @@ func (s *Server) handleGetGlobal(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
 	var g store.GlobalConfig
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&g); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 4<<10, &g) {
 		return
 	}
 	if _, ok := s.store.Template(g.TemplateID); !ok {
 		http.Error(w, "模板不存在", http.StatusBadRequest)
 		return
 	}
-	if err := s.store.Update(func(st *store.State) error { st.Global = g; return nil }); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if s.update(w, func(st *store.State) { st.Global = g }) {
+		writeJSON(w, g)
 	}
-	writeJSON(w, g)
 }
 
 func (s *Server) handleGetSchedules(w http.ResponseWriter, r *http.Request) {
@@ -341,8 +345,7 @@ func (s *Server) handleGetSchedules(w http.ResponseWriter, r *http.Request) {
 // handlePutSchedules 整表替换时段计划。
 func (s *Server) handlePutSchedules(w http.ResponseWriter, r *http.Request) {
 	var list []store.Schedule
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&list); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 256<<10, &list) {
 		return
 	}
 	if list == nil {
@@ -352,11 +355,9 @@ func (s *Server) handlePutSchedules(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.store.Update(func(st *store.State) error { st.Schedules = list; return nil }); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if s.update(w, func(st *store.State) { st.Schedules = list }) {
+		writeJSON(w, list)
 	}
-	writeJSON(w, list)
 }
 
 // ---- 模板 ----
@@ -364,14 +365,8 @@ func (s *Server) handlePutSchedules(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	var out []store.Template
 	s.store.View(func(st *store.State) {
-		for _, t := range st.Templates {
-			out = append(out, t)
-		}
+		out = sortedValues(st.Templates, func(a, b store.Template) int { return strings.Compare(a.ID, b.ID) })
 	})
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	if out == nil {
-		out = []store.Template{}
-	}
 	writeJSON(w, out)
 }
 
@@ -379,8 +374,7 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 // 运营方不需要关心，管理后台也不显示——新建时（POST 且未带 ID）自动分配。
 func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	var t store.Template
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&t); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+	if !decodeJSON(w, r, 256<<10, &t) {
 		return
 	}
 	if id := r.PathValue("id"); id != "" {
@@ -393,15 +387,9 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	err := s.store.Update(func(st *store.State) error {
-		st.Templates[t.ID] = t
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if s.update(w, func(st *store.State) { st.Templates[t.ID] = t }) {
+		writeJSON(w, t)
 	}
-	writeJSON(w, t)
 }
 
 // handleDeleteTemplate 删除模板。
@@ -440,17 +428,13 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var newGlobal string
-	err := s.store.Update(func(st *store.State) error {
+	if s.update(w, func(st *store.State) {
 		delete(st.Templates, id)
 		store.EnsureGlobalTemplate(st)
 		newGlobal = st.Global.TemplateID
-		return nil
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	}) {
+		writeJSON(w, map[string]string{"global_template_id": newGlobal})
 	}
-	writeJSON(w, map[string]string{"global_template_id": newGlobal})
 }
 
 // handlePreview 渲染模板预览图。
@@ -474,7 +458,7 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
-	if err := render.EncodePNG(w, rendered.Image); err != nil {
-		log.Printf("preview encode failed: %v", err)
+	if err := png.Encode(w, rendered.Image); err != nil {
+		log.Printf("输出预览图失败：%v", err)
 	}
 }

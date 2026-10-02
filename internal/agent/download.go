@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,11 +11,6 @@ import (
 
 	"github.com/izzln/content-edge-display/internal/manifest"
 )
-
-// download 将清单条目下载到 dst。
-func (a *Agent) download(ctx context.Context, item manifest.Item, dst string) error {
-	return a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst)
-}
 
 // downloadFile 经 .part 临时文件断点续传下载 urlPath 到 dst，完成后校验 sha256 再改名。
 // 媒体、渲染图、固件共用此路径。
@@ -80,7 +73,7 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 	}
 
 	// 完整性校验：不符则删除，等下次重下。
-	sum, err := fileSHA256(part)
+	sum, err := manifest.FileSHA256(part)
 	if err != nil {
 		return err
 	}
@@ -89,19 +82,6 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 		return fmt.Errorf("sha256 mismatch: got %s want %s", sum, wantSHA)
 	}
 	return os.Rename(part, dst)
-}
-
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // stallTimeout 是下载停滞多久算失败；必须小于 systemd 看门狗的 90 秒。

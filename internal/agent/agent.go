@@ -208,15 +208,15 @@ var errKeyConflict = errors.New("key conflict")
 
 // Register 发送一次注册请求（幂等）。
 func (a *Agent) Register(ctx context.Context) error {
-	body, err := json.Marshal(map[string]string{
-		"device_id":     a.identity.DeviceID,
-		"secret":        a.identity.Secret,
-		"enroll_token":  a.cfg.EnrollToken,
-		"hostname":      a.hw.Hostname,
-		"hw_serial":     a.hw.HWSerial,
-		"mac":           a.hw.MAC,
-		"ip":            localIP(a.cfg.ServerURL),
-		"agent_version": Version,
+	body, err := json.Marshal(manifest.RegisterRequest{
+		DeviceID:     a.identity.DeviceID,
+		Secret:       a.identity.Secret,
+		EnrollToken:  a.cfg.EnrollToken,
+		Hostname:     a.hw.Hostname,
+		HWSerial:     a.hw.HWSerial,
+		MAC:          a.hw.MAC,
+		IP:           localIP(a.cfg.ServerURL),
+		AgentVersion: Version,
 	})
 	if err != nil {
 		return err
@@ -245,7 +245,7 @@ func (a *Agent) Register(ctx context.Context) error {
 		return fmt.Errorf("%w: device_id=%s 在服务端登记的是另一把密钥（本机 key=%s，身份文件 %s）。"+
 			"若确为本机（重装/换卡/身份文件丢失），请在管理后台该设备上点「接受新密钥」；"+
 			"若是另一台机器撞了编号，请给其中一台改主机名", errKeyConflict,
-			a.identity.DeviceID, a.identity.Fingerprint(), identityPath(a.cfg))
+			a.identity.DeviceID, sign.Fingerprint(a.identity.Secret), identityPath(a.cfg))
 	default:
 		return fmt.Errorf("register: %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
@@ -323,7 +323,7 @@ func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
 		if fi, err := os.Stat(dst); err == nil && fi.Size() == item.Size {
 			continue // 文件名内嵌哈希前缀 + 尺寸一致，视为已就绪
 		}
-		if err := a.download(ctx, item, dst); err != nil {
+		if err := a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst); err != nil {
 			return fmt.Errorf("download %s: %w", item.Name, err)
 		}
 	}
@@ -430,21 +430,18 @@ func derivedFromReferenced(name string, referenced map[string]bool) bool {
 // Heartbeat 上报一次心跳；本次运行首个成功心跳会确认当前版本（清除 pending-verify）。
 func (a *Agent) Heartbeat(ctx context.Context) error {
 	stats := a.player.Stats()
-	hb := map[string]any{
-		"version":      a.version,
-		"uptime":       uptimeSeconds(a.startedAt),
-		"disk_free_mb": diskFreeMB(a.cfg.CacheDir),
-		"playing":      a.player.NowPlaying(),
-		"player_ver":   Version,
-		"ip":           localIP(a.cfg.ServerURL),
-		"temp_c":       socTempC(),
-		"hwdec":        stats.HWDec,
-		"output_w":     stats.OutputW,
-		"output_h":     stats.OutputH,
+	body, err := json.Marshal(manifest.Heartbeat{
+		AgentVersion: Version,
+		IP:           localIP(a.cfg.ServerURL),
+		UptimeS:      uptimeSeconds(a.startedAt),
+		DiskFreeMB:   diskFreeMB(a.cfg.CacheDir),
+		TempC:        socTempC(),
+		HWDec:        stats.HWDec,
+		OutputW:      stats.OutputW,
+		OutputH:      stats.OutputH,
 		// 告诉服务端自己实际按多久轮询一次，服务端据此判断离线
-		"poll_interval_s": int(a.sched.Poll() / time.Second),
-	}
-	body, err := json.Marshal(hb)
+		PollIntervalS: int(a.sched.Poll() / time.Second),
+	})
 	if err != nil {
 		return err
 	}

@@ -28,7 +28,7 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
-// Spec 是转码目标。字段都有下限保护，零值按 DefaultSpec 处理。
+// Spec 是转码目标，取值见 DefaultSpec。
 type Spec struct {
 	MaxW, MaxH  int // 输出不超过这个尺寸（等比缩小，不放大）
 	MaxFPS      int // 帧率上限
@@ -42,26 +42,6 @@ type Spec struct {
 // 内容多为静态画面与缓慢运镜），同时把解码与发热压在 H3 吃得消的范围内。
 func DefaultSpec() Spec {
 	return Spec{MaxW: 1440, MaxH: 900, MaxFPS: 30, BitrateK: 2500, MaxBitrateK: 4000}
-}
-
-func (s Spec) withDefaults() Spec {
-	d := DefaultSpec()
-	if s.MaxW <= 0 {
-		s.MaxW = d.MaxW
-	}
-	if s.MaxH <= 0 {
-		s.MaxH = d.MaxH
-	}
-	if s.MaxFPS <= 0 {
-		s.MaxFPS = d.MaxFPS
-	}
-	if s.BitrateK <= 0 {
-		s.BitrateK = d.BitrateK
-	}
-	if s.MaxBitrateK <= 0 {
-		s.MaxBitrateK = d.MaxBitrateK
-	}
-	return s
 }
 
 // Encoder 封装一个可用的 ffmpeg。
@@ -133,7 +113,6 @@ func (e *Encoder) Version() string {
 // Video 把 src 转成设备能稳定播放的 H.264 MP4 写到 dst。
 // onProgress 以已处理的秒数回调（可为 nil），用于在后台显示进度。
 func (e *Encoder) Video(ctx context.Context, src, dst string, spec Spec, onProgress func(seconds float64)) error {
-	spec = spec.withDefaults()
 	// 写到同目录的隐藏文件里，完成后再改名：转码可能要几分钟，半成品如果是可见文件，
 	// 会被当成就绪内容列进播放列表、甚至下发给设备。媒体目录扫描会跳过 . 开头的文件。
 	// 后缀保留 .mp4，ffmpeg 靠它选封装格式。

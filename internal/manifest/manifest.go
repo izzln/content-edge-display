@@ -1,4 +1,5 @@
-// Package manifest 定义设备播放清单的数据结构，并负责从媒体目录构建播放条目。
+// Package manifest 定义设备与服务端之间的协议：播放清单、注册与心跳的报文、响应头约定，
+// 并负责从媒体目录构建播放条目。两端共用这里的类型，字段含义不会各说各话。
 package manifest
 
 import (
@@ -12,21 +13,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-)
-
-// 设备的轮询与心跳间隔由服务端统一规定（server.json），随每个设备请求的响应头下发
-// （包括 304 与注册响应），设备照办。改间隔只改服务端一处；服务端也因此知道每台设备
-// 多久该来一次，能据此判断离线。
-const (
-	HeaderPollInterval      = "X-Poll-Interval"      // 秒
-	HeaderHeartbeatInterval = "X-Heartbeat-Interval" // 秒
-
-	DefaultPollIntervalS      = 10
-	DefaultHeartbeatIntervalS = 60
-	MinPollIntervalS          = 1
-	MaxPollIntervalS          = 300
-	MinHeartbeatIntervalS     = 10
-	MaxHeartbeatIntervalS     = 3600
 )
 
 // Item 是清单中的一个播放条目。
@@ -93,6 +79,12 @@ var videoExts = map[string]bool{
 	".mp4": true, ".mkv": true, ".mov": true, ".avi": true, ".ts": true, ".webm": true, ".m4v": true,
 }
 
+// SafeFileName 判断 name 是不是可以直接拼进目录的单个文件名：不含路径成分、不是隐藏文件。
+// 设备下载、后台删除/缩略图、构建清单都要过这一关。
+func SafeFileName(name string) bool {
+	return name != "" && name == filepath.Base(name) && !strings.HasPrefix(name, ".") && !strings.ContainsRune(name, '\\')
+}
+
 // TypeOf 根据扩展名返回条目类型，不支持的类型返回空串。
 func TypeOf(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
@@ -122,14 +114,8 @@ func NewHashCache() *HashCache {
 	return &HashCache{m: make(map[string]hashEntry)}
 }
 
-// FileSHA256 返回文件内容的 sha256（hex），带缓存。
-func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
-	c.mu.Lock()
-	e, ok := c.m[path]
-	c.mu.Unlock()
-	if ok && e.size == size && e.mtime == mtime {
-		return e.sum, nil
-	}
+// FileSHA256 返回文件内容的 sha256（hex）。
+func FileSHA256(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -139,7 +125,21 @@ func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
-	sum := hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// FileSHA256 返回文件内容的 sha256（hex），带缓存。
+func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
+	c.mu.Lock()
+	e, ok := c.m[path]
+	c.mu.Unlock()
+	if ok && e.size == size && e.mtime == mtime {
+		return e.sum, nil
+	}
+	sum, err := FileSHA256(path)
+	if err != nil {
+		return "", err
+	}
 	c.mu.Lock()
 	c.m[path] = hashEntry{size: size, mtime: mtime, sum: sum}
 	c.mu.Unlock()
@@ -202,7 +202,7 @@ func ListMedia(dir string) ([]string, error) {
 func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *HashCache) ([]Item, error) {
 	items := []Item{}
 	for _, name := range names {
-		if name != filepath.Base(name) || strings.HasPrefix(name, ".") || TypeOf(name) == "" {
+		if !SafeFileName(name) || TypeOf(name) == "" {
 			continue
 		}
 		info, err := os.Stat(filepath.Join(dir, name))
