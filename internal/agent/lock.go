@@ -22,7 +22,7 @@ func lockCacheDir(dir string) (func(), error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("另一个 display-agent 正在使用 %s（systemctl status display-agent），不要同时运行两个", dir)
+		return nil, fmt.Errorf("another display-agent is already using %s (see systemctl status display-agent); do not run two at once", dir)
 	}
 	return func() { f.Close() }, nil // 关闭即释放锁；进程退出时内核也会释放
 }

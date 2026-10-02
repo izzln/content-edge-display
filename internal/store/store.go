@@ -26,10 +26,6 @@ const (
 	RegionMedia     = "media"     // 播放列表区：图片/视频由设备端播放，每个模板至多一个
 )
 
-// regionImageLegacy 是早期版本的"静态图片区"：每台设备绑定一张上传图、由服务端合成进画面。
-// 媒体区（播放列表）完全覆盖了它的用途，已删除；旧 state.json 加载时迁移为媒体区。
-const regionImageLegacy = "image"
-
 // Template 是运营方定义的显示模板（画布 + 若干区域）。
 type Template struct {
 	ID             string   `json:"id"` // 自动生成，管理后台不暴露给使用者
@@ -192,36 +188,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	st.s.init()
-	st.s.migrate()
 	return st, nil
-}
-
-// migrate 把旧版本 state.json 里已废弃的结构就地转换（内存里转，下次写盘时落地）：
-//   - 静态图片区（image）→ 媒体区：模板还没有媒体区时，第一个 image 区改成媒体区，其余删掉；
-//   - 显示模式 "playlist"（目录轮播，已删除）→ 跟随全局模板。
-func (s *State) migrate() {
-	for id, t := range s.Templates {
-		_, hasMedia := t.MediaRegion()
-		kept := t.Regions[:0]
-		for _, r := range t.Regions {
-			if r.Type == regionImageLegacy {
-				if hasMedia {
-					continue
-				}
-				r.Type, hasMedia = RegionMedia, true
-			}
-			kept = append(kept, r)
-		}
-		t.Regions = kept
-		s.Templates[id] = t
-	}
-	for id, d := range s.Displays {
-		if d.Mode != ModeTemplate {
-			d.Mode = ModeGlobal
-			d.TemplateID = ""
-		}
-		s.Displays[id] = d
-	}
 }
 
 // View 在读锁下访问状态；fn 内不得修改或保留 State 引用之外的可变数据。

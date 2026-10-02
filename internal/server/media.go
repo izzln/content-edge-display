@@ -177,22 +177,22 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		orig := filepath.Base(part.FileName())
-		log.Printf("接收上传 → 设备 %s：%s（%s）", dev.ID, orig, uploadSizeHint(r))
+		log.Printf("upload started: device %s, %s (%s)", dev.ID, orig, uploadSizeHint(r))
 		start := time.Now()
 		cr := &countingReader{r: part}
 		name, queued, reason := s.saveUploadedMedia(dev.ID, dir, cr, orig)
 		part.Close()
 		took := time.Since(start).Round(100 * time.Millisecond)
-		if reason != "" {
-			log.Printf("上传被拒 ← 设备 %s：%s（已收 %s，用时 %s）：%s", dev.ID, orig, humanBytes(cr.n), took, reason)
-			rejected = append(rejected, rejection{Name: orig, Reason: reason})
+		if reason != nil {
+			log.Printf("upload rejected: device %s, %s (%s received in %s): %s", dev.ID, orig, humanBytes(cr.n), took, reason.log)
+			rejected = append(rejected, rejection{Name: orig, Reason: reason.ui})
 			continue
 		}
 		if queued {
-			log.Printf("上传完成 ← 设备 %s：%s（%s，用时 %s），已排队转码为 %s", dev.ID, orig, humanBytes(cr.n), took, name)
+			log.Printf("upload done: device %s, %s (%s in %s), queued for transcoding as %s", dev.ID, orig, humanBytes(cr.n), took, name)
 			transcoding = append(transcoding, name)
 		} else {
-			log.Printf("上传完成 ← 设备 %s：%s（%s，用时 %s），已加入播放列表", dev.ID, name, humanBytes(cr.n), took)
+			log.Printf("upload done: device %s, %s (%s in %s), added to playlist", dev.ID, name, humanBytes(cr.n), took)
 			accepted = append(accepted, name)
 		}
 	}
@@ -211,33 +211,39 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"accepted": accepted, "transcoding": transcoding, "rejected": rejected, "playlist": files})
 }
 
+// rejectReason 是拒收原因：ui 显示在后台（中文，告诉运营方怎么办），log 写进控制台（英文）。
+type rejectReason struct{ ui, log string }
+
+func reject(ui, log string) *rejectReason { return &rejectReason{ui: ui, log: log} }
+
 // saveUploadedMedia 把一个上传分片落盘并归一化。
-// 返回最终文件名、是否进入了转码队列，或面向使用者的拒收原因。
+// 返回最终文件名、是否进入了转码队列，或拒收原因。
 //
 //   - 图片：校验能解码，过大的缩到画布尺寸以内，立即就绪；
 //   - 视频：原片放进暂存区排队转码，产物名统一为 .mp4。没有 ffmpeg 就不收视频——
 //     未转码的原片码率过高，会让设备过热关机，宁可当场拒绝。
-func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name string) (string, bool, string) {
+func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name string) (string, bool, *rejectReason) {
 	if !mediaNamePattern.MatchString(name) {
-		return "", false, "文件名非法（仅支持字母、数字、空格和 . _ -，最长 128 字符）"
+		return "", false, reject("文件名非法（仅支持字母、数字、空格和 . _ -，最长 128 字符）", "invalid file name")
 	}
 	isVideo := false
 	switch manifest.TypeOf(name) {
 	case "image":
 		if ext := strings.ToLower(filepath.Ext(name)); ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
-			return "", false, "图片仅支持 png/jpg"
+			return "", false, reject("图片仅支持 png/jpg", "unsupported image format")
 		}
 	case "video":
 		if s.videoEncoder() == nil {
-			return "", false, "服务端 ffmpeg 不可用，暂不能上传视频（未转码的视频会让设备过热）；原因见后台顶部提示"
+			return "", false, reject("服务端 ffmpeg 不可用，暂不能上传视频（未转码的视频会让设备过热）；原因见后台顶部提示",
+				"ffmpeg unavailable, videos are not accepted")
 		}
 		isVideo, name = true, transcode.OutputName(name)
 	default:
-		return "", false, "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等）"
+		return "", false, reject("不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等）", "unsupported file type")
 	}
 	name, release, err := s.claimMediaName(deviceID, name)
 	if err != nil {
-		return "", false, err.Error()
+		return "", false, reject(err.Error(), err.Error())
 	}
 	defer release()
 
@@ -245,44 +251,44 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name st
 	if isVideo {
 		limit, stageDir = maxVideoUploadBytes, filepath.Join(s.incomingDir(), deviceID)
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
-			return "", false, err.Error()
+			return "", false, reject(err.Error(), err.Error())
 		}
 	}
 	tmp := filepath.Join(stageDir, "."+name+".part")
 	out, err := os.Create(tmp)
 	if err != nil {
-		return "", false, err.Error()
+		return "", false, reject(err.Error(), err.Error())
 	}
 	// 多读 1 字节：读得出来说明超限了。
 	n, err := io.Copy(out, io.LimitReader(part, limit+1))
 	out.Close()
-	fail := func(reason string) (string, bool, string) {
+	fail := func(reason *rejectReason) (string, bool, *rejectReason) {
 		os.Remove(tmp)
 		return "", false, reason
 	}
 	switch {
 	case err != nil:
-		return fail("写入失败：" + err.Error())
+		return fail(reject("写入失败："+err.Error(), "write failed: "+err.Error()))
 	case n > limit:
-		return fail(fmt.Sprintf("文件超过上限 %dMB", limit>>20))
+		return fail(reject(fmt.Sprintf("文件超过上限 %dMB", limit>>20), fmt.Sprintf("exceeds the %dMB limit", limit>>20)))
 	}
 
 	if isVideo {
 		// 编码不用查：转码会统一成 H.264。是不是真视频交给 ffmpeg 判断，失败会显示在列表里。
 		s.jobs.add(&transcodeJob{deviceID: deviceID, name: name, src: tmp, status: jobQueued})
-		return name, true, ""
+		return name, true, nil
 	}
-	if reason := checkImage(tmp); reason != "" {
+	if reason := checkImage(tmp); reason != nil {
 		return fail(reason)
 	}
 	// 文件头能读不代表整张图完好（截断的文件过得了 DecodeConfig），完整解码在这一步才发生
 	if _, err := transcode.ShrinkImage(tmp, canvasW, canvasH); err != nil {
-		return fail("图片无法解码（文件损坏或不完整）")
+		return fail(reject("图片无法解码（文件损坏或不完整）", "image cannot be decoded"))
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
-		return fail(err.Error())
+		return fail(reject(err.Error(), err.Error()))
 	}
-	return name, false, ""
+	return name, false, nil
 }
 
 // claimMediaName 为一次上传选定不重名的文件名，并在上传期间占住它。
@@ -334,9 +340,9 @@ func (c *countingReader) Read(b []byte) (int, error) {
 // uploadSizeHint 给出本次上传请求的大致大小（单文件上传时就是文件大小）。
 func uploadSizeHint(r *http.Request) string {
 	if r.ContentLength > 0 {
-		return "约 " + humanBytes(r.ContentLength)
+		return "about " + humanBytes(r.ContentLength)
 	}
-	return "大小未知"
+	return "size unknown"
 }
 
 // humanBytes 把字节数格式化成 KB/MB。
@@ -352,21 +358,22 @@ func humanBytes(n int64) string {
 }
 
 // checkImage 在完整解码之前先读文件头：挡住伪装成图片的文件与超大图（解压炸弹）。
-func checkImage(path string) string {
+func checkImage(path string) *rejectReason {
 	f, err := os.Open(path)
 	if err != nil {
-		return err.Error()
+		return reject(err.Error(), err.Error())
 	}
 	defer f.Close()
 	cfg, _, err := image.DecodeConfig(f)
 	if err != nil {
-		return "图片无法解码（文件损坏或不是真正的 png/jpg）"
+		return reject("图片无法解码（文件损坏或不是真正的 png/jpg）", "not a decodable png/jpg")
 	}
 	if cfg.Width*cfg.Height > maxImagePixels {
-		return fmt.Sprintf("图片 %d×%d 像素过大（上限约 %d 万像素），请先缩小再上传",
-			cfg.Width, cfg.Height, maxImagePixels/10000)
+		return reject(fmt.Sprintf("图片 %d×%d 像素过大（上限约 %d 万像素），请先缩小再上传",
+			cfg.Width, cfg.Height, maxImagePixels/10000),
+			fmt.Sprintf("%dx%d exceeds the pixel limit", cfg.Width, cfg.Height))
 	}
-	return ""
+	return nil
 }
 
 // uniqueName 在同名文件已存在时加后缀，保留原名便于运营方辨认。
@@ -475,7 +482,7 @@ func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if s.jobs.remove(dev.ID, name) { // 转码中的会被取消，失败的直接移除
-		log.Printf("取消转码 ← 设备 %s：%s（运营方删除）", dev.ID, name)
+		log.Printf("transcode cancelled: device %s, %s (deleted by operator)", dev.ID, name)
 	}
 	if err := os.Remove(filepath.Join(s.deviceMediaDir(dev.ID), name)); err != nil && !os.IsNotExist(err) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

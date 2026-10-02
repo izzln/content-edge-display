@@ -64,15 +64,15 @@ func Find(bin string) (*Encoder, error) {
 	path, err := exec.LookPath(bin)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) && !strings.ContainsRune(bin, os.PathSeparator) {
-			return nil, fmt.Errorf("在 PATH 里找不到 %s（服务进程的 PATH=%s，运行用户 %s）", bin, os.Getenv("PATH"), currentUser())
+			return nil, fmt.Errorf("%s not found in PATH (service PATH=%s, user %s)", bin, os.Getenv("PATH"), currentUser())
 		}
-		return nil, fmt.Errorf("%s 不可用（运行用户 %s）：%v", bin, currentUser(), err)
+		return nil, fmt.Errorf("%s is not usable (user %s): %v", bin, currentUser(), err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, path, "-hide_banner", "-version").CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("找到了 %s，但以用户 %s 运行失败（%v）：%s", path, currentUser(), err, firstLine(out))
+		return nil, fmt.Errorf("found %s but it fails to run as user %s (%v): %s", path, currentUser(), err, firstLine(out))
 	}
 	e := &Encoder{bin: path, version: firstLine(out)}
 	e.fpsMax = e.supportsFPSMax()
@@ -165,7 +165,7 @@ func (e *Encoder) Video(ctx context.Context, src, dst string, spec Spec, onProgr
 		if len(msg) > 400 {
 			msg = msg[:400] + "…"
 		}
-		return fmt.Errorf("转码失败：%s", msg)
+		return fmt.Errorf("ffmpeg failed: %s", msg)
 	}
 	return os.Rename(tmp, dst)
 }

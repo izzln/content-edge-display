@@ -123,7 +123,7 @@ func TestVideoReportsBrokenInput(t *testing.T) {
 	src := filepath.Join(dir, "broken.mp4")
 	os.WriteFile(src, []byte("这不是视频"), 0o644)
 	err := e.Video(context.Background(), src, filepath.Join(dir, "out.mp4"), DefaultSpec(), nil)
-	if err == nil || !strings.Contains(err.Error(), "转码失败") {
+	if err == nil || !strings.Contains(err.Error(), "ffmpeg failed") {
 		t.Fatalf("坏文件应返回可读的错误，得到 %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "out.mp4")); !os.IsNotExist(err) {
@@ -198,7 +198,7 @@ func TestFindReportsWhy(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Setenv("PATH", dir)
-	if _, err := Find(""); err == nil || !strings.Contains(err.Error(), "PATH="+dir) || !strings.Contains(err.Error(), "运行用户") {
+	if _, err := Find(""); err == nil || !strings.Contains(err.Error(), "PATH="+dir) || !strings.Contains(err.Error(), "user ") {
 		t.Fatalf("不在 PATH 里：应给出实际 PATH 与运行用户，得到 %v", err)
 	}
 

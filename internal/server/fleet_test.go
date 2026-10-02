@@ -218,7 +218,7 @@ func TestFirmwareUploadRejectsWrongFile(t *testing.T) {
 
 func heartbeatAs(t *testing.T, h http.Handler, agentVer string) {
 	t.Helper()
-	body := strings.NewReader(`{"version":"v","uptime":1,"disk_free_mb":1,"playing":"","player_ver":"` + agentVer + `"}`)
+	body := strings.NewReader(`{"uptime":1,"disk_free_mb":1,"agent_version":"` + agentVer + `"}`)
 	r := signedRequest("POST", "/api/v1/device/heartbeat", body)
 	r.Header.Set("Content-Type", "application/json")
 	do(t, h, r, http.StatusNoContent)

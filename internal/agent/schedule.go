@@ -32,13 +32,13 @@ func (s *schedule) observe(h http.Header) {
 	learn := func(v *atomic.Int64, header string, lo, hi int64, what string) {
 		n, err := strconv.ParseInt(h.Get(header), 10, 64)
 		if err != nil {
-			return // 旧版服务端不发这个头：保持现状
+			return // 响应里没带（如代理链路剥掉了头）：保持现状
 		}
 		n = min(max(n, lo), hi)
 		if old := v.Swap(n); old != n {
-			log.Printf("agent: 按服务端设定，%s间隔 %ds → %ds", what, old, n)
+			log.Printf("agent: %s interval set by server: %ds -> %ds", what, old, n)
 		}
 	}
-	learn(&s.poll, manifest.HeaderPollInterval, manifest.MinPollIntervalS, manifest.MaxPollIntervalS, "轮询")
-	learn(&s.heartbeat, manifest.HeaderHeartbeatInterval, manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS, "心跳")
+	learn(&s.poll, manifest.HeaderPollInterval, manifest.MinPollIntervalS, manifest.MaxPollIntervalS, "poll")
+	learn(&s.heartbeat, manifest.HeaderHeartbeatInterval, manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS, "heartbeat")
 }

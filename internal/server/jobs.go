@@ -178,7 +178,7 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 	if fi, err := os.Stat(j.src); err == nil {
 		srcSize = fi.Size()
 	}
-	log.Printf("开始转码 设备 %s：%s（原片 %s，时长 %.0f 秒）", j.deviceID, j.name, humanBytes(srcSize), total)
+	log.Printf("transcode started: device %s, %s (source %s, %.0fs)", j.deviceID, j.name, humanBytes(srcSize), total)
 	dir := s.deviceMediaDir(j.deviceID)
 	dst := filepath.Join(dir, j.name)
 	logged := 0 // 已记录的进度档位（25/50/75）
@@ -192,7 +192,7 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 			s.jobs.update(j, func(j *transcodeJob) { j.progress = p })
 			if step := p / 25 * 25; step > logged && step < 100 {
 				logged = step
-				log.Printf("转码中 设备 %s：%s %d%%（已用 %s）", j.deviceID, j.name, step, time.Since(start).Round(time.Second))
+				log.Printf("transcoding: device %s, %s %d%% (%s elapsed)", j.deviceID, j.name, step, time.Since(start).Round(time.Second))
 			}
 		})
 	}
@@ -202,19 +202,19 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 		return
 	}
 	if err != nil {
-		log.Printf("转码失败 设备 %s：%s（用时 %s）：%v", j.deviceID, j.name, time.Since(start).Round(time.Second), err)
+		log.Printf("transcode failed: device %s, %s (after %s): %v", j.deviceID, j.name, time.Since(start).Round(time.Second), err)
 		s.jobs.update(j, func(j *transcodeJob) { j.status, j.err, j.cancel = jobFailed, err.Error(), nil })
 		return
 	}
 	// 完成：追加到播放列表末尾，然后从队列里摘掉
 	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
-		log.Printf("转码完成但加入播放列表失败 设备 %s：%s：%v", j.deviceID, j.name, err)
+		log.Printf("transcoded but adding to playlist failed: device %s, %s: %v", j.deviceID, j.name, err)
 	}
 	s.jobs.drop(j)
 	var outSize int64
 	if fi, err := os.Stat(dst); err == nil {
 		outSize = fi.Size()
 	}
-	log.Printf("转码成功 设备 %s：%s（%s → %s，用时 %s），已加入播放列表",
+	log.Printf("transcode done: device %s, %s (%s -> %s in %s), added to playlist",
 		j.deviceID, j.name, humanBytes(srcSize), humanBytes(outSize), time.Since(start).Round(time.Second))
 }

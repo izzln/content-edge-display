@@ -175,7 +175,7 @@ func TestHeartbeatVisibleInAdmin(t *testing.T) {
 	if len(statuses) != 1 || !statuses[0].Online {
 		t.Fatalf("device not online in admin view: %+v", statuses)
 	}
-	if hb := statuses[0].Heartbeat; hb == nil || hb.AgentVersion != Version || hb.PollIntervalS <= 0 {
+	if hb := statuses[0].Heartbeat; hb == nil || hb.AgentVersion != Version {
 		t.Fatalf("heartbeat not reported: %+v", hb)
 	}
 }

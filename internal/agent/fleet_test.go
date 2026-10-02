@@ -267,7 +267,7 @@ func TestCacheDirLockIsExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lockCacheDir(dir); err == nil || !strings.Contains(err.Error(), "另一个 display-agent") {
+	if _, err := lockCacheDir(dir); err == nil || !strings.Contains(err.Error(), "another display-agent") {
 		t.Fatalf("第二个进程应被拒绝：%v", err)
 	}
 	unlock()

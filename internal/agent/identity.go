@@ -50,8 +50,8 @@ func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 		if err := json.Unmarshal(data, &id); err != nil || id.Secret == "" {
 			bad := fmt.Sprintf("%s.bad-%d", path, time.Now().Unix())
 			os.Rename(path, bad)
-			log.Printf("agent: WARNING %s 内容无效（%v），已另存为 %s 并生成新身份；"+
-				"服务端会拒绝新密钥，需在管理后台对该设备点「接受新密钥」", path, err, bad)
+			log.Printf("agent: WARNING %s is invalid (%v); moved to %s and generating a new identity. "+
+				"The server will reject the new key until it is accepted in the admin UI", path, err, bad)
 			id = Identity{}
 		}
 	case os.IsNotExist(err):
@@ -72,9 +72,9 @@ func loadOrCreateIdentity(cfg *Config, hw HardwareInfo) (Identity, error) {
 			return Identity{}, err
 		}
 		id.Secret, changed = hex.EncodeToString(b), true
-		log.Printf("agent: 生成新身份 device_id=%s key=%s（%s）", id.DeviceID, sign.Fingerprint(id.Secret), path)
+		log.Printf("agent: new identity device_id=%s key=%s (%s)", id.DeviceID, sign.Fingerprint(id.Secret), path)
 	} else {
-		log.Printf("agent: 使用已有身份 device_id=%s key=%s（%s）", id.DeviceID, sign.Fingerprint(id.Secret), path)
+		log.Printf("agent: using existing identity device_id=%s key=%s (%s)", id.DeviceID, sign.Fingerprint(id.Secret), path)
 	}
 	if changed {
 		if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {

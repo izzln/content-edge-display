@@ -46,7 +46,7 @@ type Rect struct {
 // 设备端把它贴在画面之上，并把播放内容限制在 Media 矩形里、按 cover 撑满。
 // 这样属性/文字变化只需重发这张小 PNG，视频完全不用重新编码。
 //
-// 为 nil 表示整屏播放（没有模板叠加），即老版本设备端唯一认识的形态。
+// 为 nil 表示整屏播放（测试卡，或模板已渲染成一张整屏图）。
 type Layout struct {
 	CanvasW int  `json:"canvas_w"`
 	CanvasH int  `json:"canvas_h"`

@@ -47,12 +47,12 @@ func (c *serverClock) observe(h http.Header) {
 	if skewed != c.skewed {
 		c.skewed = skewed
 		if skewed {
-			log.Printf("agent: 本机时钟与服务端相差 %s（本机 %s），已改按服务端时间签名。"+
-				"设备没有 RTC、又连不上 NTP 时会这样；不影响播放，但设备日志时间不准，"+
-				"可让设备的 NTP 指向局域网服务器（见 docs/deployment.md）",
+			log.Printf("agent: local clock differs from the server by %s (local %s); signing with server time instead. "+
+				"This happens without an RTC and without NTP; playback is unaffected but device log timestamps are off. "+
+				"Point the device's NTP at a LAN server (see docs/deployment.md)",
 				-c.offset, c.local().Format(time.DateTime))
 		} else {
-			log.Printf("agent: 本机时钟已与服务端一致")
+			log.Printf("agent: local clock is in sync with the server again")
 		}
 	}
 }

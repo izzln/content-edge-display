@@ -78,7 +78,7 @@ func (r *fallbackResolver) dial(ctx context.Context, network, addr string) (net.
 			r.warned = map[string]bool{}
 		}
 		r.warned[host] = true
-		log.Printf("agent: 解析 %s 失败（%v），改用上次的地址 %s（外网中断时局域网 DNS 常会失效）", host, lerr, ip)
+		log.Printf("agent: resolving %s failed (%v), using last known address %s (LAN DNS often fails when the internet is down)", host, lerr, ip)
 	}
 	r.mu.Unlock()
 	return d.DialContext(ctx, network, net.JoinHostPort(ip, port))

@@ -64,10 +64,10 @@ func (c *Config) checkIntervals() error {
 		c.HeartbeatIntervalS = manifest.DefaultHeartbeatIntervalS
 	}
 	if c.PollIntervalS < manifest.MinPollIntervalS || c.PollIntervalS > manifest.MaxPollIntervalS {
-		return fmt.Errorf("config: poll_interval_s 应在 %d~%d 秒之间", manifest.MinPollIntervalS, manifest.MaxPollIntervalS)
+		return fmt.Errorf("config: poll_interval_s must be %d-%d seconds", manifest.MinPollIntervalS, manifest.MaxPollIntervalS)
 	}
 	if c.HeartbeatIntervalS < manifest.MinHeartbeatIntervalS || c.HeartbeatIntervalS > manifest.MaxHeartbeatIntervalS {
-		return fmt.Errorf("config: heartbeat_interval_s 应在 %d~%d 秒之间", manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS)
+		return fmt.Errorf("config: heartbeat_interval_s must be %d-%d seconds", manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS)
 	}
 	return nil
 }
@@ -118,11 +118,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	if cfg.EnrollToken == "" {
-		return nil, errors.New("config: enroll_token 不能为空，否则没有任何设备能接入（用 make tokens 生成）")
+		return nil, errors.New("config: enroll_token is empty, no device could enroll (generate one with make tokens)")
 	}
 	for name, tok := range map[string]string{"admin_token": cfg.AdminToken, "enroll_token": cfg.EnrollToken} {
 		if tok == placeholderToken {
-			return nil, fmt.Errorf("config: %s 还是配置样例里的占位值 %q，这个值是公开的，请用 make tokens 生成后替换",
+			return nil, fmt.Errorf("config: %s is still the public placeholder %q from the sample config; generate one with make tokens",
 				name, placeholderToken)
 		}
 	}
@@ -247,7 +247,7 @@ func New(cfg *Config) (*Server, error) {
 		return nil, err
 	}
 	if cfg.FontPath == "" {
-		log.Printf("warning: font_path 未配置，模板/测试卡中的中文将无法正常显示（请安装 CJK 字体并配置，如 fonts-noto-cjk）")
+		log.Printf("warning: font_path is not set; CJK text in templates and test cards will render as boxes (install a CJK font such as fonts-noto-cjk and set font_path)")
 	}
 	if err := s.seedDefaults(); err != nil {
 		return nil, err
@@ -257,12 +257,12 @@ func New(cfg *Config) (*Server, error) {
 	// ffmpeg 只在启动时检测一次；装好或改了 ffmpeg_path 后重启服务端生效。
 	if enc, err := transcode.Find(cfg.FFmpegPath); err != nil {
 		s.encoderErr = err.Error()
-		log.Printf("warning: ffmpeg 不可用，暂不能上传视频：%v。"+
-			"请 apt install ffmpeg，或在 server.json 的 ffmpeg_path 里写 ffmpeg 的绝对路径"+
-			"（该文件须能被服务的运行用户执行），然后重启服务端", err)
+		log.Printf("warning: ffmpeg unavailable, video uploads are disabled: %v. "+
+			"Run apt install ffmpeg, or set ffmpeg_path in server.json to an absolute path "+
+			"executable by the service user, then restart the server", err)
 	} else {
 		s.encoder = enc
-		log.Printf("视频转码已启用：%s", enc.Version())
+		log.Printf("video transcoding enabled: %s", enc.Version())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.stop, s.stopped = cancel, make(chan struct{})
@@ -286,7 +286,7 @@ func (s *Server) setEncoder(enc videoEncoder) {
 	defer s.encMu.Unlock()
 	s.encoder, s.encoderErr = enc, ""
 	if enc == nil {
-		s.encoderErr = "测试：未配置转码器"
+		s.encoderErr = "test: no encoder configured"
 	}
 }
 
@@ -303,10 +303,10 @@ func (s *Server) Close() {
 func (s *Server) seedDefaults() error {
 	return s.store.Update(func(st *store.State) error {
 		if t, seeded := store.SeedDefaultTemplate(st); seeded {
-			log.Printf("首次启动：已创建默认模板 %s（%s）", t.ID, t.Name)
+			log.Printf("first start: created default template %s (%s)", t.ID, t.Name)
 		}
 		if store.EnsureGlobalTemplate(st) {
-			log.Printf("全局默认模板设为 %s", st.Global.TemplateID)
+			log.Printf("global default template set to %s", st.Global.TemplateID)
 		}
 		return nil
 	})
@@ -361,22 +361,10 @@ func (s *Server) announceSchedule(w http.ResponseWriter) {
 	w.Header().Set(manifest.HeaderHeartbeatInterval, strconv.Itoa(s.cfg.HeartbeatIntervalS))
 }
 
-// unknownPollInterval 是不知道设备轮询间隔时的保守假设：旧版程序按自己 agent.json 里的间隔轮询、
-// 也不报告；服务端重启后、设备第一个心跳之前也不知道。
-const unknownPollInterval = 60 * time.Second
-
-// pollEvery 返回设备实际的轮询间隔（设备在心跳里报告）。调用方持有 s.mu。
-func (s *Server) pollEvery(deviceID string) time.Duration {
-	if hb, ok := s.lastHB[deviceID]; ok && hb.PollIntervalS > 0 {
-		return time.Duration(hb.PollIntervalS) * time.Second
-	}
-	return unknownPollInterval
-}
-
-// offlineAfter 返回设备多久没有任何请求就算离线：约 3 个轮询周期，至少 30 秒。
-// 要连续几次没来才算，偶尔一次请求失败不会让状态来回跳。调用方持有 s.mu。
-func (s *Server) offlineAfter(deviceID string) time.Duration {
-	return max(3*s.pollEvery(deviceID), 30*time.Second)
+// offlineAfter 返回设备多久没有任何请求就算离线：约 3 个轮询周期（轮询间隔由服务端规定，
+// 设备照办），至少 30 秒。要连续几次没来才算，偶尔一次请求失败不会让状态来回跳。
+func (s *Server) offlineAfter() time.Duration {
+	return max(3*time.Duration(s.cfg.PollIntervalS)*time.Second, 30*time.Second)
 }
 
 // noteContact 记下设备最近一次联系，用于判断在线。任何签名通过的请求都算：轮询、心跳、下载文件——
@@ -385,7 +373,7 @@ func (s *Server) noteContact(dev store.Device, r *http.Request) {
 	now := s.now()
 	s.mu.Lock()
 	seen, known := s.lastSeen[dev.ID]
-	back := !known || now.Sub(seen) > s.offlineAfter(dev.ID)
+	back := !known || now.Sub(seen) > s.offlineAfter()
 	s.lastSeen[dev.ID] = now
 	s.mu.Unlock()
 	if back {
@@ -393,7 +381,7 @@ func (s *Server) noteContact(dev store.Device, r *http.Request) {
 		if ip == "" {
 			ip, _, _ = net.SplitHostPort(r.RemoteAddr)
 		}
-		log.Printf("设备 %s 上线（%s，程序 %s）", dev.ID, ip, cmp.Or(dev.AgentVersion, "?"))
+		log.Printf("device %s online (%s, agent %s)", dev.ID, ip, cmp.Or(dev.AgentVersion, "?"))
 	}
 }
 
@@ -422,7 +410,7 @@ func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Devic
 	key := id + "|" + strings.SplitN(reason, ":", 2)[0]
 	if s.now().Sub(s.authLogged[key]) >= time.Minute {
 		s.authLogged[key] = s.now()
-		log.Printf("auth: rejected device=%q %s %s: %s", id, r.Method, r.URL.Path, reason)
+		log.Printf("auth rejected: device %q %s %s: %s", id, r.Method, r.URL.Path, reason)
 	}
 	s.mu.Unlock()
 	http.Error(w, "unauthorized: "+reason, http.StatusUnauthorized)
@@ -466,7 +454,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		m, err = s.buildManifest(dev.ID, c)
 	}
 	if err != nil {
-		log.Printf("生成清单失败 设备 %s：%v", dev.ID, err)
+		log.Printf("manifest build failed: device %s: %v", dev.ID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -487,14 +475,14 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if prev.served != m.Version { // 下载失败重试时会重复取同一版本，只记第一次
-		what := fmt.Sprintf("%d 个文件", len(m.Items))
+		what := fmt.Sprintf("%d file(s)", len(m.Items))
 		if m.Layout != nil {
-			what += "（含模板叠加图）"
+			what += " + template overlay"
 		}
 		if len(m.Commands) > 0 {
-			what += fmt.Sprintf("，附 %d 条指令", len(m.Commands))
+			what += fmt.Sprintf(", %d command(s)", len(m.Commands))
 		}
-		log.Printf("下发新内容 → 设备 %s：版本 %s，%s", dev.ID, m.Version, what)
+		log.Printf("new content pushed: device %s, version %s, %s", dev.ID, m.Version, what)
 	}
 	writeJSON(w, m)
 }
@@ -510,13 +498,13 @@ func (s *Server) resolveTemplate(deviceID string, now time.Time) (tpl store.Temp
 		if t, found := s.store.Template(disp.TemplateID); found {
 			return t, "override", true
 		}
-		log.Printf("设备 %s 的专属模板 %q 已不存在，忽略", deviceID, disp.TemplateID)
+		log.Printf("device %s: template %q no longer exists, ignoring", deviceID, disp.TemplateID)
 	}
 	if sc, hit := store.ActiveSchedule(s.store.Schedules(), now.In(s.loc)); hit {
 		if t, found := s.store.Template(sc.TemplateID); found {
 			return t, "schedule", true
 		}
-		log.Printf("时段 %s 的模板 %q 已不存在，忽略", sc.ID, sc.TemplateID)
+		log.Printf("schedule %s: template %q no longer exists, ignoring", sc.ID, sc.TemplateID)
 	}
 	if t, found := s.store.Template(s.store.Global().TemplateID); found {
 		return t, "global", true
@@ -555,7 +543,7 @@ func (s *Server) content(deviceID string, now time.Time) (content, error) {
 	}
 	tpl, source, ok := s.resolveTemplate(deviceID, now)
 	if !ok {
-		return c, errors.New("没有可用的模板（全局默认模板缺失）")
+		return c, errors.New("no usable template (global default template missing)")
 	}
 	c.Template, c.Source, c.Mirror = tpl, source, s.store.Display(deviceID).Mirror
 	if _, ok := tpl.MediaRegion(); ok {
@@ -720,7 +708,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			st.Devices[dev.ID] = d
 			return nil
 		}); err != nil {
-			log.Printf("保存设备 %s 的版本/IP 失败：%v", dev.ID, err)
+			log.Printf("saving version/IP of device %s failed: %v", dev.ID, err)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)

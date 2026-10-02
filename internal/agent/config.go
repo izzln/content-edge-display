@@ -13,8 +13,7 @@ import (
 //
 // 设备一律凭 enroll_token 自注册：编号取自主机名或 SoC 序列号（device_id 可显式覆盖），
 // 密钥首启随机生成，两者持久化在 cache_dir/identity.json。
-// 轮询/心跳间隔不在这里配置：由服务端规定，设备照办（见 schedule.go）。旧配置里的
-// poll_interval_s / heartbeat_interval_s 会被忽略。
+// 轮询/心跳间隔不在这里配置：由服务端规定，设备照办（见 schedule.go）。
 type Config struct {
 	ServerURL   string `json:"server_url"`
 	DeviceID    string `json:"device_id,omitempty"`
@@ -62,7 +61,7 @@ func (c *Config) fillDefaults() error {
 		return errors.New("config: server_url is required")
 	}
 	if c.EnrollToken == "" {
-		return errors.New("config: enroll_token is required（与服务端 server.json 的 enroll_token 一致）")
+		return errors.New("config: enroll_token is required (must match enroll_token in the server's server.json)")
 	}
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
 	if c.CacheDir == "" {
@@ -76,7 +75,7 @@ func (c *Config) fillDefaults() error {
 	}
 	if c.DisplayMode != "" && !displayModePattern.MatchString(c.DisplayMode) {
 		// 格式不对 mpv 会拒绝启动，设备就黑屏了——在这里报错，装机时就能发现
-		return fmt.Errorf("config: display_mode %q 格式不对，应为 1440x900 或 1440x900@60", c.DisplayMode)
+		return fmt.Errorf("config: display_mode %q is invalid, expected e.g. 1440x900 or 1440x900@60", c.DisplayMode)
 	}
 	if c.MpvSocket == "" {
 		c.MpvSocket = "/run/display-agent/mpv.sock"

@@ -17,8 +17,8 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "agent.json", "配置文件路径")
-	showVersion := flag.Bool("version", false, "打印版本后退出")
+	configPath := flag.String("config", "agent.json", "path to the config file")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(agent.Version)

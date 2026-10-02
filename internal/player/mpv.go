@@ -119,22 +119,6 @@ func (p *MPV) Start(ctx context.Context) error {
 	return nil
 }
 
-// mpvEnv 返回启动 mpv 的环境变量。
-//
-// mpv 启动时会探测 Wayland，XDG_RUNTIME_DIR 未设置或指向不存在的目录就报
-// "XDG_RUNTIME_DIR is invalid or not set"。systemd 系统服务没有登录会话、不会设置它；
-// 新装的 systemd 单元里已经补上，但 OTA 只换二进制、改不了单元文件，所以这里再兜一次：
-// 缺失或无效时指向 mpv IPC socket 所在的运行目录（本服务专用，已存在）。
-func mpvEnv(runtimeDir string) []string {
-	env := os.Environ()
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-			return env
-		}
-	}
-	return append(env, "XDG_RUNTIME_DIR="+runtimeDir)
-}
-
 // supervise 拉起 mpv 并在其退出后自动重启（进程级守护的最内层）。
 func (p *MPV) supervise(ctx context.Context) {
 	for ctx.Err() == nil {
@@ -172,7 +156,6 @@ func (p *MPV) supervise(ctx context.Context) {
 		args = append(args, p.extraArgs...)
 
 		cmd := exec.CommandContext(ctx, "mpv", args...)
-		cmd.Env = mpvEnv(filepath.Dir(p.socketPath))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		log.Printf("player(mpv): starting mpv")

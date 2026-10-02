@@ -247,23 +247,16 @@ mpv --vo=gpu --gpu-context=drm --hwdec=auto-safe -v <视频文件> 2>&1 | grep -
 #### 注册成功，但轮询/心跳报 401 unauthorized
 
 签名请求带时间戳，服务端只认与自己相差 ±5 分钟以内的（防重放），注册请求不签名所以不受影响。
-服务端日志（`journalctl -u display-server | grep auth:`）和设备日志都会写明原因：
+服务端日志（`journalctl -u display-server | grep 'auth rejected'`）和设备日志都会写明原因：
 
 | 原因 | 说明 | 处理 |
 |---|---|---|
-| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 新版代理已自动按服务端时间签名，不再受影响（见下） |
+| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 代理按服务端时间签名，不受影响（见下） |
 | `bad signature` | 设备密钥与服务端登记的不一致 | 见下一节"另一把密钥" |
-| `unknown device` | 设备在后台被删除了 | 新版代理会自动重新注册 |
+| `unknown device` | 设备在后台被删除了 | 代理会自动重新注册 |
 
-新版代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不再依赖设备时钟**；
+代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不依赖设备时钟**；
 偏差超过 1 分钟会在日志里提示一次。
-
-**旧版代理的设备**收不到 OTA（OTA 本身也要签名轮询），先在设备上按服务端时间校一次钟，再从后台下发新版本：
-
-```sh
-date -u -s "$(curl -sI http://<服务器>:9000/admin | sed -n 's/^[Dd]ate: //p')"
-systemctl restart display-agent
-```
 
 想让设备日志时间也准，见第 9 节"无外网运行"里的局域网 NTP 配置（只影响日志时间，不影响播放与认证）。
 
@@ -274,15 +267,15 @@ systemctl restart display-agent
 本地缓存，同时把新密钥报给服务端。
 
 处理：管理后台该设备上会出现红色提示 →【核对并处理】→ 对照硬件序列号 / MAC，以及设备日志里
-`agent: 生成新身份 … key=xxxxxxxx` 的指纹 → 一致就点**接受新密钥**。设备一分钟内重新注册成功，
+`agent: new identity … key=xxxxxxxx` 的指纹 → 一致就点**接受新密钥**。设备一分钟内重新注册成功，
 **属性、播放列表、专属模板都保留**（不要用"删除设备"来解决，那会把这些配置一起删掉）。
 不一致说明是另一台机器撞了编号（给其中一台改主机名）或有人冒充，点忽略。
 
 设备日志里每次启动都会打印身份来源，便于判断：
 
 ```
-agent: 使用已有身份 device_id=scr-0017 key=a80470cb（/var/lib/display-agent/identity.json）   # 正常
-agent: 生成新身份 device_id=scr-0017 key=d9e2ca41（…）                                         # 首次启动，或身份文件丢了
+agent: using existing identity device_id=scr-0017 key=a80470cb (/var/lib/display-agent/identity.json)   # 正常
+agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                                                # 首次启动，或身份文件丢了
 ```
 
 代理已做的防护：身份文件写入后 fsync（防断电丢失）；文件损坏时另存为 `identity.json.bad-<时间>`
@@ -354,8 +347,7 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 页面本身每 10 秒自动刷新一次（打开对话框时暂停），所以看到的状态最多再晚 10 秒；"N 秒前联系过"每秒走字。
 
 **在线/离线**：设备的任何请求（轮询、心跳、下载文件）都算联系过；约 3 个轮询周期（默认 30 秒）
-没有任何请求就显示离线。设备在心跳里报告自己实际的轮询间隔；还没升级的旧版程序不报告
-（它们按自己 `agent.json` 里的间隔轮询），对它们按 60 秒算，即 3 分钟没来才判离线。
+没有任何请求就显示离线（轮询间隔由服务端规定，设备照办）。
 
 **上传与转码**：
 
@@ -367,17 +359,18 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后按你在列表里排好的位置加入播放
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
 
-服务端控制台（`journalctl -u display-server -f`）记录的是**服务端自己在做什么**，不刷设备心跳：
+服务端控制台（`journalctl -u display-server -f`）记录的是**服务端自己在做什么**，不刷设备心跳。
+服务端与设备端的日志一律是英文；后台界面上给运营方看的提示（如拒收原因）是中文：
 
 ```
-接收上传 → 设备 scr-0017：promo.mov（约 186.4MB）
-上传完成 ← 设备 scr-0017：promo.mov（186.4MB，用时 21.3s），已排队转码为 promo.mp4
-开始转码 设备 scr-0017：promo.mp4（原片 186.4MB，时长 62 秒）
-转码中 设备 scr-0017：promo.mp4 50%（已用 41s）
-转码成功 设备 scr-0017：promo.mp4（186.4MB → 19.2MB，用时 1m22s），已加入播放列表
-后台操作 PUT /devices/scr-0017/media → 200（2ms）
-下发新内容 → 设备 scr-0017：版本 3f9a…，4 个文件（含模板叠加图）
-设备 scr-0018 上线（192.168.1.58，程序 1.3.0）
+upload started: device scr-0017, promo.mov (about 186.4MB)
+upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for transcoding as promo.mp4
+transcode started: device scr-0017, promo.mp4 (source 186.4MB, 62s)
+transcoding: device scr-0017, promo.mp4 50% (41s elapsed)
+transcode done: device scr-0017, promo.mp4 (186.4MB -> 19.2MB in 1m22s), added to playlist
+admin PUT /devices/scr-0017/media -> 200 (2ms)
+new content pushed: device scr-0017, version 3f9a…, 4 file(s) + template overlay
+device scr-0018 online (192.168.1.58, agent 1.3.0)
 ```
 
 拒收（文件损坏、超限、ffmpeg 不可用）与转码失败也都会写明原因。

@@ -62,10 +62,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case conflict:
-		log.Printf("设备 %s 用新密钥（key=%s，%s）请求注册，等待后台确认", req.DeviceID, sign.Fingerprint(req.Secret), req.IP)
+		log.Printf("device %s asked to register with a new key (key=%s, %s); waiting for confirmation in the admin UI", req.DeviceID, sign.Fingerprint(req.Secret), req.IP)
 		http.Error(w, "device id already registered with a different secret; accept the new key in the admin UI", http.StatusConflict)
 	case created:
-		log.Printf("新设备注册 %s（主机名 %s，序列号 %s，%s，程序 %s）",
+		log.Printf("new device registered: %s (host %s, serial %s, %s, agent %s)",
 			req.DeviceID, req.Hostname, req.HWSerial, req.IP, req.AgentVersion)
 		w.WriteHeader(http.StatusCreated)
 	default:

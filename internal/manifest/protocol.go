@@ -35,8 +35,7 @@ type RegisterRequest struct {
 // Heartbeat 是设备心跳上报体（POST /api/v1/device/heartbeat）：健康数据与 OTA 确认。
 // 设备正在显示哪个版本不在这里——每次轮询的 If-None-Match 已经带着了。
 type Heartbeat struct {
-	// AgentVersion 是设备端程序版本。JSON 名沿用早期的 player_ver，已部署的设备还在这么发。
-	AgentVersion string `json:"player_ver"`
+	AgentVersion string `json:"agent_version"` // 设备端程序版本
 	IP           string `json:"ip,omitempty"`
 	UptimeS      int64  `json:"uptime"`       // 系统运行时长：突然变小说明重启过（如过热关机）
 	DiskFreeMB   int64  `json:"disk_free_mb"` // 缓存目录所在分区的剩余空间
@@ -47,6 +46,4 @@ type Heartbeat struct {
 	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
 	OutputW int `json:"output_w,omitempty"`
 	OutputH int `json:"output_h,omitempty"`
-	// PollIntervalS 是设备实际在用的轮询间隔（照服务端规定）；旧版程序不报。
-	PollIntervalS int `json:"poll_interval_s,omitempty"`
 }

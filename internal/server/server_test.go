@@ -178,7 +178,7 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 	s, _ := newTestServer(t)
 	h := s.Handler()
 
-	body := strings.NewReader(`{"version":"abc","uptime":42,"disk_free_mb":100,"playing":"x.jpg","player_ver":"0.1.0"}`)
+	body := strings.NewReader(`{"uptime":42,"disk_free_mb":100,"agent_version":"0.1.0"}`)
 	r := signedRequest("POST", "/api/v1/device/heartbeat", body)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -458,15 +458,15 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 
 	out := buf.String()
 	for _, want := range []string{
-		"设备 dev-001 上线", "接收上传 → 设备 dev-001：a.jpg", "上传完成 ← 设备 dev-001：a.jpg",
-		"已排队转码为 b.mp4", "上传被拒 ← 设备 dev-001：c.txt", "开始转码 设备 dev-001：b.mp4",
-		"转码成功 设备 dev-001：b.mp4", "下发新内容 → 设备 dev-001", "后台操作 PUT /devices/dev-001/attributes → 200",
+		"device dev-001 online", "upload started: device dev-001, a.jpg", "upload done: device dev-001, a.jpg",
+		"queued for transcoding as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4",
+		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 200",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("控制台应有 %q\n%s", want, out)
 		}
 	}
-	if strings.Count(out, "上线") != 1 || strings.Contains(out, "heartbeat device=") {
+	if strings.Count(out, " online ") != 1 || strings.Contains(out, "heartbeat") {
 		t.Errorf("心跳不应逐条记日志（上线只记一次）：\n%s", out)
 	}
 }
@@ -504,7 +504,7 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 		return w
 	}
 
-	// 只轮询、从没心跳过（旧版程序刚连上，或服务端刚重启）：也算在线
+	// 只轮询、还没心跳过（如服务端刚重启）：也算在线
 	w := send("GET", "/api/v1/device/manifest", "")
 	if w.Header().Get("X-Poll-Interval") != "10" || w.Header().Get("X-Heartbeat-Interval") != "60" {
 		t.Fatalf("响应头应下发间隔：%v", w.Header())
@@ -512,15 +512,9 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 	if st := status(); !st.Online || st.Heartbeat != nil {
 		t.Fatalf("轮询过就应在线（且没有伪造的空心跳）：%+v", st)
 	}
-	// 不知道设备的轮询间隔时保守地按 60 秒算：3 分钟才判离线
-	if st := status(); st.OfflineS != 180 {
-		t.Fatalf("未知轮询间隔时离线阈值应为 180 秒，得到 %d", st.OfflineS)
-	}
-
-	// 新版程序在心跳里报告自己按 10 秒轮询 → 30 秒没来就离线
-	send("POST", "/api/v1/device/heartbeat", `{"player_ver":"1.1.0","poll_interval_s":10}`)
+	// 设备照服务端规定的 10 秒轮询 → 30 秒没来就离线
 	if st := status(); st.PollS != 10 || st.OfflineS != 30 {
-		t.Fatalf("应按设备报告的轮询间隔判断：%+v", st)
+		t.Fatalf("离线阈值应为 3 个轮询周期：%+v", st)
 	}
 	now = now.Add(25 * time.Second)
 	if !status().Online {

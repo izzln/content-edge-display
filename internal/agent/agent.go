@@ -242,9 +242,9 @@ func (a *Agent) Register(ctx context.Context) error {
 	case http.StatusConflict:
 		// 本机密钥与服务端记录不符：要么 identity.json 丢过（重装系统、换卡、手工删除），
 		// 要么另一台机器用了同一个编号。设备已把新密钥报给服务端，后台会显示待确认。
-		return fmt.Errorf("%w: device_id=%s 在服务端登记的是另一把密钥（本机 key=%s，身份文件 %s）。"+
-			"若确为本机（重装/换卡/身份文件丢失），请在管理后台该设备上点「接受新密钥」；"+
-			"若是另一台机器撞了编号，请给其中一台改主机名", errKeyConflict,
+		return fmt.Errorf("%w: device_id=%s is registered on the server with a different key (local key=%s, identity file %s). "+
+			"If this really is this device (reinstalled, new SD card, identity file lost), accept the new key in the admin UI; "+
+			"if another machine uses the same ID, change the hostname of one of them", errKeyConflict,
 			a.identity.DeviceID, sign.Fingerprint(a.identity.Secret), identityPath(a.cfg))
 	default:
 		return fmt.Errorf("register: %s: %s", resp.Status, bytes.TrimSpace(msg))
@@ -439,8 +439,6 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 		HWDec:        stats.HWDec,
 		OutputW:      stats.OutputW,
 		OutputH:      stats.OutputH,
-		// 告诉服务端自己实际按多久轮询一次，服务端据此判断离线
-		PollIntervalS: int(a.sched.Poll() / time.Second),
 	})
 	if err != nil {
 		return err

@@ -38,7 +38,7 @@ func New(fontPath string) (*Renderer, error) {
 	}
 	f, err := opentype.Parse(data)
 	if err != nil {
-		return nil, fmt.Errorf("font_path: 解析字体失败: %w", err)
+		return nil, fmt.Errorf("font_path: cannot parse font: %w", err)
 	}
 	return &Renderer{font: f}, nil
 }

@@ -117,7 +117,7 @@ func (s *Server) adminWrite(h http.HandlerFunc) http.HandlerFunc {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		h(rec, r)
-		log.Printf("后台操作 %s %s → %d（%s）", r.Method, strings.TrimPrefix(r.URL.Path, "/api/v1/admin"),
+		log.Printf("admin %s %s -> %d (%s)", r.Method, strings.TrimPrefix(r.URL.Path, "/api/v1/admin"),
 			rec.status, time.Since(start).Round(time.Millisecond))
 	}
 }
@@ -136,7 +136,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("输出 JSON 失败：%v", err)
+		log.Printf("writing JSON response failed: %v", err)
 	}
 }
 
@@ -195,8 +195,8 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 			st.TestUntil, st.ActiveTpl = &c.TestUntil, ""
 		}
 		s.mu.Lock()
-		offline := s.offlineAfter(d.ID)
-		st.PollS, st.OfflineS = int(s.pollEvery(d.ID)/time.Second), int(offline/time.Second)
+		offline := s.offlineAfter()
+		st.PollS, st.OfflineS = s.cfg.PollIntervalS, int(offline/time.Second)
 		if seen, ok := s.lastSeen[d.ID]; ok {
 			st.LastSeen = &seen
 			st.Online = now.Sub(seen) <= offline
@@ -459,6 +459,6 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/png")
 	if err := png.Encode(w, rendered.Image); err != nil {
-		log.Printf("输出预览图失败：%v", err)
+		log.Printf("writing preview failed: %v", err)
 	}
 }
