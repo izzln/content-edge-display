@@ -258,3 +258,33 @@ func TestAuthFailureExplainsWhy(t *testing.T) {
 		t.Fatalf("下载接口也应说明原因：%s", body)
 	}
 }
+
+// 测试卡渲染要用 server.json 配置的时区，而不是服务器操作系统的时区。
+func TestTestCardUsesConfiguredTimezone(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.cfg.AdminToken = "tok"
+	h := s.Handler()
+	tokyo, _ := time.LoadLocation("Asia/Tokyo")
+	t.Setenv("TZ", "UTC")
+	fixed := time.Date(2026, 10, 2, 3, 0, 0, 0, time.UTC)
+	render := func(loc *time.Location) string {
+		s.loc = loc
+		r := httptest.NewRequest("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", strings.NewReader(`{"duration_s":60}`))
+		r.Header.Set("X-Admin-Token", "tok")
+		h.ServeHTTP(httptest.NewRecorder(), r)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, signedRequestAt(fixed, "GET", "/api/v1/device/manifest", nil))
+		var m struct {
+			Items []struct{ SHA256 string } `json:"items"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &m)
+		if len(m.Items) != 1 {
+			t.Fatalf("应拿到测试卡：%d %s", w.Code, w.Body.String())
+		}
+		return m.Items[0].SHA256
+	}
+	s.now = func() time.Time { return fixed }
+	if render(tokyo) == render(time.UTC) {
+		t.Fatal("配置的时区不同，测试卡上的结束时间应不同")
+	}
+}

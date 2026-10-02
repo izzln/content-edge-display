@@ -93,7 +93,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | `media_root` | 各设备播放内容的根目录，下面按设备 ID 分子目录；后台上传的图片/视频落在这里 |
 | `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
-| `timezone` | 时段计划所用时区，默认取系统时区 |
+| `timezone` | 时段计划与测试卡显示所用的时区（IANA 名称，如 `Asia/Shanghai`、`Asia/Tokyo`），留空取服务器系统时区。全部时区数据已内嵌，不依赖系统 tzdata。样例里是 `Asia/Shanghai`，在其他地区部署时记得改 |
 | `ffmpeg_path` | 可选，ffmpeg 路径；留空在**服务进程的** PATH 里找（systemd 下只有 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`）。不可用时不能上传视频（见 5.1） |
 
 `media_root` 与 `data_dir` 及其子目录在服务端启动时自动创建，不用手工 mkdir。

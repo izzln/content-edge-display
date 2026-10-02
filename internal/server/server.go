@@ -461,7 +461,7 @@ func (s *Server) buildManifest(dev store.Device) (*manifest.Manifest, error) {
 	)
 
 	if until := s.store.TestUntil(dev.ID); now.Before(until) {
-		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, s.store.Attrs(dev.ID), until)
+		img, err := s.renderer.RenderTestCard(canvasW, canvasH, dev.ID, s.store.Attrs(dev.ID), until.In(s.loc))
 		if err != nil {
 			return nil, fmt.Errorf("render test card: %w", err)
 		}

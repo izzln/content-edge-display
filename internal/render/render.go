@@ -104,6 +104,7 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 }
 
 // RenderTestCard 生成现场定位用的测试卡：纯色底 + 大号“测试” + 设备编号与属性。
+// until 按它自带的时区显示，由调用方转换成运营方配置的时区（不能用服务器操作系统的时区）。
 func (r *Renderer) RenderTestCard(w, h int, deviceID string, attrs map[string]string, until time.Time) (*image.RGBA, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, w, h))
 	fill(canvas, canvas.Bounds(), color.RGBA{0x00, 0x66, 0xCC, 0xFF})
@@ -130,7 +131,7 @@ func (r *Renderer) RenderTestCard(w, h int, deviceID string, attrs map[string]st
 	lines = append(lines, struct {
 		text string
 		size int
-	}{"至 " + until.Local().Format("15:04:05"), h / 20})
+	}{"至 " + until.Format("15:04:05"), h / 20})
 
 	total := 0
 	for _, l := range lines {
