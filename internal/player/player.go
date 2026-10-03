@@ -1,4 +1,4 @@
-// Package player 抽象端侧播放器：mpv（生产）与 null（测试/无显示环境）。
+// Package player 抽象端侧播放器：GStreamer（生产，见 gst.go）与 null（测试/无显示环境）。
 package player
 
 import "context"
@@ -15,7 +15,7 @@ type Rect struct{ X, Y, W, H int }
 
 // Overlay 是贴在画面之上的模板叠加层：服务端渲染好的整屏 PNG，媒体区是透明的。
 //
-// 这里只给路径，不给尺寸：真正贴图时要按 mpv 的实际输出分辨率重新光栅化
+// 这里只给路径，不给尺寸：真正贴图时要按显示屏的实际输出分辨率重新光栅化
 // （显示屏真实输出不一定等于模板画布尺寸），这件事只有播放器知道。
 type Overlay struct {
 	PNG string // 本地 PNG 路径
@@ -25,7 +25,7 @@ type Overlay struct {
 //
 // Overlay 为 nil 时整屏播放 Items（测试卡、以及已渲染成整屏图的模板）。
 // Overlay 非 nil 时播放区被限制在 Media 矩形内并按 cover 撑满，叠加层盖在其余部分之上——
-// 这样模板区域里可以直接放视频，不需要服务端转码。
+// 属性、文字变了只需换一张叠加图，播放内容不受影响。
 type Scene struct {
 	Items   []Item
 	Overlay *Overlay
@@ -47,8 +47,8 @@ type Player interface {
 
 // Stats 是播放器的运行状态，用于后台观察现场是否正常。
 type Stats struct {
-	// HWDec 是 mpv 实际使用的硬解方式；"no" 表示软解（Armbian 自带的 mpv 驱动不了 H3 的
-	// 硬件解码器，软解是常态；换装打过 v4l2request 补丁的 mpv 后，这里能看出硬解是否生效）。
+	// HWDec 是最近一次播放视频用的硬件解码器（如 v4l2slh264dec）；"no" 表示退化成了软解
+	// （cedrus 没加载、插件没装），空串表示还没放过视频。硬解是必须的，退化了要在后台能看到。
 	HWDec string
 	// OutputW/H 是显示屏实际输出分辨率。与模板画布不一致时叠加图会被缩放，
 	// 对不上通常说明内核没吃下 video= 参数或换了块屏。

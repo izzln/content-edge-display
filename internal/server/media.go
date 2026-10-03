@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg" // image.DecodeConfig 需要
@@ -267,6 +268,10 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name st
 		return "", false, reason
 	}
 	switch {
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		// 浏览器没把文件传完就断了：多半是浏览器读不到文件了（iOS 相册临时文件被删、网盘文件没下载），
+		// 或者网络断了。后台会自动重传一次。
+		return fail(reject("上传中断：浏览器没把文件传完", "client stopped sending mid-upload (unexpected EOF)"))
 	case err != nil:
 		return fail(reject("写入失败："+err.Error(), "write failed: "+err.Error()))
 	case n > limit:

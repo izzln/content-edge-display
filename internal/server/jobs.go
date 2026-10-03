@@ -146,6 +146,9 @@ func (q *jobQueue) drop(j *transcodeJob) {
 	}
 }
 
+// progressLogInterval 是转码进度写进控制台的间隔（测试会调小）。
+var progressLogInterval = 30 * time.Second
+
 // incomingDir 存放待转码的原片。
 func (s *Server) incomingDir() string { return filepath.Join(s.cfg.DataDir, "incoming") }
 
@@ -181,18 +184,23 @@ func (s *Server) transcodeOne(ctx context.Context, j *transcodeJob) {
 	log.Printf("transcode started: device %s, %s (source %s, %.0fs)", j.deviceID, j.name, humanBytes(srcSize), total)
 	dir := s.deviceMediaDir(j.deviceID)
 	dst := filepath.Join(dir, j.name)
-	logged := 0 // 已记录的进度档位（25/50/75）
+	lastLog := start
 	err := os.MkdirAll(dir, 0o755)
 	if err == nil {
 		err = enc.Video(jctx, j.src, dst, transcode.DefaultSpec(), func(sec float64) {
-			if total <= 0 {
-				return
+			p := 0
+			if total > 0 {
+				p = min(int(sec*100/total), 99)
+				s.jobs.update(j, func(j *transcodeJob) { j.progress = p })
 			}
-			p := min(int(sec*100/total), 99)
-			s.jobs.update(j, func(j *transcodeJob) { j.progress = p })
-			if step := p / 25 * 25; step > logged && step < 100 {
-				logged = step
-				log.Printf("transcoding: device %s, %s %d%% (%s elapsed)", j.deviceID, j.name, step, time.Since(start).Round(time.Second))
+			// 每 progressLogInterval 报一次进度：长视频要转好几分钟，控制台不能一直没动静
+			if time.Since(lastLog) >= progressLogInterval {
+				lastLog = time.Now()
+				if total > 0 {
+					log.Printf("transcoding: device %s, %s %d%% (%s elapsed)", j.deviceID, j.name, p, time.Since(start).Round(time.Second))
+				} else {
+					log.Printf("transcoding: device %s, %s %.0fs done (%s elapsed)", j.deviceID, j.name, sec, time.Since(start).Round(time.Second))
+				}
 			}
 		})
 	}

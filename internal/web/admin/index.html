@@ -186,11 +186,11 @@ async function refresh() {
 
 // ================= 设备 =================
 // healthLine 把设备心跳翻译成一眼能看懂的提示：解码方式、温度、输出分辨率、运行时长、剩余空间。
-// 要盯的现场问题：过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
+// 要盯的现场问题：硬解失效、过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
 function healthLine(hb) {
   const parts = [];
-  if (hb.hwdec === "no") parts.push('<span title="Armbian 自带的 mpv 驱动不了 H3 的硬件解码器，软解是常态；服务端已按软解可承受的规格转码，留意温度即可">软解</span>');
-  else if (hb.hwdec) parts.push(`<span class="okc" title="mpv 实际使用的硬解方式">硬解 ${esc(hb.hwdec)}</span>`);
+  if (hb.hwdec === "no") parts.push('<span class="bad" title="硬解没起来，视频在软解：会发热、卡顿。在设备上运行 check-display.sh 排查">软解</span>');
+  else if (hb.hwdec) parts.push(`<span class="okc" title="实际使用的硬件解码器">硬解 ${esc(hb.hwdec)}</span>`);
   if (hb.temp_c) parts.push(hb.temp_c >= 80
     ? `<span class="bad" title="H3 到 85°C 开始降频，再高会关机">${hb.temp_c}°C</span>`
     : `${hb.temp_c}°C`);
@@ -244,7 +244,9 @@ function renderDevices() {
         装在别处就在 server.json 写 <code>ffmpeg_path</code> 绝对路径。装好后重启服务端生效。</div></div>`;
   }
   const rows = devices.map(d => {
-    const st = d.online ? '<span class="dot on"></span>在线'
+    const st = d.online
+      ? `<span class="dot on"></span>在线<div class="contact" data-seen="${Date.parse(d.last_seen)}"
+          data-poll="${d.poll_interval_s}" data-offline="${d.offline_after_s}"></div>`
       : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
     const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<span class="badge">${esc(k)}=${esc(v)}</span>`).join("") || '<span class="muted">-</span>';
     const [syncText, syncTip] = SYNC[d.sync] || [d.sync || "-", ""];
@@ -252,8 +254,6 @@ function renderDevices() {
     const tplName = tplById(d.active_template)?.name || d.active_template;
     show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
       d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
-    if (d.online && d.last_seen) show += `<div class="contact" data-seen="${Date.parse(d.last_seen)}" data-poll="${d.poll_interval_s}"
-      data-offline="${d.offline_after_s}" data-sync="${esc(d.sync)}"></div>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
     const agentVer = d.hw?.agent_version;
     let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
@@ -285,7 +285,7 @@ function renderDevices() {
   tickContact();
 }
 
-// tickContact 每秒刷新"设备多久前联系过"：等待刷新时让人知道设备是还没轮到，还是已经不来了。
+// tickContact 每秒刷新状态列里"设备多久前联系过"：一直等不到刷新时，让人知道设备是还没轮到，还是已经不来了。
 // 用服务器时间算（浏览器所在电脑的时钟可能不准）。
 const serverNow = () => Date.now() + ((info.server_time || infoFetchedAt) - infoFetchedAt);
 function tickContact() {
@@ -294,10 +294,10 @@ function tickContact() {
     const poll = +el.dataset.poll, offline = +el.dataset.offline;
     let html = "";
     if (age > 2 * poll) {
-      html = `<span class="warn">⚠ 设备 ${age} 秒未响应</span><div class="muted">${
-        age >= offline ? "可能已离线" : `超过 ${offline} 秒无响应判离线`}</div>`;
-    } else if (el.dataset.sync === "waiting" || el.dataset.sync === "syncing") {
-      html = `<span class="muted">设备 ${age} 秒前联系过，每 ${poll} 秒来一次</span>`;
+      html = `<span class="warn">⚠ ${age} 秒未响应</span><div class="muted">${
+        age >= offline ? "可能已离线" : `${offline} 秒无响应判离线`}</div>`;
+    } else {
+      html = `<span class="muted">${age} 秒前联系过</span>`;
     }
     if (el.innerHTML !== html) el.innerHTML = html;
   }
@@ -443,7 +443,7 @@ function renderContentBody(id) {
     </label>
     <div class="pl-head"><span id="plSum"></span><span class="sp"></span><span id="plSaveState" class="muted"></span></div>
     <ul class="pl-list" id="plList"></ul>`;
-  $("#plFiles").onchange = e => { plAddFiles(e.target.files); e.target.value = ""; };
+  bindFileInput();
   bindFileDrop(box);
   bindSortable($("#plList"));
   renderPlaylist();
@@ -623,13 +623,39 @@ function plPrecheck(f, type) {
   return "";
 }
 
+// 选择框每次换一个新的，而不是清空 value：清空会让 iOS/iPadOS 删掉刚选的照片（见 snapshot）。
+// 同一个文件仍可再次选择。
+function bindFileInput() {
+  $("#plFiles").onchange = e => {
+    const input = e.target, files = [...input.files];
+    plAddFiles(files); // 先开始读文件，再换掉选择框
+    input.replaceWith(input.cloneNode());
+    bindFileInput();
+  };
+}
+
+// snapshot 选中后立即把文件读进内存，之后上传用这份拷贝（大于 100MB 的视频直接用原文件）。
+// 不这样做的话：iOS/iPadOS 从相册选的照片是 Safari 临时转出的文件，选择框一清空、或排队等一会儿
+// 就可能被删掉；网盘里还没下载到本机的文件、上传途中被改动的文件也会读失败。浏览器读到一半失败时
+// 只报"网络错误"，服务端看到的是请求体被截断（unexpected EOF）。
+const SNAPSHOT_MAX = 100 << 20;
+async function snapshot(f) {
+  return f.size > SNAPSHOT_MAX ? f : new Blob([await f.arrayBuffer()], { type: f.type });
+}
+
 function plAddFiles(files) {
   for (const f of files) {
     const type = IMAGE_RE.test(f.name) ? "image" : VIDEO_RE.test(f.name) ? "video" : "";
     const it = { key: ++plSeq, label: f.name, name: "", type: type || "image", size: f.size,
-      state: "waiting", progress: 0, error: plPrecheck(f, type), file: f };
-    if (it.error) { it.state = "rejected"; it.file = null; }
-    else if (type === "image") it.thumb = URL.createObjectURL(f);
+      state: "waiting", progress: 0, error: plPrecheck(f, type), file: null };
+    if (it.error) { it.state = "rejected"; plItems.push(it); continue; }
+    it.ready = snapshot(f).then(blob => {
+      it.file = blob;
+      if (type === "image" && !it.thumb) { it.thumb = URL.createObjectURL(blob); updateRow(it, true); }
+    }, () => {
+      it.state = "rejected"; it.error = "读不到这个文件（相册或网盘里的文件还没下载到本机？）";
+      updateRow(it, true); renderSummary(); pumpUploads();
+    });
     plItems.push(it);
   }
   renderPlaylist();
@@ -643,13 +669,19 @@ function pumpUploads() {
   if (next) uploadOne(next);
 }
 
-function uploadOne(it) {
+async function uploadOne(it) {
   const dev = plDev;
+  it.state = "uploading"; it.progress = 0; // 先占住，等读文件期间不会被再派一次
+  updateRow(it, true); renderSummary();
+  await it.ready;
+  if (!it.file || dev !== plDev || !plItems.includes(it)) { // 读失败，或等待期间被移除/关了对话框
+    if (it.state === "uploading") it.state = "rejected";
+    return pumpUploads();
+  }
   const fd = new FormData();
   fd.append("files", it.file, it.label);
   const xhr = new XMLHttpRequest();
-  it.xhr = xhr; it.state = "uploading"; it.progress = 0;
-  updateRow(it, true); renderSummary();
+  it.xhr = xhr;
   xhr.open("POST", `/api/v1/admin/devices/${encodeURIComponent(dev)}/media`);
   xhr.setRequestHeader("X-Admin-Token", token());
   xhr.upload.onprogress = e => {
@@ -672,7 +704,7 @@ function uploadOne(it) {
     if (bad) {
       it.state = "rejected"; it.error = bad.reason;
     } else {
-      it.name = arr(r.accepted)[0] || arr(r.transcoding)[0];
+      it.name = it.label = arr(r.accepted)[0] || arr(r.transcoding)[0]; // 同名时服务端会改名
       it.state = arr(r.accepted).length ? "ready" : "queued";
       if (it.thumb && it.state === "ready") thumbCache.set(dev + "/" + it.name, it.thumb);
     }
@@ -680,7 +712,15 @@ function uploadOne(it) {
     if (dev === plDev) { plEpoch++; applyServer(r.playlist); }
     done();
   };
-  xhr.onerror = () => { it.state = "rejected"; it.error = "网络中断，上传失败"; done(); };
+  xhr.onerror = () => {
+    if (!it.retried) { // 网络抖一下很常见：自动重传一次
+      it.retried = true; it.xhr = null; it.state = "waiting";
+      updateRow(it, true);
+      return setTimeout(pumpUploads, 1000);
+    }
+    it.state = "rejected"; it.error = "连接中断，上传失败（已自动重试一次）";
+    done();
+  };
   xhr.send(fd);
 }
 

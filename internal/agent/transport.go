@@ -19,7 +19,7 @@ import (
 //     运营商——外网一断，域名就解析不了。成功解析过的地址记在 cache_dir/server-addr，
 //     解析失败时用它。
 //  3. 控制请求（清单/心跳/注册）用短超时：服务端卡住时，主循环不能被一个请求拖过 systemd
-//     看门狗的 90 秒，否则代理连同 mpv 一起被杀、屏幕黑一下。大文件下载另有"停滞检测"，见 download.go。
+//     看门狗的 90 秒，否则代理连同播放进程一起被杀、屏幕黑一下。大文件下载另有"停滞检测"，见 download.go。
 const (
 	apiTimeout     = 30 * time.Second
 	dnsTimeout     = 5 * time.Second

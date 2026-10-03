@@ -7,7 +7,7 @@
 
 | 层 | 内容 | 更新方式 |
 |---|---|---|
-| OS 母镜像 | Armbian + mpv + 安全加固 + 代理安装布局 + 含 `enroll_token` 的配置 | 烧录时一次性写入，之后不动 |
+| OS 母镜像 | Armbian + GStreamer + 安全加固 + 代理安装布局 + 含 `enroll_token` 的配置 | 烧录时一次性写入，之后不动 |
 | 代理程序 | `display-agent` 单一静态二进制 | 管理后台上传 → 立即/定时下发 → 设备自动切换、失败自动回滚 |
 
 设备装好后很难再物理接触，所以**除首次烧录外的一切变更都必须能远程完成**——这是整套
@@ -154,23 +154,22 @@ make tokens     # 查看当前口令；文件不存在时生成
 | 位置 | 内容 | 管什么 |
 |---|---|---|
 | `/boot/armbianEnv.txt` 的 `extraargs` | `video=HDMI-A-1:1440x900@60 consoleblank=0` | 内核控制台的输出模式；`consoleblank=0` 禁用息屏 |
-| `/etc/display-agent/agent.json` | `"display_mode": "1440x900@60"` | 传给 mpv 的 `--drm-mode` |
+| `/etc/display-agent/agent.json` | `"display_mode": "1440x900@60"` | 播放进程设置的显示模式 |
 
-只改第一处是不够的：**mpv 走 DRM 输出时默认用 EDID 的首选模式（`--drm-mode=preferred`），
-不理会内核的 `video=` 参数**，于是控制台是 1440×900、一播放内容又变回 1080p。
-代理只在显示屏确实提供该模式时才传 `--drm-mode`——mpv 找不到指定模式会初始化失败、黑屏，
-宁可按首选模式输出也不能黑。
+只改第一处是不够的：**播放进程自己设置显示模式，不理会内核的 `video=` 参数**，不指定就用 EDID 的
+首选模式，于是控制台是 1440×900、一播放内容又变回 1080p。显示屏不提供 `display_mode` 时，
+代理退回首选模式（日志里会提示）——设一个显示屏不认的模式只会黑屏。
 
 驱动板 EDID 里压根没有 1440×900 时，内核会忽略 `video=`，该模式也不会出现在可用列表里。
 这时加 `,e` 强制输出：`HDMI_FORCE=e ./install-agent.sh`（即 `video=HDMI-A-1:1440x900@60,e`）。
 
 改完要**重启**，然后运行 `/usr/local/lib/display-agent/check-display.sh` 确认（见 3.4）。
 
-> 即便最终输出分辨率与模板画布不一致，画面也不会错位：设备端会按 mpv 的实际输出分辨率
-> 重新缩放叠加图（媒体区的位置本来就是按比例算的）。只是非等比时属性文字会有轻微形变，
+> 即便最终输出分辨率与模板画布不一致，画面也不会错位：设备端会按实际输出分辨率
+> 重新缩放叠加图，媒体区按同一比例换算。只是非等比时属性文字会有轻微形变，
 > 所以仍应把输出模式配对。
 
-### 3.3 安装 mpv 与代理
+### 3.3 安装 GStreamer 与代理
 
 ```sh
 # 开发机：拷一个包过去即可
@@ -196,10 +195,11 @@ systemctl enable display-agent        # 确认无误后再设为开机自启
 
 设备会自动注册并出现在管理后台（在线），编号规则见 4.1。
 
-mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/etc/display-agent/agent.json`
-的 `mpv_extra_args` 中加 `["--vo=gpu", "--gpu-context=drm"]`。
+`install-agent.sh` 会装好播放所需的 GStreamer 组件（`python3-gst-1.0`、`gstreamer1.0-plugins-good/bad`、
+`gstreamer1.0-libav` 等）。播放进程在无桌面环境下经 DRM/KMS 直接出画面，不需要 X11/Wayland，
+也不经 GPU。
 
-### 3.4 确认分辨率、解码方式与温度
+### 3.4 确认分辨率、硬件解码与温度
 
 ```sh
 /usr/local/lib/display-agent/check-display.sh
@@ -209,29 +209,24 @@ mpv 在无桌面环境下经 DRM 直接输出。如报 DRM 相关错误，在 `/
 
 | 项 | 怎么判断 | 不对时的现场表现 |
 |---|---|---|
-| 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 首行 | 控制台分辨率不对 |
-| mpv 输出分辨率 | mpv 属性 `osd-dimensions` | 内容画面与模板对不上（已自动缩放，但会形变） |
-| 解码方式 | mpv 属性 `hwdec-current`：`no` 即软解（自带 mpv 的常态，见下） | — |
+| 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 里有没有 1440×900 | 播放时退回首选模式，画面按比例缩放 |
+| 硬件解码条件 | cedrus 已加载、`gst-inspect-1.0 v4l2slh264dec` 存在、`kmssink` 与 Python 绑定可用 | 视频退化成软解：发热、卡顿，严重时过热关机 |
+| 实际播放状态 | 代理每次心跳写的 `/var/lib/display-agent/status.json`：解码器、输出分辨率 | — |
 | SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
 
-后三项也随心跳上报，**管理后台设备列表里直接能看到**：80°C 以上标红，
-输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台过热。
+解码方式、输出分辨率、温度也随心跳上报，**管理后台设备列表里直接能看到**：软解与 80°C 以上标红，
+输出分辨率不是 1440×900 时标黄。不用登录设备就能发现哪台硬解失效或过热。
 
-#### 关于硬件解码：现状是软解，这是预期的
+#### 硬件解码怎么走
 
-H3 的硬件解码器（主线内核驱动 cedrus）本身支持 H.264 和 H.265，但它是"无状态"解码器，
-播放器必须通过 V4L2 Request API 驱动它。**FFmpeg 上游至今没有合入这部分支持**（补丁只在
-LibreELEC 等社区版本里），Armbian/Debian 自带的 mpv 依赖官方 FFmpeg，所以 `--hwdec=auto-safe`
-找不到可用的硬解方式，退回软解，视频照常播放。FFmpeg 自带的 `v4l2m2m` 只适用于"有状态"
-解码器（如树莓派），对 cedrus 无效。
+H3 的硬件解码器（主线内核驱动 cedrus）支持 H.264 和 H.265，它是"无状态"解码器，要通过
+V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugins-bad`，Debian 自带）
+原生支持，内核驱动正常时会注册 `v4l2slh264dec`，并且优先级高于软解，播放时自动选用。
+（FFmpeg 上游没有这部分支持，所以 mpv 只能软解——这是播放器改用 GStreamer 的原因。）
 
-因此服务端转码按**软解吃得消**的规格出片：1440×900 以内、≤ 30fps、码率约 2.5Mbps、
-x264 `fastdecode` 调优（解码 CPU 省三四成）。实际要盯的是温度，不是解码方式。
-
-想尝试硬解，需要在设备上换装打过 v4l2request 补丁的 FFmpeg 与 mpv（Armbian 社区有对应的软件源，
-据反馈 Debian 12 上 mpv 可用、Debian 13 上 mpv 不可用），然后在 `agent.json` 的 `mpv_extra_args`
-里加 `"--hwdec=v4l2request-copy"`。务必先在一台样机上验证画面与温度，再批量推广。
-`check-display.sh` 会报告 cedrus 是否加载、FFmpeg 是否支持 v4l2request。
+`v4l2slh264dec` 不出现时，按顺序查：`ls /dev/video* /dev/media*` 有没有 cedrus 的设备、
+`dmesg | grep -i cedrus` 有没有报错（如 CMA 内存不足）、`gstreamer1.0-plugins-bad` 装了没有；
+改完后 `rm -rf ~/.cache/gstreamer-1.0` 让 GStreamer 重新扫描插件。
 
 ## 4. 设备端：母镜像批量部署
 
@@ -258,14 +253,25 @@ x264 `fastdecode` 调优（解码 CPU 省三四成）。实际要盯的是温度
 
 | 原因 | 说明 | 处理 |
 |---|---|---|
-| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 代理按服务端时间签名，不受影响（见下） |
+| `clock skew: device time …, server time …` | 设备时钟偏了。Orange Pi One **没有电池供电的 RTC**，断电重启后要等 NTP 校准，本地化部署常常连不上外网 NTP；手工 `date -s` 时把北京时间当 UTC 设也会差 8 小时 | 代理自动把设备时钟校到服务端时间（见下） |
 | `bad signature` | 设备密钥与服务端登记的不一致 | 见下一节"另一把密钥" |
 | `unknown device` | 设备在后台被删除了 | 代理会自动重新注册 |
 
-代理从服务端每个响应的 `Date` 头学到时钟偏差，签名时按服务端时间来，**认证不依赖设备时钟**；
-偏差超过 1 分钟会在日志里提示一次。
+代理从服务端每个响应（包括不签名的注册响应）的 `Date` 头学到时间，签名一律按服务端时间来，
+**认证不依赖设备时钟**。偏差超过 1 分钟、而设备又没有被 NTP 同步时，代理会**直接把设备的系统时钟
+校到服务端时间**（日志：`agent: system clock set from the server (was off by …)`），设备日志时间也就准了。
+设备已由 NTP 同步时不动它（此时说明是服务器时间不准，日志会提示检查服务器时钟）。
 
-想让设备日志时间也准，见第 9 节"无外网运行"里的局域网 NTP 配置（只影响日志时间，不影响播放与认证）。
+#### 轮询/心跳报 connection reset by peer / EOF
+
+这是 TCP 连接被对端断开，不是认证问题（认证失败一定是 401 并写明原因）。代理每次请求失败后都会
+丢掉连接池里的旧连接、下次用新连接重试；服务端空闲连接保持 120 秒、比设备端（90 秒）晚关，
+避免"服务端刚关、设备正好复用"的竞争。仍然持续出现时按顺序查：
+
+1. `server_url` 指向的确实是 display-server（端口 9000 常被别的程序占用：`ss -ltnp | grep 9000`）；
+2. 服务端日志里有没有 `http: panic serving`（服务端处理请求时崩了），有的话把那几行发给开发；
+3. 服务器的防火墙（ufw、firewalld、fail2ban）有没有拦设备的 IP；
+4. 局域网里有没有 IP 冲突（另一台机器占了服务器的地址也会表现为连接被随机重置）。
 
 #### 设备报"在服务端登记的是另一把密钥"
 
@@ -297,7 +303,7 @@ agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                       
 systemctl enable display-agent    # install-agent.sh 不会自动 enable；母镜像里必须开着，否则烧出来的设备开机不播放
 systemctl stop display-agent
 rm -f /var/lib/display-agent/identity.json /var/lib/display-agent/current.json
-rm -rf /var/lib/display-agent/media/* /var/lib/display-agent/playlist.m3u
+rm -rf /var/lib/display-agent/media/* /var/lib/display-agent/status.json /var/lib/display-agent/gstplayer.py
 rm -f /usr/local/lib/display-agent/pending-verify
 rm -f /etc/ssh/ssh_host_*                                        # 首启重新生成
 journalctl --rotate && journalctl --vacuum-time=1s
@@ -338,7 +344,7 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
     上按住把手直接拖，或在条目上长按"拿起"再拖，与系统列表一致；键盘焦点在把手上时可用 ↑↓）。
     **增删与排序即时生效**，不用另点保存；模板和左右对调要点【保存模板设置】。
     按顺序循环播放，图片停留时长跟着模板走，视频播完即切，一律静音；
-    条目之间约 0.6 秒**淡出到黑再淡入**（设备端 mpv 脚本实现，不需要重新编码，模板属性区不受影响）；
+    条目之间约 0.6 秒**淡出到黑再淡入**（设备端在模板图层上做，不需要重新编码，模板属性区不受影响）；
 - **设备**页每行【属性】：`room=302` 之类的键值对，模板的 attribute 区域按 key 取值显示；
 - **模板与时段**页：改模板（表单，或【JSON】做更复杂的版式）、【设为全局】、配置时段计划
   `{模板, 星期, 起止时间}`，支持跨午夜；无命中回落全局模板；
@@ -348,8 +354,9 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 
 | 列 | 内容 | 多久更新 |
 |---|---|---|
-| 设备 | 编号、主机名/IP、程序版本，以及**解码方式 · SoC 温度 · 实际输出分辨率**（≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
-| 当前显示 | **等待刷新**（后台改了内容，设备还没来取）→ **正在刷新**（设备在下载新内容）→ **已显示最新内容**；离线设备显示"离线"。下面一行是内容来源与模板名；等待/正在刷新时再显示"设备 N 秒前联系过"，超过 2 个轮询周期没来就标黄"设备 N 秒未响应" | 设备每次轮询（`poll_interval_s`，默认 10 秒） |
+| 状态 | 在线/离线；在线时显示"N 秒前联系过"，超过 2 个轮询周期没来就标黄"N 秒未响应"，到离线阈值提示"可能已离线"；离线时显示最后在线时间 | 每秒走字 |
+| 设备 | 编号、主机名/IP、程序版本，以及**解码方式 · SoC 温度 · 实际输出分辨率**（软解与 ≥80°C 标红，输出不是 1440×900 标黄） | 设备每次心跳上报（`heartbeat_interval_s`，默认 60 秒） |
+| 当前显示 | **等待刷新**（后台改了内容，设备还没来取）→ **正在刷新**（设备在下载新内容）→ **已显示最新内容**；离线设备显示"离线"。下面一行是内容来源与模板名 | 设备每次轮询（`poll_interval_s`，默认 10 秒） |
 
 页面本身每 10 秒自动刷新一次（打开对话框时暂停），所以看到的状态最多再晚 10 秒；"N 秒前联系过"每秒走字。
 
@@ -361,10 +368,11 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 | | 处理 | 为什么 |
 |---|---|---|
 | 图片 | png/jpg ≤ 20MB；超过 1440×900 的**自动等比缩小** | 设备只有 1GB 内存，解码后的位图是 宽×高×4 字节；在服务端缩一次，所有设备都省 |
-| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0，x264 `fastdecode`）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 设备是软解（见 3.4），原片动辄 1080p、10~20Mbps，软解不动、硬撑就发热，到 85°C 降频、更高直接关机。H.265 原片也照收——反正会被转成 H.264 |
+| 视频 | mp4/mov/mkv/webm ≤ 500MB，**一律转码**为 H.264（High@4.0，x264 `fastdecode`）、1440×900 以内、≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去掉音轨、faststart | 设备用 cedrus 硬解（见 3.4），只认常规档次的 H.264/H.265、1080p 以内；原片动辄 10~20Mbps，持续高码率即使硬解也会发热，到 85°C 降频、更高直接关机。`fastdecode` 是给硬解失效时兜底。H.265 原片也照收——反正会被转成 H.264 |
 
 转码在**后台**进行：上传后立即返回，列表里显示"转码中 xx%"，完成后按你在列表里排好的位置加入播放
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
+服务端控制台每 30 秒报一次转码进度。
 
 服务端控制台（`journalctl -u display-server -f`）记录的是**服务端自己在做什么**，不刷设备心跳。
 服务端与设备端的日志一律是英文；后台界面上给运营方看的提示（如拒收原因）是中文：
@@ -373,7 +381,8 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 upload started: device scr-0017, promo.mov (about 186.4MB)
 upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for transcoding as promo.mp4
 transcode started: device scr-0017, promo.mp4 (source 186.4MB, 62s)
-transcoding: device scr-0017, promo.mp4 50% (41s elapsed)
+transcoding: device scr-0017, promo.mp4 37% (30s elapsed)
+transcoding: device scr-0017, promo.mp4 74% (1m0s elapsed)
 transcode done: device scr-0017, promo.mp4 (186.4MB -> 19.2MB in 1m22s), added to playlist
 admin PUT /devices/scr-0017/media -> 200 (2ms)
 new content pushed: device scr-0017, version 3f9a…, 4 file(s) + template overlay
@@ -390,7 +399,7 @@ device scr-0018 online (192.168.1.58, agent 1.3.0)
 **没装时不能上传视频**（图片照常），管理后台顶部会醒目提示。未转码的原片码率控制不住，
 下发到设备就是过热隐患，所以宁可当场拒收。
 
-**模板**：至多有一个"播放内容"区域（mpv 只能把视频放进一个矩形）。
+**模板**：至多有一个"播放内容"区域（设备只有一个视频图层）。
 只剩一个模板时不能删除——系统始终需要一个全局默认模板；删掉当前的全局模板时，
 全局会自动改指向剩下的模板，设备不会因此没有内容可显示。
 
@@ -429,9 +438,9 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 
 | | 内容 |
 |---|---|
-| 仅 OTA 代理即可 | 播放逻辑、mpv 启动参数、播放列表行为、清单新字段的解析、下载与缓存策略、心跳内容 |
+| 仅 OTA 代理即可 | 播放逻辑（含随代理分发的播放进程 `gstplayer.py`）、播放列表行为、清单新字段的解析、下载与缓存策略、心跳内容 |
 | 还需同时更新服务端 | 清单生成、模板渲染、管理后台界面（服务端在机房，更新它不用去现场） |
-| **OTA 改不了，需要 SSH** | `/etc/display-agent/agent.json`（OTA 只替换二进制）、systemd 单元、系统软件包（mpv、内核、DRM 驱动） |
+| **OTA 改不了，需要 SSH** | `/etc/display-agent/agent.json`（OTA 只替换二进制）、systemd 单元、系统软件包（GStreamer、Python、内核、DRM 驱动） |
 
 所以新增设备端配置项时，务必让"缺省值即可用"——否则这批设备就得逐台登录。
 
@@ -513,16 +522,16 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 ## 9. 无外网运行
 
-安装过程可以联网（装 ffmpeg、字体、mpv 等），**安装完成后整个系统只需要局域网**：服务端、设备端、
+安装过程可以联网（装 ffmpeg、字体、GStreamer 等），**安装完成后整个系统只需要局域网**：服务端、设备端、
 管理后台都不访问外网——没有云服务、在线授权、CDN 或外部字体，管理后台的页面资源全部内嵌在服务端里。
 
 ### 9.1 已经处理掉的离线问题
 
 | 情况 | 不处理会怎样 | 现在的做法 |
 |---|---|---|
-| 设备没有 RTC、连不上外网 NTP，时钟偏了 | 签名请求全部 401，设备收不到任何更新 | 设备按服务端响应里的时间签名，认证不依赖设备时钟 |
+| 设备没有 RTC、连不上外网 NTP，时钟偏了 | 签名请求全部 401，设备收不到任何更新 | 设备按服务端响应里的时间签名，并把自己的系统时钟校到服务端时间 |
 | 局域网 DNS 是路由器转发到运营商，外网一断域名就解析不了 | 设备找不到服务端 | 设备记住上次解析成功的地址（`cache_dir/server-addr`），解析失败时用它 |
-| 服务端暂时连不上（服务器关机、交换机故障） | 注册重试的等待超过看门狗 90 秒，代理连同 mpv 被杀，屏幕每隔一分半黑一下 | 等待期间持续喂看门狗；屏幕一直播放本地缓存 |
+| 服务端暂时连不上（服务器关机、交换机故障） | 注册重试的等待超过看门狗 90 秒，代理连同播放进程被杀，屏幕每隔一分半黑一下 | 等待期间持续喂看门狗；屏幕一直播放本地缓存 |
 | 设备开机时网络还没就绪（网线没插、DHCP 拿不到地址） | 服务要等 network-online 超时（最长约 2 分钟），这期间黑屏 | 不再等网络，开机立即播放本地缓存，网络就绪后再注册、拉清单 |
 | 服务端卡住或网络时断时续 | 一个请求能挂 10 分钟，看门狗把代理杀掉 | 清单/心跳/注册 30 秒超时；大文件下载按"60 秒没收到数据"判定停滞，下次从断点续传 |
 | 环境变量里带着指向外网的代理 | 局域网请求被送去连不上的代理 | 设备端一律直连 |
@@ -532,29 +541,21 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 - **服务器时钟**：时段计划、测试屏到期、定时下发程序都按服务器时间计算。服务器有主板 RTC，断网后
   时间仍会走，但会慢慢漂移，且没人察觉。管理后台每次打开都会拿浏览器所在电脑的时间比对，相差 2 分钟
-  以上会在顶部提示。可在服务器上跑一个局域网 NTP 服务，让设备日志时间也一并准确（可选，不影响播放与认证）：
-  ```sh
-  # 服务器（安装时联网装好）：apt install chrony，然后在 /etc/chrony/chrony.conf 加
-  allow 192.168.0.0/16
-  local stratum 10
-  # 设备：/etc/systemd/timesyncd.conf 的 [Time] 下写 NTP=<服务器IP>，然后 systemctl restart systemd-timesyncd
-  ```
+  以上会在顶部提示。设备的时钟由代理自动校到服务器时间，所以服务器准了，全部设备就都准了。
   服务器时间偏了且没有可用的时间源时，手工校准：`date -s "2026-10-02 09:30:00"` 后 `hwclock -w`。
 - **server_url 用的域名**：设备**第一次注册时**必须能解析（局域网 DNS 静态记录，或在母镜像的
   `/etc/hosts` 里写死）。之后 DNS 失效会用缓存的地址；但服务器换了 IP 而 DNS 又不可用时，设备找不到新地址。
-- **安装完成后不能再装软件**：ffmpeg、CJK 字体、mpv 要在安装时装好。设备上的 `check-display.sh` 只需要
-  `socat`、`nc`、`python3` 中任意一个就能查询 mpv；都没有时，同样的信息（硬解、输出分辨率、温度）
-  在管理后台设备列表里也能看到。
+- **安装完成后不能再装软件**：ffmpeg、CJK 字体、GStreamer 要在安装时装好（`install-agent.sh`
+  已包含设备端所需的全部软件包）。
 - **程序升级**：在一台能联网的机器上 `make package`（或下载 Release），把二进制拷到局域网里的电脑，
   再从管理后台上传、下发即可——OTA 只在局域网内进行。
 
 ## 10. 当前已知简化
 
-- 图片展示时长写在**模板**里；同一份清单里的图片共用一个时长，暂不支持逐条目时长——mpv 的 m3u 不支持逐条目选项。
-  单张静态图用 `inf`，不会周期性重载；
-- 模板里的"播放内容"区域靠 mpv 的 `overlay-add` 合成。本地已在 X11 输出上验证通过，
-  **样机上需再确认 DRM 输出（`--vo=gpu --gpu-context=drm`）下叠加层正常，再对整批设备下发 OTA**。
-  万一不正常，媒体区为空时服务端本来就回落整屏图，不会黑屏；
-- 清单更新时 mpv `loadlist replace` 立即切换列表（"播完当前项再切"留待优化）；
+- 图片展示时长写在**模板**里，同一份清单里的图片共用一个时长；单张静态图一直显示，不会周期性重载；
+- 模板里的"播放内容"区域靠两个硬件图层叠加（见架构文档 5.2）。本地用真实 GStreamer 验证了排期、
+  淡入淡出与解码器上报（fakesink 代替显示、软解代替 cedrus），**样机上必须确认：图层叠加与透明洞、
+  cedrus 硬解（后台显示"硬解 v4l2slh264dec"）、温度，再对整批设备下发 OTA**；
+- 清单更新时先把当前内容淡出再换（"播完当前项再切"留待优化）；
 - SoC 硬件看门狗（`/dev/watchdog`）与只读根文件系统在 M4 实现；当前已有 systemd 软看门狗
-  （进程假死 90s 内重启）、mpv 进程自动拉起，以及播放列表巡检（mpv 未加载期望内容时自动重推）。
+  （进程假死 90s 内重启），以及播放进程守护（退出或 10 秒 ping 不回就重启，并重新下发当前画面）。

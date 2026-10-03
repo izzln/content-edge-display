@@ -1,0 +1,410 @@
+package player
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// 测试二进制兼任"假播放进程"：GST 启动的子进程就是它自己（见 fakePlayer）。
+func TestMain(m *testing.M) {
+	if os.Getenv("GST_FAKE_PLAYER") == "1" {
+		fakePlayer()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// fakePlayer 按 gstplayer.py 的协议应答，并把收到的请求逐行记进 GST_FAKE_LOG。
+//   - GST_FAKE_EXIT_ONCE=<标记文件>：第一次收到 load 后退出（模拟崩溃），之后正常；
+//   - GST_FAKE_HANG_ONCE=<标记文件>：第一次运行时不回 ping（模拟卡死）。
+func fakePlayer() {
+	logPath := os.Getenv("GST_FAKE_LOG")
+	once := func(env string) bool {
+		marker := os.Getenv(env)
+		if marker == "" {
+			return false
+		}
+		if _, err := os.Stat(marker); err == nil {
+			return false
+		}
+		os.WriteFile(marker, nil, 0o644)
+		return true
+	}
+	hang := once("GST_FAKE_HANG_ONCE")
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		var req map[string]any
+		if json.Unmarshal(sc.Bytes(), &req) != nil {
+			continue
+		}
+		if f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			f.Write(append(sc.Bytes(), '\n'))
+			f.Close()
+		}
+		reply := map[string]any{"id": req["id"], "ok": true}
+		switch req["cmd"] {
+		case "ping":
+			if hang {
+				continue
+			}
+		case "stats":
+			reply["hwdec"], reply["output_w"], reply["output_h"] = "v4l2slh264dec", 1440, 900
+		}
+		out, _ := json.Marshal(reply)
+		os.Stdout.Write(append(out, '\n'))
+		if req["cmd"] == "load" && once("GST_FAKE_EXIT_ONCE") {
+			os.Exit(3)
+		}
+	}
+}
+
+// startFake 用假播放进程启动 GST，返回它和请求记录文件。
+func startFake(t *testing.T, w, h int, env ...string) (*GST, string) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "requests.log")
+	p := NewGST(dir, w, h)
+	p.callTimeout, p.pingInterval, p.restartDelay = time.Second, 200*time.Millisecond, 50*time.Millisecond
+	p.python = os.Args[0]
+	p.env = append([]string{"GST_FAKE_PLAYER=1", "GST_FAKE_LOG=" + logPath}, env...)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := p.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return p, logPath
+}
+
+func requests(path string) []map[string]any {
+	data, _ := os.ReadFile(path)
+	var out []map[string]any
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var m map[string]any
+		if json.Unmarshal(line, &m) == nil {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func cmds(path string, which string) []map[string]any {
+	var out []map[string]any
+	for _, r := range requests(path) {
+		if r["cmd"] == which {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout: %s", desc)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// overlayPNG 造一张 w×h 的叠加图：左半不透明、右半（媒体区）全透明。
+func overlayPNG(t *testing.T, dir string, w, h int) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w/2; x++ {
+			img.SetRGBA(x, y, color.RGBA{0x1E, 0x3A, 0x8A, 0xFF})
+		}
+	}
+	path := filepath.Join(dir, "ovl.png")
+	var buf bytes.Buffer
+	png.Encode(&buf, img)
+	os.WriteFile(path, buf.Bytes(), 0o644)
+	return path
+}
+
+func TestStartWritesPlayerScript(t *testing.T) {
+	p, _ := startFake(t, 1440, 900)
+	got, err := os.ReadFile(p.script)
+	if err != nil || !bytes.Equal(got, gstScript) {
+		t.Fatalf("播放脚本应按程序内嵌的版本写出：%v", err)
+	}
+}
+
+// 播放进程先拿到显示配置，再拿到画面；它退出后要被拉起来，并重新拿到同一个画面
+// （内容没变时服务端只回 304，不重发的话一次崩溃就黑屏到下次内容变化）。
+func TestConfigThenSceneAndResendAfterRestart(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "crashed")
+	p, logPath := startFake(t, 1440, 900, "GST_FAKE_EXIT_ONCE="+marker)
+	scene := Scene{Items: []Item{{Path: "/m/a.jpg", Type: "image", Duration: 7}, {Path: "/m/b.mp4", Type: "video"}}}
+	if err := p.Load(scene); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "重启后重新下发画面", func() bool { return len(cmds(logPath, "load")) >= 2 })
+
+	reqs := requests(logPath)
+	if reqs[0]["cmd"] != "config" || reqs[0]["width"] != 1440.0 || reqs[0]["height"] != 900.0 || reqs[0]["fade"] != FadeSeconds {
+		t.Fatalf("第一个请求应是显示配置：%v", reqs[0])
+	}
+	if len(cmds(logPath, "config")) < 2 {
+		t.Fatal("重启后应重新配置显示")
+	}
+	for _, l := range cmds(logPath, "load") {
+		items := l["items"].([]any)
+		first := items[0].(map[string]any)
+		if len(items) != 2 || first["path"] != "/m/a.jpg" || first["duration"] != 7.0 || l["overlay"] != nil {
+			t.Fatalf("画面内容不对：%v", l)
+		}
+	}
+}
+
+// 叠加图要按显示屏实际输出分辨率光栅化（输出 1080p 而模板是 1440×900 时也不能错位），
+// 媒体区按画布坐标交给播放进程，由它换算。
+func TestOverlayRasterizedToOutputSize(t *testing.T) {
+	p, logPath := startFake(t, 1920, 1080)
+	pngPath := overlayPNG(t, t.TempDir(), 1440, 900)
+	err := p.Load(Scene{
+		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
+		Overlay: &Overlay{PNG: pngPath},
+		Media:   Rect{720, 0, 720, 900}, CanvasW: 1440, CanvasH: 900,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, "下发画面", func() bool { return len(cmds(logPath, "load")) >= 1 })
+	l := cmds(logPath, "load")[0]
+	if l["overlay"] != pngPath+".1920x1080.bgra" {
+		t.Fatalf("叠加图应光栅化到输出分辨率，得到 %v", l["overlay"])
+	}
+	if !jsonEq(l["media"], []int{720, 0, 720, 900}) || !jsonEq(l["canvas"], []int{1440, 900}) {
+		t.Fatalf("媒体区/画布不对：%v %v", l["media"], l["canvas"])
+	}
+	raw, err := os.ReadFile(pngPath + ".1920x1080.bgra")
+	if err != nil || len(raw) != 1920*1080*4 {
+		t.Fatalf("光栅化结果应正好 1920×1080×4 字节：%v %d", err, len(raw))
+	}
+	if a := raw[(540*1920+1440)*4+3]; a != 0 {
+		t.Fatalf("媒体区（右半）alpha = %d，应为 0（全透明）", a)
+	}
+	if a := raw[(540*1920+200)*4+3]; a != 0xFF {
+		t.Fatalf("属性区（左半）alpha = %d，应为 255", a)
+	}
+}
+
+func jsonEq(got any, want []int) bool {
+	a, _ := json.Marshal(got)
+	b, _ := json.Marshal(want)
+	return bytes.Equal(a, b)
+}
+
+func TestStatsFromPlayer(t *testing.T) {
+	p, logPath := startFake(t, 1440, 900)
+	waitFor(t, 3*time.Second, "配置显示", func() bool { return len(cmds(logPath, "config")) >= 1 })
+	waitFor(t, 3*time.Second, "问到状态", func() bool { return p.Stats().HWDec != "" })
+	if st := p.Stats(); st.HWDec != "v4l2slh264dec" || st.OutputW != 1440 || st.OutputH != 900 {
+		t.Fatalf("got %+v", st)
+	}
+}
+
+// 播放进程卡死（不退出、也不应答）时要被杀掉重启。
+func TestHungPlayerIsRestarted(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hung")
+	p, logPath := startFake(t, 1440, 900, "GST_FAKE_HANG_ONCE="+marker)
+	p.Load(Scene{Items: []Item{{Path: "/m/a.jpg", Type: "image"}}})
+	waitFor(t, 8*time.Second, "卡死后重启", func() bool { return len(cmds(logPath, "config")) >= 2 })
+	waitFor(t, 3*time.Second, "重启后重新下发画面", func() bool { return len(cmds(logPath, "load")) >= 2 })
+}
+
+// ---- 真实播放脚本（需要 Python + GStreamer，没有就跳过）----
+
+func gstPython(t *testing.T) string {
+	t.Helper()
+	check := `import gi; gi.require_version("Gst","1.0"); gi.require_version("GstVideo","1.0")
+from gi.repository import Gst, GstVideo; Gst.init(None)
+assert all(Gst.ElementFactory.find(n) for n in ("playbin","videocrop","appsrc","videoconvert","fakesink","jpegdec"))`
+	for _, py := range []string{"python3", "python3.13", "python3.12", "python3.11", "/usr/bin/python3"} {
+		if exec.Command(py, "-c", check).Run() == nil {
+			return py
+		}
+	}
+	t.Skip("没有带 GStreamer 绑定的 Python（apt install python3-gst-1.0 gstreamer1.0-plugins-good）")
+	return ""
+}
+
+// 纯计算部分：cover 裁剪与淡入淡出用的叠加帧。
+func TestPlayerScriptHelpers(t *testing.T) {
+	py := gstPython(t)
+	scriptPath(t)
+	out, err := exec.Command(py, "-c", `
+import gstplayer as g
+assert g.cover_crop(1440, 810, 720, 900) == (396, 396, 0, 0), g.cover_crop(1440, 810, 720, 900)  # 宽片放进竖条：裁左右
+assert g.cover_crop(720, 1280, 720, 900) == (0, 0, 190, 190), g.cover_crop(720, 1280, 720, 900)  # 竖片放进矮框：裁上下
+assert g.cover_crop(1441, 900, 1440, 900) == (0, 1, 0, 0)  # 奇数像素差：右边多裁一个
+assert g.cover_crop(1440, 900, 1440, 900) == (0, 0, 0, 0)
+assert g.cover_crop(0, 0, 720, 900) == (0, 0, 0, 0)
+
+# 淡入淡出：只在洞里填半透明黑（BGRA 预乘即 0,0,0,a），洞外的叠加图原样不动
+p = g.Player(None)
+p.width, p.height, p.hole = 4, 2, (2, 0, 2, 2)
+p.base = bytes([9, 9, 9, 255]) * 8
+assert p._frame(0) == p.base
+f = p._frame(128)
+px = [tuple(f[i:i + 4]) for i in range(0, len(f), 4)]
+assert px == [(9, 9, 9, 255)] * 2 + [(0, 0, 0, 128)] * 2 + [(9, 9, 9, 255)] * 2 + [(0, 0, 0, 128)] * 2, px
+`).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
+// scriptPath 把内嵌的播放脚本写到临时目录（供直接用 Python 跑）。
+func scriptPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "gstplayer.py")
+	os.WriteFile(p, gstScript, 0o644)
+	t.Setenv("PYTHONPATH", dir)
+	return p
+}
+
+func testMedia(t *testing.T, dir string) (img1, img2, video string) {
+	t.Helper()
+	write := func(name string, c color.RGBA) string {
+		im := image.NewRGBA(image.Rect(0, 0, 320, 200))
+		for i := 0; i < len(im.Pix); i += 4 {
+			im.Pix[i], im.Pix[i+1], im.Pix[i+2], im.Pix[i+3] = c.R, c.G, c.B, 255
+		}
+		var buf bytes.Buffer
+		jpeg.Encode(&buf, im, nil)
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, buf.Bytes(), 0o644)
+		return p
+	}
+	img1, img2 = write("a.jpg", color.RGBA{255, 0, 0, 255}), write("b.jpg", color.RGBA{0, 255, 0, 255})
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		video = filepath.Join(dir, "c.mp4")
+		if out, err := exec.Command("ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30",
+			"-t", "1.5", "-pix_fmt", "yuv420p", "-c:v", "libx264", video).CombinedOutput(); err != nil {
+			t.Logf("ffmpeg 造不了测试视频，跳过视频部分：%v %s", err, out)
+			video = ""
+		}
+	}
+	return
+}
+
+// 播放脚本按顺序循环播放：图片按时长、视频播完即切，坏文件跳过，单张图片一直显示。
+func TestPlayerScriptSequencing(t *testing.T) {
+	py := gstPython(t)
+	script := scriptPath(t)
+	dir := t.TempDir()
+	img1, img2, video := testMedia(t, dir)
+
+	cmd := exec.Command(py, "-u", script)
+	cmd.Env = append(os.Environ(), "DISPLAY_PLAYER_SINK=fakesink")
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+
+	var mu sync.Mutex
+	var events []map[string]any
+	replies := map[float64]map[string]any{}
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			var m map[string]any
+			if json.Unmarshal(sc.Bytes(), &m) != nil {
+				continue
+			}
+			mu.Lock()
+			if id, ok := m["id"].(float64); ok {
+				replies[id] = m
+			} else {
+				events = append(events, m)
+			}
+			mu.Unlock()
+		}
+	}()
+	send := func(m map[string]any) {
+		b, _ := json.Marshal(m)
+		stdin.Write(append(b, '\n'))
+	}
+	played := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, e := range events {
+			if e["event"] == "playing" {
+				out = append(out, filepath.Base(e["path"].(string)))
+			}
+		}
+		return out
+	}
+
+	items := []map[string]any{
+		{"path": img1, "type": "image", "duration": 1},
+		{"path": filepath.Join(dir, "missing.jpg"), "type": "image", "duration": 1},
+		{"path": img2, "type": "image", "duration": 1},
+	}
+	want := []string{"a.jpg", "b.jpg"}
+	if video != "" {
+		items = append(items, map[string]any{"path": video, "type": "video"})
+		want = append(want, "c.mp4")
+	}
+	want = append(want, "a.jpg") // 循环回到第一项
+
+	send(map[string]any{"id": 1, "cmd": "config", "width": 1440, "height": 900, "fade": 0.2})
+	send(map[string]any{"id": 2, "cmd": "load", "items": items, "overlay": nil})
+	waitFor(t, 15*time.Second, "按顺序播一轮", func() bool { return len(played()) >= len(want) })
+	if got := played()[:len(want)]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("播放顺序 %v，期望 %v\n%s", got, want, stderr.String())
+	}
+	mu.Lock()
+	var failed bool
+	for _, e := range events {
+		failed = failed || (e["event"] == "error" && e["index"] == 1.0)
+	}
+	mu.Unlock()
+	if !failed {
+		t.Fatal("坏文件应报 error 事件并跳过")
+	}
+	if video != "" {
+		send(map[string]any{"id": 3, "cmd": "stats"})
+		waitFor(t, 3*time.Second, "状态", func() bool { mu.Lock(); defer mu.Unlock(); return replies[3] != nil })
+		mu.Lock()
+		st := replies[3]
+		mu.Unlock()
+		if st["hwdec"] == "" || st["output_w"] != 1440.0 {
+			t.Fatalf("放过视频后应报告解码方式与输出分辨率：%v", st)
+		}
+	}
+
+	// 换成单张图片：一直显示，不再切换
+	send(map[string]any{"id": 4, "cmd": "load", "items": []map[string]any{{"path": img2, "type": "image", "duration": 1}}, "overlay": nil})
+	n := len(played())
+	waitFor(t, 3*time.Second, "切到新画面", func() bool { return len(played()) > n })
+	n = len(played())
+	time.Sleep(2500 * time.Millisecond)
+	if len(played()) != n {
+		t.Fatalf("单张图片不应反复切换：%v", played()[n:])
+	}
+}

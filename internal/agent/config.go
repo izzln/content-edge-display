@@ -20,12 +20,9 @@ type Config struct {
 	EnrollToken string `json:"enroll_token"`
 	CacheDir    string `json:"cache_dir"`
 	InstallDir  string `json:"install_dir"` // OTA 安装布局根目录；空=禁用 OTA
-	Player      string `json:"player"`      // "mpv" | "null"
-	// DisplayMode 是显示屏输出模式（WxH 或 WxH@刷新率），传给 mpv 的 --drm-mode。
-	// mpv 默认用 EDID 首选模式、不理会内核的 video= 参数，所以要单独指定；留空则不强制。
-	DisplayMode  string   `json:"display_mode"`
-	MpvSocket    string   `json:"mpv_socket"`
-	MpvExtraArgs []string `json:"mpv_extra_args"`
+	Player      string `json:"player"`      // "gst" | "null"
+	// DisplayMode 是显示屏输出模式（WxH，可带 @刷新率），见 OutputMode；留空用显示屏的首选模式。
+	DisplayMode string `json:"display_mode"`
 }
 
 // LoadConfig 读取配置文件并填充默认值。
@@ -48,7 +45,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range []*string{&cfg.CacheDir, &cfg.InstallDir, &cfg.MpvSocket} {
+	for _, p := range []*string{&cfg.CacheDir, &cfg.InstallDir} {
 		if *p != "" && !filepath.IsAbs(*p) {
 			*p = filepath.Join(base, *p)
 		}
@@ -68,17 +65,14 @@ func (c *Config) fillDefaults() error {
 		c.CacheDir = "/var/lib/display-agent"
 	}
 	if c.Player == "" {
-		c.Player = "mpv"
+		c.Player = "gst"
 	}
-	if c.Player != "mpv" && c.Player != "null" {
+	if c.Player != "gst" && c.Player != "null" {
 		return fmt.Errorf("config: unknown player %q", c.Player)
 	}
 	if c.DisplayMode != "" && !displayModePattern.MatchString(c.DisplayMode) {
-		// 格式不对 mpv 会拒绝启动，设备就黑屏了——在这里报错，装机时就能发现
+		// 在这里报错，装机时就能发现
 		return fmt.Errorf("config: display_mode %q is invalid, expected e.g. 1440x900 or 1440x900@60", c.DisplayMode)
-	}
-	if c.MpvSocket == "" {
-		c.MpvSocket = "/run/display-agent/mpv.sock"
 	}
 	return nil
 }

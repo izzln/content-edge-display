@@ -89,7 +89,7 @@ const stallTimeout = 60 * time.Second
 
 // progressReader 在下载过程中做两件事：
 //   - 有数据进来就喂 systemd 看门狗。大文件下载可能持续几分钟，主循环这段时间不会回到喂狗点，
-//     不喂的话 90 秒后 systemd 认定假死，连同 mpv 一起杀掉重启——屏幕黑一下，下载从头再来；
+//     不喂的话 90 秒后 systemd 认定假死，连同播放进程一起杀掉重启——屏幕黑一下，下载从头再来；
 //   - 超过 stallTimeout 没收到任何数据就取消请求（服务端或网络卡死），让主循环继续。
 type progressReader struct {
 	r      io.Reader

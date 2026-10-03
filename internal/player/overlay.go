@@ -9,17 +9,17 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
-// rasterize 把服务端下发的叠加 PNG 变成 mpv 能直接贴的原始像素，并缓存在 PNG 旁边。
+// rasterize 把服务端下发的叠加 PNG 变成播放进程能直接推给显示图层的原始像素，并缓存在 PNG 旁边。
 //
 // 两件事必须在这里做：
 //
-//  1. 格式。mpv 的 overlay-add 只吃原始像素（预乘 alpha 的 bgra），不认 PNG。
+//  1. 格式。上层图层吃原始像素（预乘 alpha 的 BGRA，即 DRM 的 ARGB8888），播放进程不必再解 PNG。
 //
-//  2. 尺寸。overlay-add 的坐标是 **mpv 实际输出分辨率**（osd-dimensions）下的像素，
+//  2. 尺寸。上层图层是整屏的，坐标是 **显示屏实际输出分辨率** 下的像素，
 //     而叠加图是按模板画布尺寸（1440×900）渲染的。显示屏真实输出不一定等于画布——
 //     面板 EDID 报的是 1920×1080、内核没吃下 video= 参数、换了块屏，都会导致两者不一致。
 //     不缩放的话叠加图会贴在左上角那一块，画面整体错位。所以这里按实际输出尺寸缩放，
-//     与 --video-margin-ratio-*（本来就是比例）对齐。
+//     媒体区（下层图层的位置）也按同一比例换算，两者始终对齐。
 //
 // 文件名带上目标尺寸：分辨率变了会生成新文件，不会用到旧的。
 func rasterize(pngPath string, w, h int) (string, error) {
@@ -41,7 +41,7 @@ func rasterize(pngPath string, w, h int) (string, error) {
 		return "", fmt.Errorf("decode %s: %w", pngPath, err)
 	}
 
-	// 统一先落到目标尺寸的 RGBA（Go 的 image.RGBA 就是预乘 alpha，正合 mpv 的要求），
+	// 统一先落到目标尺寸的 RGBA（Go 的 image.RGBA 就是预乘 alpha，正合显示图层的要求），
 	// 再换成 BGRA 的字节序。
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	if src.Bounds().Dx() == w && src.Bounds().Dy() == h {

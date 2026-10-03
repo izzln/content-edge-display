@@ -256,7 +256,7 @@ func TestRestoreFromLocalCache(t *testing.T) {
 	_ = p
 }
 
-// 模板承载视频：服务端下发 layout，设备端要把叠加图下载下来、解码成 mpv 能用的
+// 模板承载视频：服务端下发 layout，设备端要把叠加图下载下来、解码成播放器能用的
 // BGRA，并把播放区限制在媒体区——而不是让视频铺满整屏盖掉属性。
 func TestLayoutBecomesOverlayScene(t *testing.T) {
 	a, p, _, _, devDir := newTestEnv(t)

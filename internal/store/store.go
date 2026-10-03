@@ -435,7 +435,7 @@ func ValidateTemplate(t *Template) error {
 		case RegionMedia:
 			media++
 			if media > 1 {
-				return errors.New("template: 至多只能有一个媒体区（mpv 只能把视频放进一个矩形）")
+				return errors.New("template: 至多只能有一个媒体区（只有一个视频图层）")
 			}
 		default:
 			return fmt.Errorf("region %q: 未知类型 %q", r.ID, r.Type)

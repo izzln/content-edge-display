@@ -1,4 +1,4 @@
-// display-agent 是显示屏端播放代理：自注册、轮询清单、下载校验、驱动 mpv 循环播放、心跳上报、程序更新。
+// display-agent 是显示屏端播放代理：自注册、轮询清单、下载校验、驱动 GStreamer 循环播放、心跳上报、程序更新。
 package main
 
 import (
@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/izzln/content-edge-display/internal/agent"
@@ -32,14 +31,12 @@ func main() {
 
 	var p player.Player
 	switch cfg.Player {
-	case "mpv":
-		// 这个目录同时作为 mpv 的 XDG_RUNTIME_DIR，规范要求仅属主可访问
-		if err := os.MkdirAll(filepath.Dir(cfg.MpvSocket), 0o700); err != nil {
-			log.Fatalf("create mpv socket dir: %v", err)
+	case "gst":
+		if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+			log.Fatalf("create cache dir: %v", err)
 		}
-		// 输出模式放在前面，mpv_extra_args 里若另有 --drm-mode 以后者为准（mpv 取最后一次出现的值）
-		args := append(agent.DRMModeArgs(cfg.DisplayMode), cfg.MpvExtraArgs...)
-		p = player.NewMPV(cfg.MpvSocket, filepath.Join(cfg.CacheDir, "playlist.m3u"), args)
+		w, h := agent.OutputMode(cfg.DisplayMode)
+		p = player.NewGST(cfg.CacheDir, w, h)
 	case "null":
 		p = player.NewNull()
 	}

@@ -117,7 +117,7 @@ func listenNotify(t *testing.T) func() int {
 }
 
 // 回归：服务端连不上（断网、服务器关机）时注册重试会退避到几分钟，等待期间必须持续喂狗，
-// 否则超过 90 秒 systemd 把代理连同 mpv 一起杀掉，屏幕每隔一分半黑一下。
+// 否则超过 90 秒 systemd 把代理连同播放进程一起杀掉，屏幕每隔一分半黑一下。
 func TestRegisterRetryKeepsFeedingWatchdog(t *testing.T) {
 	count := listenNotify(t)
 	old := watchdogInterval

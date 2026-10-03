@@ -282,14 +282,14 @@ func TestCacheDirLockIsExclusive(t *testing.T) {
 func TestLoadConfigResolvesRelativePaths(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "agent.json")
-	os.WriteFile(p, []byte(`{"server_url":"http://x","enroll_token":"t","cache_dir":"cache","mpv_socket":"run/mpv.sock"}`), 0o644)
+	os.WriteFile(p, []byte(`{"server_url":"http://x","enroll_token":"t","cache_dir":"cache","install_dir":"ota"}`), 0o644)
 	t.Chdir(t.TempDir())
 	cfg, err := LoadConfig(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CacheDir != filepath.Join(dir, "cache") || cfg.MpvSocket != filepath.Join(dir, "run/mpv.sock") {
-		t.Fatalf("相对路径应按配置文件目录解析：cache=%s sock=%s", cfg.CacheDir, cfg.MpvSocket)
+	if cfg.CacheDir != filepath.Join(dir, "cache") || cfg.InstallDir != filepath.Join(dir, "ota") {
+		t.Fatalf("相对路径应按配置文件目录解析：cache=%s install=%s", cfg.CacheDir, cfg.InstallDir)
 	}
 }
 
