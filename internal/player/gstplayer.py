@@ -376,18 +376,23 @@ class Player:
             self._item_failed("cannot start pipeline")
 
     def _on_caps(self, pad, info, data):
-        ev = info.get_event()
-        if ev.type == Gst.EventType.CAPS:
-            crop, w, h = data
-            s = ev.parse_caps().get_structure(0)
-            ok_w, sw = s.get_int("width")
-            ok_h, sh = s.get_int("height")
-            if ok_w and ok_h:
-                left, right, top, bottom = cover_crop(sw, sh, w, h)
-                crop.set_property("left", left)
-                crop.set_property("right", right)
-                crop.set_property("top", top)
-                crop.set_property("bottom", bottom)
+        # 回调里抛异常会让整条管线报 data stream error：算不出裁剪就不裁，也不能把播放搞挂。
+        try:
+            ev = info.get_event()
+            if ev.type == Gst.EventType.CAPS:
+                crop, w, h = data
+                # 用 VideoInfo 取宽高，不碰 GstStructure：gst-python 1.26 起 caps.get_structure()
+                # 返回的是要配合 with 用的包装对象，1.24 及以前又是普通对象，两边写法不通用。
+                vi = GstVideo.VideoInfo.new_from_caps(ev.parse_caps())
+                if vi:
+                    left, right, top, bottom = cover_crop(vi.width, vi.height, w, h)
+                    emit({"event": "crop", "size": [vi.width, vi.height], "crop": [left, right, top, bottom]})
+                    crop.set_property("left", left)
+                    crop.set_property("right", right)
+                    crop.set_property("top", top)
+                    crop.set_property("bottom", bottom)
+        except Exception as e:  # noqa: BLE001
+            log("cannot compute cover crop: %s" % e)
         return Gst.PadProbeReturn.OK
 
     def _on_element(self, _bin, _sub, element):

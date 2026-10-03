@@ -423,3 +423,51 @@ func TestPlayerScriptSequencing(t *testing.T) {
 		t.Fatalf("单张图片不应反复切换：%v", played()[n:])
 	}
 }
+
+// cover 裁剪要真的在管线里算出来并设上（gst-python 1.26 改了 caps 结构的取法，曾在这里崩过）。
+// 320×200 的图放进 720×900 的竖条：保留宽 160，左右各裁 80。
+func TestPlayerScriptAppliesCoverCrop(t *testing.T) {
+	py := gstPython(t)
+	script := scriptPath(t)
+	dir := t.TempDir()
+	img, _, _ := testMedia(t, dir)
+	overlay := filepath.Join(dir, "ovl.bgra")
+	os.WriteFile(overlay, make([]byte, 1440*900*4), 0o644)
+
+	cmd := exec.Command(py, "-u", script)
+	cmd.Env = append(os.Environ(), "DISPLAY_PLAYER_SINK=fakesink")
+	stdin, _ := cmd.StdinPipe()
+	stdout, _ := cmd.StdoutPipe()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	crops := make(chan map[string]any, 4)
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			var m map[string]any
+			if json.Unmarshal(sc.Bytes(), &m) == nil && m["event"] == "crop" {
+				crops <- m
+			}
+		}
+	}()
+	for _, m := range []map[string]any{
+		{"id": 1, "cmd": "config", "width": 1440, "height": 900, "fade": 0.1},
+		{"id": 2, "cmd": "load", "items": []map[string]any{{"path": img, "type": "image", "duration": 5}},
+			"overlay": overlay, "canvas": []int{1440, 900}, "media": []int{720, 0, 720, 900}},
+	} {
+		b, _ := json.Marshal(m)
+		stdin.Write(append(b, '\n'))
+	}
+	select {
+	case m := <-crops:
+		if !jsonEq(m["size"], []int{320, 200}) || !jsonEq(m["crop"], []int{80, 80, 0, 0}) {
+			t.Fatalf("裁剪不对：%v", m)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("没有算出裁剪\n%s", stderr.String())
+	}
+}
