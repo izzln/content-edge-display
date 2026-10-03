@@ -210,7 +210,7 @@ systemctl enable display-agent        # 确认无误后再设为开机自启
 | 项 | 怎么判断 | 不对时的现场表现 |
 |---|---|---|
 | 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 里有没有 1440×900 | 播放时退回首选模式，画面按比例缩放 |
-| 硬件解码条件 | cedrus 已加载、`gst-inspect-1.0 v4l2slh264dec` 存在、`kmssink` 与 Python 绑定可用 | 视频退化成软解：发热、卡顿，严重时过热关机 |
+| 硬件解码条件 | cedrus 已加载、`gst-inspect-1.0 v4l2slh264dec` 存在、`kmssink` 与 Python 绑定可用、CMA ≥ 96MB | 视频退化成软解：发热、卡顿，严重时过热关机；CMA 太小时视频放不出来 |
 | 实际播放状态 | 代理每次心跳写的 `/var/lib/display-agent/status.json`：解码器、输出分辨率 | — |
 | SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
 
@@ -227,6 +227,11 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 `v4l2slh264dec` 不出现时，按顺序查：`ls /dev/video* /dev/media*` 有没有 cedrus 的设备、
 `dmesg | grep -i cedrus` 有没有报错（如 CMA 内存不足）、`gstreamer1.0-plugins-bad` 装了没有；
 改完后 `rm -rf ~/.cache/gstreamer-1.0` 让 GStreamer 重新扫描插件。
+
+媒体区不出画面时看 `journalctl -u display-agent -n 80`：每一项第一次显示时记
+`showing <文件> (<类型>, <源尺寸 格式>, crop …)`；放不出来记 `cannot play <文件>: <原因> [<出错元素>: <细节>]`；
+视频输出方式退一步记 `video output '…' failed: … retrying with '…'`；GStreamer 自己的 ERROR 行
+（以及 `kmssink`、`v4l2codecs` 的 WARN 行）也在其中。
 
 ## 4. 设备端：母镜像批量部署
 

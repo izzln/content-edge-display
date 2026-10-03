@@ -236,7 +236,7 @@ func gstPython(t *testing.T) string {
 	t.Helper()
 	check := `import gi; gi.require_version("Gst","1.0"); gi.require_version("GstVideo","1.0")
 from gi.repository import Gst, GstVideo; Gst.init(None)
-assert all(Gst.ElementFactory.find(n) for n in ("playbin","videocrop","appsrc","videoconvert","fakesink","jpegdec"))`
+assert all(Gst.ElementFactory.find(n) for n in ("playbin","videocrop","videoscale","videoconvert","fakesink","jpegdec"))`
 	for _, py := range []string{"python3", "python3.13", "python3.12", "python3.11", "/usr/bin/python3"} {
 		if exec.Command(py, "-c", check).Run() == nil {
 			return py
@@ -257,6 +257,8 @@ assert g.cover_crop(720, 1280, 720, 900) == (0, 0, 190, 190), g.cover_crop(720, 
 assert g.cover_crop(1441, 900, 1440, 900) == (0, 1, 0, 0)  # 奇数像素差：右边多裁一个
 assert g.cover_crop(1440, 900, 1440, 900) == (0, 0, 0, 0)
 assert g.cover_crop(0, 0, 720, 900) == (0, 0, 0, 0)
+assert g.cover_crop(1000, 900, 994, 900) == (2, 4, 0, 0)  # 左偏移取偶数（NV12 色度 2×2 一组）
+assert g.cover_crop(1000, 901, 1000, 900) == (0, 0, 0, 1)  # 保留高度取偶数
 
 # 选图层：按 Allwinner DE2（H3）的真实布局——VI 图层排在最前，只有 XRGB/YUV；主图层是第一个 UI 图层。
 # 上层必须选主图层（吃 ARGB），下层选 VI 图层；第二个 CRTC（mixer1）上的图层不能选。
@@ -272,15 +274,22 @@ assert g.pick_planes(de2) == (35, 33), g.pick_planes(de2)
 untyped = [dict(p, type=-1) for p in de2]
 assert g.pick_planes(untyped) == (35, 33), g.pick_planes(untyped)
 assert g.pick_planes([]) == (-1, -1)
+assert g.pick_planes(de2, crtc_bit=2) == (41, -1)  # 只看所用 CRTC 上的图层
 
-# 淡入淡出：只在洞里填半透明黑（BGRA 预乘即 0,0,0,a），洞外的叠加图原样不动
-p = g.Player(None)
-p.width, p.height, p.hole = 4, 2, (2, 0, 2, 2)
-p.base = bytes([9, 9, 9, 255]) * 8
-assert p._frame(0) == p.base
-f = p._frame(128)
-px = [tuple(f[i:i + 4]) for i in range(0, len(f), 4)]
-assert px == [(9, 9, 9, 255)] * 2 + [(0, 0, 0, 128)] * 2 + [(9, 9, 9, 255)] * 2 + [(0, 0, 0, 128)] * 2, px
+# 上层画面：只在洞里填半透明黑（BGRA 预乘即 0,0,0,a），洞外的叠加图原样不动；行宽可能带对齐填充
+base = bytes([9, 9, 9, 255]) * 8  # 4×2
+hole = (2, 0, 2, 2)
+def pixels(buf, pitch):
+    return [tuple(buf[r * pitch + i:r * pitch + i + 4]) for r in range(2) for i in range(0, 16, 4)]
+K, H = (9, 9, 9, 255), (0, 0, 0, 128)
+for pitch in (16, 24):
+    buf = bytearray(pitch * 2)
+    g.paint(buf, pitch, 4, base, hole, 128, True)
+    assert pixels(buf, pitch) == [K, K, H, H] * 2, (pitch, pixels(buf, pitch))
+    g.paint(buf, pitch, 4, base, hole, 0, False)  # 淡入完：洞里还原叠加图
+    assert pixels(buf, pitch) == [K] * 8, (pitch, pixels(buf, pitch))
+    g.paint(buf, pitch, 4, bytes(32), hole, 0, True)  # 换画面：整幅重画
+    assert pixels(buf, pitch) == [(0, 0, 0, 0)] * 8
 `).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
