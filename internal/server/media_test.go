@@ -168,6 +168,34 @@ func TestDeviceMediaUploadValidation(t *testing.T) {
 	}
 }
 
+// 截图、网页下载的文件名整理后照收，不拒绝。
+func TestCleanMediaName(t *testing.T) {
+	for in, want := range map[string]string{
+		"Screenshot 2026-09-01 at 12.53.13\u202fPM.png":            "Screenshot 2026-09-01 at 12.53.13 PM.png", // macOS 截图的窄不换行空格
+		"iPhone 17 | 3x More Scratch Resistant- Slide | Apple.mp4": "iPhone 17 _ 3x More Scratch Resistant- Slide _ Apple.mp4",
+		"宣传 片\t\t第1集.MP4":                                          "宣传 片 第1集.MP4",
+		"Cafe\u0301.jpg":                                           "Cafe\u0301.jpg", // macOS 的分解形式（e + 组合重音）原样保留
+		"../../etc/passwd.png":                                     "passwd.png",
+		`C:\Users\a\b.jpg`:                                         "b.jpg",
+		".hidden.jpg":                                              "hidden.jpg",
+		"a:b*c?.jpg":                                               "a_b_c_.jpg",
+		"  .  .jpg":                                                "file.jpg",
+		strings.Repeat("长", 150) + ".jpg":                          strings.Repeat("长", maxMediaStem) + ".jpg",
+	} {
+		if got := cleanMediaName(in); got != want {
+			t.Errorf("cleanMediaName(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+func TestDeviceMediaUploadCleansName(t *testing.T) {
+	_, h := newAdminTestServer(t)
+	res := parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"Shot | 12.53.13\u202fPM.png", tinyPNG(t)}))
+	if len(res.Accepted) != 1 || res.Accepted[0] != "Shot _ 12.53.13 PM.png" {
+		t.Fatalf("文件名应整理后收下，得到 %v（拒收 %+v）", res.Accepted, res.Rejected)
+	}
+}
+
 func TestDeviceMediaOversizeRejected(t *testing.T) {
 	_, h := newAdminTestServer(t)
 	// 超过 20MB 的“图片”：超限判断在解码之前，所以内容无需是真图

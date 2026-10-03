@@ -16,7 +16,7 @@
 #     直接驱动：自己设显示模式，两块哑缓冲轮换，画好后台那块再用 drmModeSetPlane 切过去。
 #   - 下层（VI 图层，能缩放、吃 NV12）：播放内容，从洞里透出来。每一项一条 playbin 管线，输出交给
 #     kmssink（只管这一个图层，不设显示模式）：
-#       视频  解码器按 rank 自动选，有 cedrus 时就是 v4l2slh264dec（硬解，NV12 dmabuf 直接显示，零拷贝）；
+#       视频  解码器按 rank 自动选，有 cedrus 时就是 v4l2slh264dec（硬解，NV12 dmabuf 直接导入显示，零拷贝）；
 #             cover 撑满媒体区靠 videocrop 打裁剪标记、kmssink 按标记取源矩形，不拷像素。
 #       图片  软件裁剪 + 缩放成正好媒体区大小，kmssink 1:1 显示——只算一次，结果确定。
 #
@@ -55,10 +55,13 @@ FOURCC_ARGB8888 = 0x34325241
 IMAGE_OUTPUT = ("videoconvert ! videocrop name=crop ! videoscale method=4-tap ! "
                 "video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1 ! videoconvert ! {sink}")
 # 视频：按顺序尝试，第一个真正放起来的就一直用（本进程内）。只有前一种在这台设备上放不出来时才往后退。
+# 开头的 video/x-raw 把解码器输出限定为"系统内存"caps：不加的话 v4l2slh264dec 与 kmssink 会协商成
+# DMA_DRM caps，而这条路上的分配查询拿不到 VideoMeta，解码器直接判协商失败（not-negotiated）。
+# 限定之后帧仍是解码器自己的 dmabuf，kmssink 照样直接导入显示，不拷贝。
 VIDEO_OUTPUTS = (
-    ("cover", "videocrop name=crop ! {sink}"),  # 零拷贝；裁剪标记 → 图层取源矩形，撑满媒体区
-    ("fit", "{sink}"),                          # 不裁：按比例缩放居中，留黑边
-    ("convert", "videoconvert ! {sink}"),       # 再加软件转格式（解码器只给得出图层不吃的格式时）
+    ("cover", "capsfilter caps=video/x-raw ! videocrop name=crop ! {sink}"),  # 裁剪标记 → 图层取源矩形，撑满媒体区
+    ("fit", "capsfilter caps=video/x-raw ! {sink}"),                     # 不裁：按比例缩放居中，留黑边
+    ("convert", "capsfilter caps=video/x-raw ! videoconvert ! {sink}"),  # 再加软件转格式（解码器只给得出图层不吃的格式时）
 )
 PLAYBIN_VIDEO, PLAYBIN_NATIVE_VIDEO = 0x1, 0x40  # 只要视频（屏幕一律静音，不开声卡）；不让 playbin 自己插转换
 
