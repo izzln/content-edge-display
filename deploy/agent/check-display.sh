@@ -57,6 +57,19 @@ fi
 if command -v gst-inspect-1.0 >/dev/null 2>&1 && ! gst-inspect-1.0 kmssink >/dev/null 2>&1; then
 	fail "kmssink" "不可用（apt install gstreamer1.0-plugins-bad）"
 fi
+# cedrus 的解码缓冲（1440×900 一帧约 2MB，要二十来帧）和显示用的帧缓冲都从 CMA（连续物理内存）里分，
+# 不够时视频直接放不出来。
+CMA_T=$(awk '/^CmaTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+CMA_F=$(awk '/^CmaFree:/ {print int($2 / 1024)}' /proc/meminfo)
+if [ -z "$CMA_T" ]; then
+	say "CMA" "读不到（/proc/meminfo 里没有 CmaTotal）"
+elif [ "$CMA_T" -lt 96 ]; then
+	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 太小，硬解视频可能分不到缓冲"
+	echo "               编辑 /boot/armbianEnv.txt，在 extraargs 里加上 cma=128M"
+	echo "               （已有 extraargs 就用空格追加在后面），然后 reboot。"
+else
+	say "CMA" "共 ${CMA_T}MB，空闲 ${CMA_F}MB ✓"
+fi
 if ! python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst' 2>/dev/null; then
 	fail "Python" "缺少 GStreamer 的 Python 绑定（apt install python3-gst-1.0 gir1.2-gst-plugins-base-1.0）"
 fi

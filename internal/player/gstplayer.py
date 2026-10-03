@@ -8,29 +8,40 @@
 #         {"id": 3, "cmd": "stats"}   {"id": 4, "cmd": "ping"}
 #   回复  {"id": 1, "ok": true, ...} 或 {"id": 1, "error": "..."}
 #   事件  {"event": "playing", "index": 0, "path": "..."}  {"event": "error", "index": 0, "message": "..."}
+#         {"event": "crop", "size": [w, h], "crop": [左, 右, 上, 下]}
 # 日志写 stderr（英文），由 display-agent 转进 journal。
 #
-# 画面由显示控制器（Allwinner DE2）的两个硬件图层叠出来，不经 GPU、不做软件合成：
-#   - 下层（VI 图层，能缩放、吃 NV12）：播放内容。每一项一条 playbin 管线，解码器按 rank 自动选，
-#     有 cedrus 时就是 v4l2slh264dec（硬解，NV12 dmabuf 直接交给 kmssink 显示，零拷贝）；
-#     画面按 cover 撑满媒体区：videocrop 只打裁剪标记、kmssink 按标记取源矩形，不拷像素。
-#   - 上层（主图层，ARGB）：服务端渲染的模板叠加图，媒体区是全透明的"洞"，下层的内容从洞里透出来。
-#     这条管线常驻（appsrc → kmssink），并由它按叠加图尺寸设置显示模式（force-modesetting）。
-# 两个 kmssink 共用本进程打开的同一个 DRM fd（只有一个 DRM master）。
+# 画面由显示控制器（Allwinner DE2）的两个硬件图层叠出来，不经 GPU、不做整屏软件合成：
+#   - 上层（主图层，ARGB）：服务端渲染的模板叠加图，媒体区是全透明的"洞"。这一层由本进程经 libdrm
+#     直接驱动：自己设显示模式，两块哑缓冲轮换，画好后台那块再用 drmModeSetPlane 切过去。
+#   - 下层（VI 图层，能缩放、吃 NV12）：播放内容，从洞里透出来。每一项一条 playbin 管线，输出交给
+#     kmssink（只管这一个图层，不设显示模式）：
+#       视频  解码器按 rank 自动选，有 cedrus 时就是 v4l2slh264dec（硬解，NV12 dmabuf 直接显示，零拷贝）；
+#             cover 撑满媒体区靠 videocrop 打裁剪标记、kmssink 按标记取源矩形，不拷像素。
+#       图片  软件裁剪 + 缩放成正好媒体区大小，kmssink 1:1 显示——只算一次，结果确定。
 #
-# 切换过渡（约 0.6 秒淡出到黑 → 淡入）在上层做：把洞里填上透明度渐变的黑色、逐帧推给上层图层。
-# 下层的硬解视频帧碰不得（dmabuf，CPU 改它太慢），而上层一帧只是一次内存拷贝。
-# 切换的空档里洞是全黑的，所以拆旧管线、建新管线的那一下看不出来；模板属性区始终不动。
+# 两个图层的提交都是阻塞式的（内核在下一个 vblank 生效后才返回），谁都不向 DRM 要事件：
+# 两边共用一个 fd（只有一个 DRM master），要是各自等翻页/vblank 事件，会互相抢走对方的事件、
+# 或者非阻塞翻页撞上另一边进行中的提交（EBUSY），表现为画面卡住不动、也不报错。
 #
-# 测试/无显示环境：环境变量 DISPLAY_PLAYER_SINK=fakesink 时两层都换成 fakesink，不碰 DRM。
+# 切换过渡（约 0.6 秒淡出到黑 → 淡入）在上层做：洞里填透明度渐变的黑色。下层的硬解视频帧碰不得
+# （dmabuf，CPU 改它太慢），而上层每一步只重画洞所在的那些行。切换的空档里洞是全黑的，
+# 所以拆旧管线、建新管线的那一下看不出来；模板属性区始终不动。
+#
+# 测试/无显示环境：环境变量 DISPLAY_PLAYER_SINK=fakesink 时下层换成 fakesink、上层不输出，不碰 DRM。
 
 import ctypes
 import ctypes.util
 import json
+import mmap
 import os
 import sys
 
-import gi
+# GStreamer 自己的错误与少数关键元素的警告也写进日志：现场排查"放不出来"全靠它们说清是哪一环、为什么。
+os.environ.setdefault("GST_DEBUG", "1,kmssink:2,v4l2codecs*:2,videocrop:2")
+os.environ.setdefault("GST_DEBUG_NO_COLOR", "1")
+
+import gi  # noqa: E402
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
@@ -38,6 +49,18 @@ from gi.repository import GLib, Gst, GstVideo  # noqa: E402
 
 FADE_STEP_MS = 33
 FOURCC_NV12 = 0x3231564E
+FOURCC_ARGB8888 = 0x34325241
+
+# 图片：先裁成媒体区的宽高比（videocrop，属性在拿到图片尺寸后设），再缩放到媒体区大小，转成图层吃的格式。
+IMAGE_OUTPUT = ("videoconvert ! videocrop name=crop ! videoscale method=4-tap ! "
+                "video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1 ! videoconvert ! {sink}")
+# 视频：按顺序尝试，第一个真正放起来的就一直用（本进程内）。只有前一种在这台设备上放不出来时才往后退。
+VIDEO_OUTPUTS = (
+    ("cover", "videocrop name=crop ! {sink}"),  # 零拷贝；裁剪标记 → 图层取源矩形，撑满媒体区
+    ("fit", "{sink}"),                          # 不裁：按比例缩放居中，留黑边
+    ("convert", "videoconvert ! {sink}"),       # 再加软件转格式（解码器只给得出图层不吃的格式时）
+)
+PLAYBIN_VIDEO, PLAYBIN_NATIVE_VIDEO = 0x1, 0x40  # 只要视频（屏幕一律静音，不开声卡）；不让 playbin 自己插转换
 
 
 def log(msg):
@@ -49,86 +72,119 @@ def emit(obj):
     sys.stdout.flush()
 
 
-# ---- DRM：找显示设备与视频图层（libdrm，经 ctypes） ----
+# ---- DRM（libdrm，经 ctypes） ----
 
-class _PlaneRes(ctypes.Structure):
-    _fields_ = [("count_planes", ctypes.c_uint32), ("planes", ctypes.POINTER(ctypes.c_uint32))]
-
-
-class _Plane(ctypes.Structure):
-    _fields_ = [("count_formats", ctypes.c_uint32), ("formats", ctypes.POINTER(ctypes.c_uint32)),
-                ("plane_id", ctypes.c_uint32), ("crtc_id", ctypes.c_uint32), ("fb_id", ctypes.c_uint32),
-                ("crtc_x", ctypes.c_uint32), ("crtc_y", ctypes.c_uint32), ("x", ctypes.c_uint32),
-                ("y", ctypes.c_uint32), ("possible_crtcs", ctypes.c_uint32), ("gamma_size", ctypes.c_uint32)]
+_u16, _u32, _u64, _int, _vp = ctypes.c_uint16, ctypes.c_uint32, ctypes.c_uint64, ctypes.c_int, ctypes.c_void_p
 
 
 class _Res(ctypes.Structure):
-    _fields_ = [("count_fbs", ctypes.c_int), ("fbs", ctypes.POINTER(ctypes.c_uint32)),
-                ("count_crtcs", ctypes.c_int), ("crtcs", ctypes.POINTER(ctypes.c_uint32)),
-                ("count_connectors", ctypes.c_int), ("connectors", ctypes.POINTER(ctypes.c_uint32)),
-                ("count_encoders", ctypes.c_int), ("encoders", ctypes.POINTER(ctypes.c_uint32)),
-                ("min_width", ctypes.c_uint32), ("max_width", ctypes.c_uint32),
-                ("min_height", ctypes.c_uint32), ("max_height", ctypes.c_uint32)]
+    _fields_ = [("count_fbs", _int), ("fbs", ctypes.POINTER(_u32)),
+                ("count_crtcs", _int), ("crtcs", ctypes.POINTER(_u32)),
+                ("count_connectors", _int), ("connectors", ctypes.POINTER(_u32)),
+                ("count_encoders", _int), ("encoders", ctypes.POINTER(_u32)),
+                ("min_width", _u32), ("max_width", _u32), ("min_height", _u32), ("max_height", _u32)]
+
+
+class _ModeInfo(ctypes.Structure):
+    _fields_ = [("clock", _u32), ("hdisplay", _u16), ("hsync_start", _u16), ("hsync_end", _u16),
+                ("htotal", _u16), ("hskew", _u16), ("vdisplay", _u16), ("vsync_start", _u16),
+                ("vsync_end", _u16), ("vtotal", _u16), ("vscan", _u16), ("vrefresh", _u32),
+                ("flags", _u32), ("type", _u32), ("name", ctypes.c_char * 32)]
+
+
+class _Connector(ctypes.Structure):
+    _fields_ = [("connector_id", _u32), ("encoder_id", _u32), ("connector_type", _u32),
+                ("connector_type_id", _u32), ("connection", _int), ("mm_width", _u32), ("mm_height", _u32),
+                ("subpixel", _int), ("count_modes", _int), ("modes", ctypes.POINTER(_ModeInfo)),
+                ("count_props", _int), ("props", ctypes.POINTER(_u32)), ("prop_values", ctypes.POINTER(_u64)),
+                ("count_encoders", _int), ("encoders", ctypes.POINTER(_u32))]
+
+
+class _Encoder(ctypes.Structure):
+    _fields_ = [("encoder_id", _u32), ("encoder_type", _u32), ("crtc_id", _u32),
+                ("possible_crtcs", _u32), ("possible_clones", _u32)]
+
+
+class _PlaneRes(ctypes.Structure):
+    _fields_ = [("count_planes", _u32), ("planes", ctypes.POINTER(_u32))]
+
+
+class _Plane(ctypes.Structure):
+    _fields_ = [("count_formats", _u32), ("formats", ctypes.POINTER(_u32)),
+                ("plane_id", _u32), ("crtc_id", _u32), ("fb_id", _u32),
+                ("crtc_x", _u32), ("crtc_y", _u32), ("x", _u32), ("y", _u32),
+                ("possible_crtcs", _u32), ("gamma_size", _u32)]
 
 
 class _ObjProps(ctypes.Structure):
-    _fields_ = [("count_props", ctypes.c_uint32), ("props", ctypes.POINTER(ctypes.c_uint32)),
-                ("prop_values", ctypes.POINTER(ctypes.c_uint64))]
+    _fields_ = [("count_props", _u32), ("props", ctypes.POINTER(_u32)), ("prop_values", ctypes.POINTER(_u64))]
 
 
 class _Prop(ctypes.Structure):
-    _fields_ = [("prop_id", ctypes.c_uint32), ("flags", ctypes.c_uint32), ("name", ctypes.c_char * 32)]
+    _fields_ = [("prop_id", _u32), ("flags", _u32), ("name", ctypes.c_char * 32)]
 
 
 DRM_CLIENT_CAP_UNIVERSAL_PLANES = 2
 DRM_MODE_OBJECT_PLANE = 0xEEEEEEEE
+DRM_MODE_CONNECTED = 1
 PLANE_OVERLAY, PLANE_PRIMARY = 0, 1
-FOURCC_ARGB8888 = 0x34325241
 
 
 def _libdrm():
-    name = ctypes.util.find_library("drm") or "libdrm.so.2"
-    lib = ctypes.CDLL(name)
+    lib = ctypes.CDLL(ctypes.util.find_library("drm") or "libdrm.so.2", use_errno=True)
     # 参数类型必须写全：设备是 32 位 ARM，64 位参数要占一对寄存器，0xEEEEEEEE 也超出 int，
     # 让 ctypes 按默认的 int 去传，参数会错位。
-    c_int, u32, u64, vp = ctypes.c_int, ctypes.c_uint32, ctypes.c_uint64, ctypes.c_void_p
+    p = ctypes.POINTER
     for fn, args, res in (
-        ("drmSetClientCap", [c_int, u64, u64], c_int),
-        ("drmModeGetResources", [c_int], ctypes.POINTER(_Res)),
-        ("drmModeFreeResources", [vp], None),
-        ("drmModeGetPlaneResources", [c_int], ctypes.POINTER(_PlaneRes)),
-        ("drmModeFreePlaneResources", [vp], None),
-        ("drmModeGetPlane", [c_int, u32], ctypes.POINTER(_Plane)),
-        ("drmModeFreePlane", [vp], None),
-        ("drmModeObjectGetProperties", [c_int, u32, u32], ctypes.POINTER(_ObjProps)),
-        ("drmModeFreeObjectProperties", [vp], None),
-        ("drmModeGetProperty", [c_int, u32], ctypes.POINTER(_Prop)),
-        ("drmModeFreeProperty", [vp], None),
+        ("drmSetClientCap", [_int, _u64, _u64], _int),
+        ("drmModeGetResources", [_int], p(_Res)),
+        ("drmModeFreeResources", [_vp], None),
+        ("drmModeGetConnector", [_int, _u32], p(_Connector)),
+        ("drmModeFreeConnector", [_vp], None),
+        ("drmModeGetEncoder", [_int, _u32], p(_Encoder)),
+        ("drmModeFreeEncoder", [_vp], None),
+        ("drmModeGetPlaneResources", [_int], p(_PlaneRes)),
+        ("drmModeFreePlaneResources", [_vp], None),
+        ("drmModeGetPlane", [_int, _u32], p(_Plane)),
+        ("drmModeFreePlane", [_vp], None),
+        ("drmModeObjectGetProperties", [_int, _u32, _u32], p(_ObjProps)),
+        ("drmModeFreeObjectProperties", [_vp], None),
+        ("drmModeGetProperty", [_int, _u32], p(_Prop)),
+        ("drmModeFreeProperty", [_vp], None),
+        ("drmModeObjectSetProperty", [_int, _u32, _u32, _u32, _u64], _int),
+        ("drmModeCreateDumbBuffer", [_int, _u32, _u32, _u32, _u32, p(_u32), p(_u32), p(_u64)], _int),
+        ("drmModeMapDumbBuffer", [_int, _u32, p(_u64)], _int),
+        ("drmModeAddFB2", [_int, _u32, _u32, _u32, p(_u32), p(_u32), p(_u32), p(_u32), _u32], _int),
+        ("drmModeSetCrtc", [_int, _u32, _u32, _u32, _u32, p(_u32), _int, p(_ModeInfo)], _int),
+        ("drmModeSetPlane", [_int, _u32, _u32, _u32, _u32, _int, _int, _u32, _u32,
+                             _u32, _u32, _u32, _u32], _int),
     ):
         f = getattr(lib, fn)
         f.argtypes, f.restype = args, res
     return lib
 
 
-def open_display():
-    """打开有显示接口的 DRM 设备（H3 上 GPU 也是一个 card，要跳过）。
+def _check(ret, what):
+    if ret != 0:
+        err = ctypes.get_errno() or -ret
+        raise OSError(err, "%s: %s" % (what, os.strerror(err)))
 
-    返回 (fd, 上层用的主图层 id, 下层用的视频图层 id, 设备路径)；图层查不到时为 -1，交给 kmssink 自己选。"""
-    drm = _libdrm()
-    for i in range(8):
-        path = "/dev/dri/card%d" % i
-        if not os.path.exists(path):
-            continue
-        fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
-        res = drm.drmModeGetResources(fd)
-        if res and res.contents.count_connectors > 0:
-            drm.drmModeFreeResources(res)
-            primary, video = pick_planes(_planes(drm, fd))
-            return fd, primary, video, path
-        if res:
-            drm.drmModeFreeResources(res)
-        os.close(fd)
-    raise RuntimeError("no DRM device with display connectors under /dev/dri")
+
+def _plane_props(drm, fd, plane_id):
+    """图层的属性：{名字: (属性 id, 当前值)}。"""
+    out = {}
+    props = drm.drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE)
+    if not props:
+        return out
+    try:
+        for i in range(props.contents.count_props):
+            prop = drm.drmModeGetProperty(fd, props.contents.props[i])
+            if prop:
+                out[prop.contents.name.decode()] = (prop.contents.prop_id, int(props.contents.prop_values[i]))
+                drm.drmModeFreeProperty(prop)
+    finally:
+        drm.drmModeFreeObjectProperties(props)
+    return out
 
 
 def _planes(drm, fd):
@@ -145,7 +201,8 @@ def _planes(drm, fd):
                 continue
             try:
                 pl = p.contents
-                out.append({"id": pl.plane_id, "type": _plane_type(drm, fd, pl.plane_id),
+                ptype = _plane_props(drm, fd, pl.plane_id).get("type", (0, -1))[1]
+                out.append({"id": pl.plane_id, "type": ptype,
                             "formats": {pl.formats[j] for j in range(pl.count_formats)},
                             "crtcs": pl.possible_crtcs})
             finally:
@@ -155,33 +212,12 @@ def _planes(drm, fd):
     return out
 
 
-def _plane_type(drm, fd, plane_id):
-    props = drm.drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE)
-    if not props:
-        return -1
-    try:
-        for i in range(props.contents.count_props):
-            prop = drm.drmModeGetProperty(fd, props.contents.props[i])
-            if not prop:
-                continue
-            try:
-                if prop.contents.name == b"type":
-                    return int(props.contents.prop_values[i])
-            finally:
-                drm.drmModeFreeProperty(prop)
-    finally:
-        drm.drmModeFreeObjectProperties(props)
-    return -1
+def pick_planes(planes, crtc_bit=1):
+    """选上层（模板叠加图，ARGB）与下层（播放内容，NV12）各用哪个图层，只看所用 CRTC 上的。
 
-
-def pick_planes(planes):
-    """选上层（模板叠加图，ARGB）与下层（播放内容，NV12）各用哪个图层，只看第一个 CRTC 上的。
-
-    上层必须是主图层：kmssink 设置显示模式时把画面挂在 CRTC 的主图层上，而且只有它吃 ARGB8888
-    （Allwinner DE2 的 VI 图层只有 XRGB/YUV 格式，没有 alpha）。不指定的话 kmssink 会拿列表里
-    第一个图层——DE2 上恰好是 VI 图层——结果 BGRA 协商失败（not-negotiated）。
-    下层是能显示 NV12 的覆盖图层。"""
-    on_crtc = [p for p in planes if p["crtcs"] & 1]
+    上层必须是主图层：显示模式设在 CRTC 的主图层上，而且 Allwinner DE2 只有 UI 图层吃 ARGB8888
+    （VI 图层只有 XRGB/YUV，没有 alpha）。下层是能显示 NV12 的覆盖图层。"""
+    on_crtc = [p for p in planes if p["crtcs"] & crtc_bit]
     argb = [p for p in on_crtc if FOURCC_ARGB8888 in p["formats"]]
     nv12 = [p for p in on_crtc if FOURCC_NV12 in p["formats"]]
     # 读不到图层类型时退而求其次：第一个吃 ARGB 的图层当上层（DE2 上就是主图层），其余吃 NV12 的当下层
@@ -190,38 +226,182 @@ def pick_planes(planes):
     return (up["id"] if up else -1), (down["id"] if down else -1)
 
 
+def paint(buf, pitch, width, base, hole, alpha, full):
+    """把一帧上层画面画进 buf（每行 pitch 字节，宽 width 像素，BGRA 预乘）。
+
+    full 时先整幅铺上 base；然后洞里填 alpha 的黑（预乘即 0,0,0,a），alpha 为 0 时洞里还原 base。"""
+    row = width * 4
+    src = memoryview(base)
+    if full:
+        if pitch == row:
+            buf[:len(base)] = src
+        else:
+            for r in range(len(base) // row):
+                buf[r * pitch:r * pitch + row] = src[r * row:(r + 1) * row]
+        if not alpha:
+            return
+    x, y, w, h = hole
+    fill = bytes((0, 0, 0, alpha)) * w if alpha else None
+    for r in range(y, y + h):
+        o, s = r * pitch + x * 4, r * row + x * 4
+        buf[o:o + w * 4] = fill if fill else src[s:s + w * 4]
+
+
+class Display:
+    """DRM 输出。上层（主图层）在这里直接驱动；下层的图层 id 交给 kmssink。"""
+
+    def __init__(self, width, height):
+        self.drm = drm = _libdrm()
+        self.width, self.height = width, height
+        self.fd = -1
+        for i in range(8):
+            path = "/dev/dri/card%d" % i
+            if not os.path.exists(path):
+                continue
+            fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+            out = self._find_output(fd)
+            if out:
+                self.fd, self.path = fd, path
+                self.conn, self.crtc, crtc_index, self.mode = out
+                break
+            os.close(fd)  # H3 上 GPU 也是一个 card，没有显示接口
+        if self.fd < 0:
+            raise RuntimeError("no connected display under /dev/dri")
+        self.primary, self.video = pick_planes(_planes(drm, self.fd), 1 << crtc_index)
+        if self.primary < 0 or self.video < 0:
+            raise RuntimeError("no usable planes (overlay %d, video %d)" % (self.primary, self.video))
+        self.bufs = [self._dumb() for _ in range(2)]
+        # 叠放次序：内容在下、叠加图在上。DE2 的默认值本来就是这样，这里写明，不依赖默认。
+        self._set_prop(self.video, "zpos", 0)
+        self._set_prop(self.primary, "zpos", 1)
+        _check(drm.drmModeSetCrtc(self.fd, self.crtc, self.bufs[0]["fb"], 0, 0,
+                                  (_u32 * 1)(self.conn), 1, ctypes.byref(self.mode)), "set display mode")
+        self.front = 0
+        self.failed = False
+
+    def _find_output(self, fd):
+        """第一个已连接的显示接口：(接口 id, CRTC id, CRTC 序号, 显示模式)；没有接口的设备返回 None。"""
+        drm = self.drm
+        res = drm.drmModeGetResources(fd)
+        if not res:
+            return None
+        try:
+            r = res.contents
+            crtcs = [r.crtcs[i] for i in range(r.count_crtcs)]
+            for i in range(r.count_connectors):
+                c = drm.drmModeGetConnector(fd, r.connectors[i])
+                if not c:
+                    continue
+                try:
+                    cc = c.contents
+                    if cc.connection != DRM_MODE_CONNECTED or cc.count_modes <= 0:
+                        continue
+                    modes = [cc.modes[j] for j in range(cc.count_modes)]
+                    # 同一分辨率下内核按刷新率从高到低排，取第一个；分辨率由代理按接口提供的模式定好，必然在列表里
+                    mode = next((m for m in modes if (m.hdisplay, m.vdisplay) == (self.width, self.height)), None)
+                    if mode is None:
+                        raise RuntimeError("display does not offer %dx%d (modes: %s)" % (
+                            self.width, self.height, " ".join(sorted({m.name.decode() for m in modes}))))
+                    idx = self._crtc_index(fd, cc, crtcs)
+                    if idx < 0:
+                        raise RuntimeError("no CRTC for connector %d" % cc.connector_id)
+                    return cc.connector_id, crtcs[idx], idx, _ModeInfo.from_buffer_copy(mode)
+                finally:
+                    drm.drmModeFreeConnector(c)
+        finally:
+            drm.drmModeFreeResources(res)
+        return None
+
+    def _crtc_index(self, fd, conn, crtcs):
+        for eid in [conn.encoder_id] + [conn.encoders[k] for k in range(conn.count_encoders)]:
+            e = self.drm.drmModeGetEncoder(fd, eid) if eid else None
+            if not e:
+                continue
+            try:
+                if e.contents.crtc_id in crtcs:
+                    return crtcs.index(e.contents.crtc_id)
+                for k in range(len(crtcs)):
+                    if e.contents.possible_crtcs & (1 << k):
+                        return k
+            finally:
+                self.drm.drmModeFreeEncoder(e)
+        return -1
+
+    def _dumb(self):
+        drm, fd = self.drm, self.fd
+        handle, pitch, size, offset, fb = _u32(), _u32(), _u64(), _u64(), _u32()
+        _check(drm.drmModeCreateDumbBuffer(fd, self.width, self.height, 32, 0, ctypes.byref(handle),
+                                           ctypes.byref(pitch), ctypes.byref(size)), "create buffer")
+        _check(drm.drmModeAddFB2(fd, self.width, self.height, FOURCC_ARGB8888, (_u32 * 4)(handle.value),
+                                 (_u32 * 4)(pitch.value), (_u32 * 4)(), ctypes.byref(fb), 0), "add framebuffer")
+        _check(drm.drmModeMapDumbBuffer(fd, handle.value, ctypes.byref(offset)), "map buffer")
+        m = mmap.mmap(fd, size.value, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=offset.value)
+        return {"fb": fb.value, "map": m, "pitch": pitch.value, "drawn": None}
+
+    def _set_prop(self, plane, name, value):
+        prop = _plane_props(self.drm, self.fd, plane).get(name)
+        if prop and prop[1] != value:
+            ret = self.drm.drmModeObjectSetProperty(self.fd, plane, DRM_MODE_OBJECT_PLANE, prop[0], value)
+            if ret:
+                log("cannot set %s=%d on plane %d: %s" % (name, value, plane, os.strerror(ctypes.get_errno() or -ret)))
+
+    def describe(self):
+        return "%s, connector %d, crtc %d, %s@%dHz, overlay plane %d, video plane %d" % (
+            self.path, self.conn, self.crtc, self.mode.name.decode(), self.mode.vrefresh, self.primary, self.video)
+
+    def show(self, base, hole, alpha):
+        """把上层画到后台缓冲并切过去（阻塞到下一个 vblank 生效，之后前台那块才可以再画）。"""
+        b = self.bufs[1 - self.front]
+        drawn = b["drawn"]
+        full = drawn is None or drawn[0] is not base or drawn[1] != hole
+        if full or drawn[2] != alpha:
+            paint(b["map"], b["pitch"], self.width, base, hole, alpha, full)
+            b["drawn"] = (base, hole, alpha)
+        ret = self.drm.drmModeSetPlane(self.fd, self.primary, self.crtc, b["fb"], 0, 0, 0, self.width, self.height,
+                                       0, 0, self.width << 16, self.height << 16)
+        if ret:
+            if not self.failed:
+                log("cannot update overlay plane: %s" % os.strerror(ctypes.get_errno() or -ret))
+            self.failed = True
+            return
+        self.failed = False
+        self.front = 1 - self.front
+
+
 def cover_crop(src_w, src_h, dst_w, dst_h):
-    """按 cover 撑满目标区域时，源画面四边各裁掉多少像素（左, 右, 上, 下）。"""
+    """按 cover 撑满目标区域时，源画面四边各裁掉多少像素（左, 右, 上, 下）。
+
+    保留的宽高与左、上的偏移都取偶数：NV12 的色度是 2×2 一组，奇数偏移会让图层拒收或颜色错位。"""
     if src_w <= 0 or src_h <= 0 or dst_w <= 0 or dst_h <= 0:
         return 0, 0, 0, 0
     if src_w * dst_h > dst_w * src_h:  # 源更宽：裁左右
-        keep = src_h * dst_w // dst_h
-        cut = src_w - keep
-        return cut // 2, cut - cut // 2, 0, 0
-    keep = src_w * dst_h // dst_w  # 源更高：裁上下
-    cut = src_h - keep
-    return 0, 0, cut // 2, cut - cut // 2
+        cut = src_w - (src_h * dst_w // dst_h & ~1)
+        return cut // 2 & ~1, cut - (cut // 2 & ~1), 0, 0
+    cut = src_h - (src_w * dst_h // dst_w & ~1)  # 源更高：裁上下
+    return 0, 0, cut // 2 & ~1, cut - (cut // 2 & ~1)
 
 
 class Player:
-    def __init__(self, loop):
-        self.loop = loop
+    def __init__(self):
         self.test = os.environ.get("DISPLAY_PLAYER_SINK") == "fakesink"
-        self.fd, self.primary, self.plane = -1, -1, -1
+        self.display = None
         self.width = self.height = 0
         self.fade = 0.6
-        self.overlay_pipe = self.appsrc = None
         self.base = b""          # 上层叠加图（BGRA，预乘 alpha）；没有模板时全透明
         self.hole = (0, 0, 0, 0)  # 媒体区在显示坐标里的位置
         self.scene = None
         self.items = []
         self.index = -1
+        self.shown = set()        # 本次 load 以来已经显示过的项（只为第一次显示记日志）
         self.pipe = None          # 当前播放项的管线
         self.started = False      # 当前项是否已开始显示
+        self.source = ""          # 当前项的画面尺寸与裁剪（日志用）
         self.timer = 0            # 图片到点淡出 / 视频剩余时间巡检
         self.fading = 0           # 进行中的淡入淡出（GLib 定时器 id）
         self.alpha = 255          # 洞里黑色的不透明度：255 全黑，0 透出播放内容
         self.decoder = ""         # 最近一次视频用的解码器
+        self.video_out = 0        # 视频输出方式（VIDEO_OUTPUTS 的下标）
+        self.video_ok = False     # 当前输出方式已经放起来过视频
 
     # ---- 请求 ----
 
@@ -241,38 +421,24 @@ class Player:
         raise ValueError("unknown command %r" % cmd)
 
     def configure(self, req):
-        if self.overlay_pipe:
+        if self.width:
             return {}  # 显示模式只在启动时定一次
-        self.width, self.height = int(req["width"]), int(req["height"])
+        width, height = int(req["width"]), int(req["height"])
         self.fade = float(req.get("fade", 0.6))
         if not self.test:
-            self.fd, self.primary, self.plane, path = open_display()
-            log("display %s, overlay plane %d, video plane %d, output %dx%d" %
-                (path, self.primary, self.plane, self.width, self.height))
+            self.display = Display(width, height)
+            log("display " + self.display.describe())
             if not Gst.ElementFactory.find("v4l2slh264dec"):
                 log("WARNING: hardware decoder v4l2slh264dec is not available "
                     "(cedrus missing or gstreamer1.0-plugins-bad not installed); videos will be decoded in software")
-        self.base = bytes(self.width * self.height * 4)
-        self.hole = (0, 0, self.width, self.height)
-        self._start_overlay()
+        self.width, self.height = width, height
+        self.base = bytes(width * height * 4)
+        self.hole = (0, 0, width, height)
+        self._show()
         return {}
 
-    def _start_overlay(self):
-        caps = "video/x-raw,format=BGRA,width=%d,height=%d,framerate=0/1" % (self.width, self.height)
-        if self.test:
-            sink = "fakesink sync=false"
-        else:
-            sink = ("kmssink fd=%d plane-id=%d force-modesetting=true restore-crtc=false sync=false "
-                    "plane-properties=\"props,zpos=(int)1\"" % (self.fd, self.primary))
-        self.overlay_pipe = Gst.parse_launch(
-            "appsrc name=src format=time is-live=false caps=\"%s\" ! %s" % (caps, sink))
-        self.appsrc = self.overlay_pipe.get_by_name("src")
-        self._watch(self.overlay_pipe, self._on_overlay_message)
-        self._push_overlay()
-        self.overlay_pipe.set_state(Gst.State.PLAYING)
-
     def load(self, req):
-        if not self.overlay_pipe:
+        if not self.width:
             raise RuntimeError("not configured")
         scene = {k: v for k, v in req.items() if k not in ("id", "cmd")}
         if scene == self.scene:
@@ -293,9 +459,12 @@ class Player:
 
         def switch():
             self.scene, self.base, self.hole, self.items = scene, base, hole, items
+            self.shown = set()
             self._stop_item()
             self.alpha = 255
-            self._push_overlay()
+            self._show()
+            log("scene: %d item(s), media area %dx%d at %d,%d%s" % (
+                len(items), hole[2], hole[3], hole[0], hole[1], "" if overlay else " (no template)"))
             if items:
                 self._play(0)
         if self.pipe and self.alpha < 255:
@@ -306,19 +475,9 @@ class Player:
 
     # ---- 上层：叠加图与淡入淡出 ----
 
-    def _frame(self, alpha):
-        if alpha <= 0:
-            return self.base
-        buf = bytearray(self.base)
-        x, y, w, h = self.hole
-        stride, row = self.width * 4, bytes((0, 0, 0, alpha)) * w  # BGRA 预乘：半透明黑就是 (0,0,0,a)
-        for r in range(y, y + h):
-            o = r * stride + x * 4
-            buf[o:o + w * 4] = row
-        return bytes(buf)
-
-    def _push_overlay(self):
-        self.appsrc.emit("push-buffer", Gst.Buffer.new_wrapped(self._frame(self.alpha)))
+    def _show(self):
+        if self.display:
+            self.display.show(self.base, self.hole, self.alpha)
 
     def _fade_to(self, target, done=None):
         steps = max(1, int(self.fade * 1000 / FADE_STEP_MS))
@@ -328,7 +487,7 @@ class Player:
             self.fading = 0
         if start == target or self.fade <= 0:
             self.alpha = target
-            self._push_overlay()
+            self._show()
             if done:
                 done()
             return
@@ -339,7 +498,7 @@ class Player:
             p = min(1.0, state["n"] / steps)
             p = p * p * (3 - 2 * p)  # smoothstep，起止更柔和
             self.alpha = round(start + (target - start) * p)
-            self._push_overlay()
+            self._show()
             if state["n"] >= steps:
                 self.fading = 0
                 if done:
@@ -354,24 +513,29 @@ class Player:
         self.index = index % len(self.items)
         item = self.items[self.index]
         x, y, w, h = self.hole
+        d = self.display
         if self.test:
-            sink = "fakesink sync=true"
+            sink = "fakesink name=sink sync=true"
         else:
-            sink = ("kmssink name=sink fd=%d plane-id=%d can-scale=true "
-                    "plane-properties=\"props,zpos=(int)0\"" % (self.fd, self.plane))
-        bin_ = Gst.parse_bin_from_description("videoconvert ! videocrop name=crop ! " + sink, True)
-        if not self.test:
+            sink = "kmssink name=sink fd=%d connector-id=%d plane-id=%d skip-vsync=true" % (d.fd, d.conn, d.video)
+        if item.get("type") == "video":
+            desc = VIDEO_OUTPUTS[self.video_out][1].format(sink=sink)
+        else:
+            desc = IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
+        bin_ = Gst.parse_bin_from_description(desc, True)
+        if d:
             GstVideo.VideoOverlay.set_render_rectangle(bin_.get_by_name("sink"), x, y, w, h)
         crop = bin_.get_by_name("crop")
-        crop.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_caps, (crop, w, h))
+        if crop:
+            crop.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_caps, (crop, w, h))
 
         pipe = Gst.ElementFactory.make("playbin", None)
         pipe.set_property("uri", Gst.filename_to_uri(item["path"]))
         pipe.set_property("video-sink", bin_)
-        pipe.set_property("flags", 0x1)  # 只要视频：屏幕一律静音，也不去开声卡
+        pipe.set_property("flags", PLAYBIN_VIDEO | PLAYBIN_NATIVE_VIDEO)
         pipe.connect("deep-element-added", self._on_element)
         self._watch(pipe, lambda _bus, msg: self._on_item_message(pipe, msg))
-        self.pipe, self.started = pipe, False
+        self.pipe, self.started, self.source = pipe, False, ""
         if pipe.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._item_failed("cannot start pipeline")
 
@@ -387,6 +551,8 @@ class Player:
                 if vi:
                     left, right, top, bottom = cover_crop(vi.width, vi.height, w, h)
                     emit({"event": "crop", "size": [vi.width, vi.height], "crop": [left, right, top, bottom]})
+                    self.source = "%dx%d %s, crop l%d r%d t%d b%d" % (
+                        vi.width, vi.height, vi.finfo.name, left, right, top, bottom)
                     crop.set_property("left", left)
                     crop.set_property("right", right)
                     crop.set_property("top", top)
@@ -416,12 +582,37 @@ class Player:
             if self.items[self.index].get("type") == "video":
                 self._advance()  # 图片 EOS 不算结束：kmssink 一直显示最后一帧，到点再切
         elif t == Gst.MessageType.ERROR:
-            err, _ = msg.parse_error()
-            self._item_failed(err.message)
+            err, dbg = msg.parse_error()
+            src = msg.src.get_path_string() if msg.src else "?"
+            detail = "%s [%s: %s]" % (err.message, src, (dbg or "").replace("\n", " "))
+            if self._video_fallback(detail):
+                return True
+            self._item_failed(err.message, detail)
+        return True
+
+    def _video_fallback(self, detail):
+        """视频放不出来、而当前输出方式还没在这台设备上成功过时，换下一种方式重放同一项。"""
+        if self.items[self.index].get("type") != "video" or self.video_ok:
+            return False
+        name = VIDEO_OUTPUTS[self.video_out][0]
+        if self.video_out + 1 >= len(VIDEO_OUTPUTS):
+            self.video_out = 0  # 每种都不行：多半是文件本身的问题，下一个视频从头试
+            return False
+        self.video_out += 1
+        log("video output '%s' failed: %s; retrying with '%s'" % (name, detail, VIDEO_OUTPUTS[self.video_out][0]))
+        self._stop_item()
+        self._play(self.index)
         return True
 
     def _on_started(self):
         item = self.items[self.index]
+        if item.get("type") == "video" and not self.video_ok:
+            self.video_ok = True
+            log("video output: %s" % VIDEO_OUTPUTS[self.video_out][0])
+        if self.index not in self.shown:
+            self.shown.add(self.index)
+            log("showing %s (%s%s)" % (os.path.basename(item["path"]), item.get("type"),
+                                      ", " + self.source if self.source else ""))
         emit({"event": "playing", "index": self.index, "path": item["path"]})
         self._fade_to(0)
         if len(self.items) == 1 and item.get("type") != "video":
@@ -457,13 +648,13 @@ class Player:
         if self.items:
             self._play(self.index + 1)
 
-    def _item_failed(self, why):
+    def _item_failed(self, why, detail=None):
         item = self.items[self.index] if 0 <= self.index < len(self.items) else {}
-        log("cannot play %s: %s" % (item.get("path"), why))
+        log("cannot play %s: %s" % (item.get("path"), detail or why))
         emit({"event": "error", "index": self.index, "message": why})
         self._stop_item()
         self.alpha = 255
-        self._push_overlay()
+        self._show()
         if len(self.items) > 1:
             GLib.timeout_add(1000, self._retry_next)
 
@@ -481,25 +672,16 @@ class Player:
             pipe.get_bus().remove_signal_watch()
             pipe.set_state(Gst.State.NULL)
 
-    # ---- 杂项 ----
-
     def _watch(self, pipe, handler):
         bus = pipe.get_bus()
         bus.add_signal_watch()
         bus.connect("message", handler)
 
-    def _on_overlay_message(self, bus, msg):
-        if msg.type == Gst.MessageType.ERROR:
-            err, dbg = msg.parse_error()
-            log("overlay pipeline failed: %s (%s)" % (err.message, dbg))
-            self.loop.quit()  # 上层坏了就没法显示：退出，由代理重启
-        return True
-
 
 def main():
     Gst.init(None)
     loop = GLib.MainLoop()
-    player = Player(loop)
+    player = Player()
     buf = b""
 
     def on_stdin(fd, cond):
