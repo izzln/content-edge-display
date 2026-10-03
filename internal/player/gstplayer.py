@@ -71,17 +71,49 @@ class _Res(ctypes.Structure):
                 ("min_height", ctypes.c_uint32), ("max_height", ctypes.c_uint32)]
 
 
+class _ObjProps(ctypes.Structure):
+    _fields_ = [("count_props", ctypes.c_uint32), ("props", ctypes.POINTER(ctypes.c_uint32)),
+                ("prop_values", ctypes.POINTER(ctypes.c_uint64))]
+
+
+class _Prop(ctypes.Structure):
+    _fields_ = [("prop_id", ctypes.c_uint32), ("flags", ctypes.c_uint32), ("name", ctypes.c_char * 32)]
+
+
+DRM_CLIENT_CAP_UNIVERSAL_PLANES = 2
+DRM_MODE_OBJECT_PLANE = 0xEEEEEEEE
+PLANE_OVERLAY, PLANE_PRIMARY = 0, 1
+FOURCC_ARGB8888 = 0x34325241
+
+
 def _libdrm():
     name = ctypes.util.find_library("drm") or "libdrm.so.2"
     lib = ctypes.CDLL(name)
-    lib.drmModeGetResources.restype = ctypes.POINTER(_Res)
-    lib.drmModeGetPlaneResources.restype = ctypes.POINTER(_PlaneRes)
-    lib.drmModeGetPlane.restype = ctypes.POINTER(_Plane)
+    # 参数类型必须写全：设备是 32 位 ARM，64 位参数要占一对寄存器，0xEEEEEEEE 也超出 int，
+    # 让 ctypes 按默认的 int 去传，参数会错位。
+    c_int, u32, u64, vp = ctypes.c_int, ctypes.c_uint32, ctypes.c_uint64, ctypes.c_void_p
+    for fn, args, res in (
+        ("drmSetClientCap", [c_int, u64, u64], c_int),
+        ("drmModeGetResources", [c_int], ctypes.POINTER(_Res)),
+        ("drmModeFreeResources", [vp], None),
+        ("drmModeGetPlaneResources", [c_int], ctypes.POINTER(_PlaneRes)),
+        ("drmModeFreePlaneResources", [vp], None),
+        ("drmModeGetPlane", [c_int, u32], ctypes.POINTER(_Plane)),
+        ("drmModeFreePlane", [vp], None),
+        ("drmModeObjectGetProperties", [c_int, u32, u32], ctypes.POINTER(_ObjProps)),
+        ("drmModeFreeObjectProperties", [vp], None),
+        ("drmModeGetProperty", [c_int, u32], ctypes.POINTER(_Prop)),
+        ("drmModeFreeProperty", [vp], None),
+    ):
+        f = getattr(lib, fn)
+        f.argtypes, f.restype = args, res
     return lib
 
 
 def open_display():
-    """打开有显示接口的 DRM 设备（H3 上 GPU 也是一个 card，要跳过）。返回 (fd, 视频图层 id 或 -1)。"""
+    """打开有显示接口的 DRM 设备（H3 上 GPU 也是一个 card，要跳过）。
+
+    返回 (fd, 上层用的主图层 id, 下层用的视频图层 id, 设备路径)；图层查不到时为 -1，交给 kmssink 自己选。"""
     drm = _libdrm()
     for i in range(8):
         path = "/dev/dri/card%d" % i
@@ -91,20 +123,21 @@ def open_display():
         res = drm.drmModeGetResources(fd)
         if res and res.contents.count_connectors > 0:
             drm.drmModeFreeResources(res)
-            return fd, _video_plane(drm, fd), path
+            primary, video = pick_planes(_planes(drm, fd))
+            return fd, primary, video, path
         if res:
             drm.drmModeFreeResources(res)
         os.close(fd)
     raise RuntimeError("no DRM device with display connectors under /dev/dri")
 
 
-def _video_plane(drm, fd):
-    """第一个能显示 NV12、挂在第一个 CRTC 上的覆盖图层（DE2 的 VI 图层）。
-
-    此时还没开 universal planes，列表里只有覆盖图层，不会选到上层用的主图层。"""
+def _planes(drm, fd):
+    """列出全部图层（含主图层）：[{id, type, formats, crtcs}]。"""
+    drm.drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)
+    out = []
     pres = drm.drmModeGetPlaneResources(fd)
     if not pres:
-        return -1
+        return out
     try:
         for i in range(pres.contents.count_planes):
             p = drm.drmModeGetPlane(fd, pres.contents.planes[i])
@@ -112,14 +145,49 @@ def _video_plane(drm, fd):
                 continue
             try:
                 pl = p.contents
-                fmts = {pl.formats[j] for j in range(pl.count_formats)}
-                if FOURCC_NV12 in fmts and pl.possible_crtcs & 1:
-                    return pl.plane_id
+                out.append({"id": pl.plane_id, "type": _plane_type(drm, fd, pl.plane_id),
+                            "formats": {pl.formats[j] for j in range(pl.count_formats)},
+                            "crtcs": pl.possible_crtcs})
             finally:
                 drm.drmModeFreePlane(p)
     finally:
         drm.drmModeFreePlaneResources(pres)
+    return out
+
+
+def _plane_type(drm, fd, plane_id):
+    props = drm.drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE)
+    if not props:
+        return -1
+    try:
+        for i in range(props.contents.count_props):
+            prop = drm.drmModeGetProperty(fd, props.contents.props[i])
+            if not prop:
+                continue
+            try:
+                if prop.contents.name == b"type":
+                    return int(props.contents.prop_values[i])
+            finally:
+                drm.drmModeFreeProperty(prop)
+    finally:
+        drm.drmModeFreeObjectProperties(props)
     return -1
+
+
+def pick_planes(planes):
+    """选上层（模板叠加图，ARGB）与下层（播放内容，NV12）各用哪个图层，只看第一个 CRTC 上的。
+
+    上层必须是主图层：kmssink 设置显示模式时把画面挂在 CRTC 的主图层上，而且只有它吃 ARGB8888
+    （Allwinner DE2 的 VI 图层只有 XRGB/YUV 格式，没有 alpha）。不指定的话 kmssink 会拿列表里
+    第一个图层——DE2 上恰好是 VI 图层——结果 BGRA 协商失败（not-negotiated）。
+    下层是能显示 NV12 的覆盖图层。"""
+    on_crtc = [p for p in planes if p["crtcs"] & 1]
+    argb = [p for p in on_crtc if FOURCC_ARGB8888 in p["formats"]]
+    nv12 = [p for p in on_crtc if FOURCC_NV12 in p["formats"]]
+    # 读不到图层类型时退而求其次：第一个吃 ARGB 的图层当上层（DE2 上就是主图层），其余吃 NV12 的当下层
+    up = next((p for p in argb if p["type"] == PLANE_PRIMARY), argb[0] if argb else None)
+    down = next((p for p in nv12 if p is not up and p["type"] != PLANE_PRIMARY), None)
+    return (up["id"] if up else -1), (down["id"] if down else -1)
 
 
 def cover_crop(src_w, src_h, dst_w, dst_h):
@@ -139,7 +207,7 @@ class Player:
     def __init__(self, loop):
         self.loop = loop
         self.test = os.environ.get("DISPLAY_PLAYER_SINK") == "fakesink"
-        self.fd, self.plane = -1, -1
+        self.fd, self.primary, self.plane = -1, -1, -1
         self.width = self.height = 0
         self.fade = 0.6
         self.overlay_pipe = self.appsrc = None
@@ -178,8 +246,9 @@ class Player:
         self.width, self.height = int(req["width"]), int(req["height"])
         self.fade = float(req.get("fade", 0.6))
         if not self.test:
-            self.fd, self.plane, path = open_display()
-            log("display %s, video plane %d, output %dx%d" % (path, self.plane, self.width, self.height))
+            self.fd, self.primary, self.plane, path = open_display()
+            log("display %s, overlay plane %d, video plane %d, output %dx%d" %
+                (path, self.primary, self.plane, self.width, self.height))
             if not Gst.ElementFactory.find("v4l2slh264dec"):
                 log("WARNING: hardware decoder v4l2slh264dec is not available "
                     "(cedrus missing or gstreamer1.0-plugins-bad not installed); videos will be decoded in software")
@@ -193,8 +262,8 @@ class Player:
         if self.test:
             sink = "fakesink sync=false"
         else:
-            sink = ("kmssink fd=%d force-modesetting=true restore-crtc=false sync=false "
-                    "plane-properties=\"props,zpos=(int)1\"" % self.fd)
+            sink = ("kmssink fd=%d plane-id=%d force-modesetting=true restore-crtc=false sync=false "
+                    "plane-properties=\"props,zpos=(int)1\"" % (self.fd, self.primary))
         self.overlay_pipe = Gst.parse_launch(
             "appsrc name=src format=time is-live=false caps=\"%s\" ! %s" % (caps, sink))
         self.appsrc = self.overlay_pipe.get_by_name("src")

@@ -258,6 +258,21 @@ assert g.cover_crop(1441, 900, 1440, 900) == (0, 1, 0, 0)  # 奇数像素差：�
 assert g.cover_crop(1440, 900, 1440, 900) == (0, 0, 0, 0)
 assert g.cover_crop(0, 0, 720, 900) == (0, 0, 0, 0)
 
+# 选图层：按 Allwinner DE2（H3）的真实布局——VI 图层排在最前，只有 XRGB/YUV；主图层是第一个 UI 图层。
+# 上层必须选主图层（吃 ARGB），下层选 VI 图层；第二个 CRTC（mixer1）上的图层不能选。
+NV12, ARGB, XRGB = g.FOURCC_NV12, g.FOURCC_ARGB8888, 0x34325258
+de2 = [
+    {"id": 33, "type": 0, "formats": {XRGB, NV12}, "crtcs": 1},  # VI，overlay
+    {"id": 35, "type": 1, "formats": {ARGB, XRGB}, "crtcs": 1},  # UI0，primary
+    {"id": 37, "type": 0, "formats": {ARGB, XRGB}, "crtcs": 1},  # UI1
+    {"id": 41, "type": 1, "formats": {ARGB, XRGB, NV12}, "crtcs": 2},  # mixer1
+]
+assert g.pick_planes(de2) == (35, 33), g.pick_planes(de2)
+# 读不到类型（-1）：第一个吃 ARGB 的当上层，吃 NV12 的另一个当下层
+untyped = [dict(p, type=-1) for p in de2]
+assert g.pick_planes(untyped) == (35, 33), g.pick_planes(untyped)
+assert g.pick_planes([]) == (-1, -1)
+
 # 淡入淡出：只在洞里填半透明黑（BGRA 预乘即 0,0,0,a），洞外的叠加图原样不动
 p = g.Player(None)
 p.width, p.height, p.hole = 4, 2, (2, 0, 2, 2)
