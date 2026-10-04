@@ -11,7 +11,6 @@ update.sh                本版本的安装步骤：首次安装与每次 OTA �
 rollback-check.sh        OTA 回滚检查（由 systemd ExecStartPre 调用）
 check-display.sh         现场自检：输出分辨率、硬件解码、CMA、SoC 温度
 display-agent.service    systemd 单元
-agent.example.json       配置样例
 ```
 
 ## 装机（推荐：一行命令）

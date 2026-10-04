@@ -19,8 +19,6 @@
     --blue-soft:#99c7ff;
     --bar:rgba(249,249,249,.82); --scrim:rgba(0,0,0,.32); --shadow:0 10px 40px rgba(0,0,0,.18);
     --r:12px; --ctl:32px;
-    /* 旧名字：JS 里内联样式还在用 */
-    --line:var(--sep); --muted:var(--label2); --accent:var(--blue); --bad:var(--red); --ok:var(--green); --warn:var(--orange);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -39,7 +37,6 @@
     background:var(--bg); color:var(--label); -webkit-font-smoothing:antialiased; }
   a { color:var(--blue); }
   code { font:12px ui-monospace,"SF Mono",Menlo,monospace; background:var(--fill2); padding:1px 4px; border-radius:4px; overflow-wrap:anywhere; }
-  #tlsFP { word-break:break-all; }
   b { font-weight:600; }
 
   /* 导航栏：半透明 + 模糊，标签用分段控件 */
@@ -48,7 +45,7 @@
     display:flex; gap:12px 16px; align-items:center; flex-wrap:wrap; }
   header h1 { font-size:17px; font-weight:600; margin:0; letter-spacing:-.2px; }
   .seg { display:inline-flex; background:var(--fill); border-radius:9px; padding:2px; gap:2px; }
-  .seg button.tab { appearance:none; border:none; margin:0; background:none; color:var(--label); font:500 13px/1 inherit; font-family:inherit;
+  .seg button.tab { appearance:none; border:none; margin:0; background:none; color:var(--label); font:inherit; font-size:13px; font-weight:500; line-height:1;
     padding:0 14px; height:28px; border-radius:7px; cursor:pointer; white-space:nowrap; transition:background .2s, box-shadow .2s; }
   .seg button.tab.active { background:var(--elev); box-shadow:0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04); font-weight:600; }
   header .right { margin-left:auto; }
@@ -58,17 +55,16 @@
   p { margin:10px 0; }
 
   /* 分组卡片 */
-  .bar { background:var(--card); border-radius:var(--r); padding:14px 16px; margin-bottom:16px; }
-  .bar > b:first-child { font-size:15px; }
-  .bar > span.muted { display:block; margin-top:6px; }
+  .card { background:var(--card); border-radius:var(--r); padding:14px 16px; margin-bottom:16px; }
+  .card > span.muted { display:block; margin-top:6px; }
+  .card h3 { font-size:15px; margin:0 0 4px; }
 
   /* 分组列表样式的表格 */
   table { width:100%; border-collapse:separate; border-spacing:0; background:var(--card); border-radius:var(--r); overflow:hidden; }
   th, td { padding:10px 14px; text-align:left; vertical-align:top; border-bottom:.5px solid var(--sep); }
   tr:last-child > td { border-bottom:none; }
-  th { font-size:12px; font-weight:500; color:var(--label2); white-space:nowrap; background:var(--card); }
+  th { font-size:12px; font-weight:500; color:var(--label2); white-space:nowrap; }
   #modal table { background:var(--card2); }
-  #modal th { background:var(--card2); }
 
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:1px; }
   .on { background:var(--green); } .off { background:var(--label3); }
@@ -78,7 +74,7 @@
   .bad { color:var(--red); font-weight:600; }
 
   /* 按钮：填充 / 浅色 / 文字 / 破坏性 */
-  button { appearance:none; font:500 14px/1 inherit; font-family:inherit; height:var(--ctl); padding:0 12px; margin:2px 6px 2px 0; border:none; border-radius:8px;
+  button { appearance:none; font:inherit; font-size:14px; font-weight:500; line-height:1; height:var(--ctl); padding:0 12px; margin:2px 6px 2px 0; border:none; border-radius:8px;
     background:var(--fill); color:var(--blue); cursor:pointer; white-space:nowrap; touch-action:manipulation; transition:opacity .15s, background .15s;
     display:inline-flex; align-items:center; justify-content:center; gap:4px; vertical-align:middle; }
   button:active { opacity:.55; }
@@ -102,7 +98,7 @@
     background-repeat:no-repeat; background-position:right 10px center; }
   input:focus, select:focus, textarea:focus { border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-t); }
   input[type=file] { font:inherit; color:var(--label2); max-width:100%; }
-  input[type=file]::file-selector-button { font:500 14px inherit; font-family:inherit; border:none; border-radius:8px; background:var(--fill); color:var(--blue); height:var(--ctl); padding:0 12px; margin-right:10px; cursor:pointer; }
+  input[type=file]::file-selector-button { font:inherit; font-size:14px; font-weight:500; border:none; border-radius:8px; background:var(--fill); color:var(--blue); height:var(--ctl); padding:0 12px; margin-right:10px; cursor:pointer; }
   textarea { width:100%; min-height:220px; height:auto; padding:8px 10px; font:12px/1.5 ui-monospace,"SF Mono",Menlo,monospace; }
   input[type=radio] { accent-color:var(--blue); width:18px; height:18px; margin:0 6px 0 0; vertical-align:-4px; }
   label { cursor:pointer; }
@@ -186,7 +182,7 @@
   /* 播放列表 */
   .pl-drop { display:block; border:1.5px dashed var(--label3); border-radius:12px; padding:16px; text-align:center; cursor:pointer; background:var(--fill2); color:var(--blue); transition:border-color .15s, background .15s; }
   .pl-drop.hover { border-color:var(--blue); background:var(--blue-t); }
-  @media (hover:hover) { .pl-drop:hover { border-color:var(--blue); background:var(--blue-t); } }
+  @media (hover:hover) { .pl-drop:hover { border-color:var(--blue); background:var(--blue-t); } } /* 拖文件进来时加 .hover */
   .pl-drop .muted { margin-top:4px; }
   .pl-head { display:flex; align-items:center; gap:8px; margin:12px 0 6px; font-size:12px; color:var(--label2); }
   .pl-head .sp { flex:1; }
@@ -229,6 +225,7 @@
   .cachebar .inuse { background:var(--blue); }
   .cachebar .cached { background:var(--blue-soft); }
   .legend span { display:inline-block; margin-right:14px; }
+  .legend .inuse { background:var(--blue); } .legend .cached { background:var(--blue-soft); }
   .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:4px; vertical-align:-1px; }
   pre.cmd { background:#1c1c1e; color:#f2f2f7; padding:12px 14px; border-radius:10px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; user-select:all; -webkit-user-select:all;
     font:13px/1.5 ui-monospace,"SF Mono",Menlo,monospace; margin:10px 0; }
@@ -275,7 +272,6 @@
     #overlay { align-items:flex-end; padding:0; }
     #modal { max-width:none; border-radius:14px 14px 0 0; margin:auto 0 0; padding:8px 16px calc(16px + env(safe-area-inset-bottom));
       max-height:94vh; overflow:auto; transform:translateY(100%); transition:transform .35s cubic-bezier(.2,.9,.3,1); }
-    #overlay.show #modal { transform:none; }
     .grabber { display:block; width:36px; height:5px; border-radius:3px; background:var(--label3); margin:0 auto 10px; }
     #modal .actions { position:sticky; bottom:calc(-16px - env(safe-area-inset-bottom)); background:var(--elev); margin:16px -16px calc(-16px - env(safe-area-inset-bottom));
       padding:10px 16px calc(10px + env(safe-area-inset-bottom)); border-top:.5px solid var(--sep); }
@@ -290,23 +286,22 @@
   <nav class="seg" role="tablist">
     <button class="tab active" data-tab="devices">设备</button>
     <button class="tab" data-tab="templates">模板与时段</button>
-    <button class="tab" data-tab="firmware">程序更新</button>
+    <button class="tab" data-tab="packages">程序更新</button>
     <button class="tab" data-tab="storage">存储</button>
   </nav>
   <span class="right"><button class="sm" onclick="setToken()">设置 Token</button></span>
 </header>
 <main>
   <div id="tab-devices">
-    <div class="bar" id="globalBar"></div>
+    <div class="card" id="globalBar"></div>
     <table id="devTable" class="cards"></table>
   </div>
   <div id="tab-templates" style="display:none">
-    <div class="bar">
-      <b>全局默认模板：</b>
-      <select id="globalSel"></select>
-      <button class="primary" onclick="saveGlobal()">保存</button>
-      <span class="muted">所有设备默认显示此模板。属性在左还是在右，用各设备"内容"里的<b>左右对调</b>开关切换，不用建两个模板。<br>
-        图片停留时长是版式的一部分，写在模板里（视频按自身长度播完即切）。</span>
+    <div class="card">
+      <div class="row"><b>全局默认模板</b>
+        <select id="globalSel"></select>
+        <button class="primary" onclick="saveGlobal()">保存</button></div>
+      <span class="muted">没有专属模板的设备都显示它。属性在左还是在右，用设备"内容"里的<b>左右对调</b>切换；图片停留时长写在模板里。</span>
     </div>
     <p><button class="primary" onclick="templateForm()">新建模板</button>
        <button onclick="editTemplateJSON()">新建(JSON)</button></p>
@@ -315,29 +310,24 @@
     <table id="schTable" class="cards"></table>
     <p><button onclick="addSchedule()">+ 添加时段</button> <button class="primary" onclick="saveSchedules()">保存时段计划</button></p>
   </div>
-  <div id="tab-firmware" style="display:none">
-    <div class="bar">
-      <b>新设备装机</b>
-      <p class="muted">在刚刷好公版 Armbian、设好 root 密码的设备上，以 root 运行下面这一行（先在下方上传一个程序包）。
-        它会下载程序包、安装、设置开机自启并重启；之后的程序更新都通过本页下发。</p>
+  <div id="tab-packages" style="display:none">
+    <div class="card">
+      <h3>新设备装机</h3>
+      <p class="muted">刷好公版 Armbian 后以 root 运行（先在下方上传一个程序包）；装完自动重启并注册，之后的升级都在本页下发。</p>
       <pre class="cmd" id="installCmd"></pre>
       <div class="muted">服务端证书指纹（设备只认这张证书，装机脚本已自动填好）：<code id="tlsFP"></code></div>
     </div>
-    <div class="bar">
+    <div class="card">
       <div class="row">
-        <input type="file" id="fwFile" accept=".tar.gz,.tgz,application/gzip">
-        备注 <input type="text" id="fwNotes" placeholder="可选">
-        <button class="primary" onclick="uploadFirmware()">上传程序包</button>
+        <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
+        备注 <input type="text" id="pkgNotes" placeholder="可选">
+        <button class="primary" onclick="uploadPackage()">上传程序包</button>
       </div>
-      <span class="muted">
-        上传 <code>make package</code> 产出的 <b><code>display-agent-&lt;版本&gt;-armv7.tar.gz</code></b> 整包，版本号自动从包里读取。
-        设备收到下发后下载整包、执行包内 <code>update.sh</code> 再切换到新版本；新版本连续 3 次启动失败自动回滚到上一个版本。
-        传错文件会被服务端当场拒绝，不会下发到设备。
-      </span>
+      <span class="muted">上传 <code>make package</code> 产出的 <code>display-agent-&lt;版本&gt;-armv7.tar.gz</code>，版本号从包里读取；传错文件会被当场拒绝。</span>
     </div>
-    <table id="fwTable" class="cards"></table>
+    <table id="pkgTable" class="cards"></table>
   </div>
-  <div id="tab-storage" style="display:none"><div id="storageBox" class="bar">读取中…</div></div>
+  <div id="tab-storage" style="display:none"><div id="storageBox" class="card">读取中…</div></div>
 </main>
 <div id="overlay"><div id="modal" role="dialog" aria-modal="true"></div></div>
 <div id="alertLayer"><div id="alert" role="alertdialog" aria-modal="true"></div></div>
@@ -353,14 +343,24 @@ async function setToken() {
   const t = await promptDialog("管理 Token", "服务端 server.json 里的 admin_token", token(), { secure: true });
   if (t !== null) { localStorage.setItem("admin_token", t.trim()); refresh(); }
 }
+// 所有管理接口都要带口令；图片（缩略图、预览）也走这里取 blob
+const authFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { "X-Admin-Token": token(), ...opts.headers } });
 async function api(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: { "X-Admin-Token": token(), ...(opts.headers || {}) } });
+  const r = await authFetch(path, opts);
   if (r.status === 401) { toast("Token 无效，请重新设置"); throw new Error("unauthorized"); }
   if (!r.ok) { const t = await r.text(); toast(t); throw new Error(t); }
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
 }
 const J = body => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+// send 发一个写请求（JSON 体），成功后提示、（可选）关对话框、刷新列表；失败时 api 已提示原因。
+async function send(method, path, body, msg, { close = false } = {}) {
+  try { await api(path, { method, ...(body === undefined ? {} : J(body)) }); } catch { return false; }
+  if (msg) toast(msg);
+  if (close) closeModal();
+  refresh();
+  return true;
+}
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 3500); }
 let modalGuard = null; // 关闭前的检查（如还有文件在上传），返回 false（或 Promise<false>）则不关
 function modal(html) {
@@ -418,22 +418,30 @@ function promptDialog(title, msg, value = "", { secure = false } = {}) {
 }
 // actionSheet(标题, [{label, run, destructive}])：窄屏时收起来的行内操作
 function actionSheet(title, items) {
-  window._sheetItems = items;
   showAlert(`<div class="menu-group">${title ? `<div class="ttl">${esc(title)}</div>` : ""}${items.map((it, i) =>
       `<button class="${it.destructive ? "destructive" : ""}" onclick="finishAlert(${i})">${esc(it.label)}</button>`).join("")}</div>
     <div class="menu-group cancel"><button onclick="finishAlert(null)">取消</button></div>`, "sheet-menu",
     i => { if (typeof i === "number") items[i].run(); });
 }
 
-document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
-  document.querySelectorAll("header .tab").forEach(x => x.classList.toggle("active", x === b));
-  for (const t of ["devices", "templates", "firmware", "storage"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
+const tabs = [...document.querySelectorAll("header .tab")];
+tabs.forEach(b => b.onclick = () => {
+  for (const x of tabs) {
+    x.classList.toggle("active", x === b);
+    $("#tab-" + x.dataset.tab).style.display = x === b ? "" : "none";
+  }
   if (b.dataset.tab === "storage") loadStorage();
 });
 
-let devices = [], templates = [], global = {}, schedules = [], firmware = [], info = {}, infoFetchedAt = 0;
+let devices = [], templates = [], global = {}, schedules = [], packages = [], info = {}, infoFetchedAt = 0;
 const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
 const tplById = id => templates.find(t => t.id === id);
+const devById = id => devices.find(d => d.id === id);
+// tplOptions 生成模板下拉框的选项
+const tplOptions = selected => templates.map(t => `<option value="${esc(t.id)}" ${t.id === selected ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+// fmtSize 字节数 → 0 / KB / MB / GB
+const fmtSize = n => !n ? "0" : n >= 1 << 30 ? (n / (1 << 30)).toFixed(1) + " GB"
+  : n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段", global: "全局" };
 
 const arr = v => Array.isArray(v) ? v : [];
@@ -443,12 +451,12 @@ async function refresh() {
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
       api("/api/v1/admin/schedules"), api("/api/v1/admin/packages"), api("/api/v1/admin/info")]);
     // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
-    [devices, templates, global, schedules, firmware, info] =
+    [devices, templates, global, schedules, packages, info] =
       [arr(d), arr(t), g || {}, arr(s), arr(f), i || {}];
     infoFetchedAt = Date.now();
   } catch { return; }
   try {
-    renderDevices(); renderTemplates(); renderSchedules(); renderFirmware();
+    renderDevices(); renderTemplates(); renderSchedules(); renderPackages();
   } catch (e) {
     console.error(e);
     toast("界面渲染出错: " + e.message);
@@ -456,47 +464,41 @@ async function refresh() {
 }
 
 // ================= 存储（文件缓存区） =================
-// fmtBytes 比 fmtSize 多了 GB 档，0 显示为 0（fmtSize 最少显示 1 KB，那是给"有文件"用的）。
-const fmtBytes = n => !n ? "0" : n >= 1 << 30 ? (n / (1 << 30)).toFixed(n >= 10 * (1 << 30) ? 0 : 1) + " GB" : fmtSize(n);
-
 async function loadStorage() {
   let st;
   try { st = await api("/api/v1/admin/cache"); } catch { return; }
   const GB = 1 << 30, quota = st.quota_gb * GB, scale = Math.max(quota, st.used_bytes, 1);
   const pct = n => (n * 100 / scale).toFixed(2) + "%";
   const overDisk = st.disk_free_bytes >= 0 && quota > st.used_bytes + st.disk_free_bytes;
-  $("#storageBox").innerHTML = `<b>文件缓存区</b>
+  $("#storageBox").innerHTML = `<h3>文件缓存区</h3>
     <div class="cachebar" title="相对配额 ${st.quota_gb} GB">
       <i class="inuse" style="width:${pct(st.in_use_bytes)}"></i><i class="cached" style="width:${pct(st.cached_bytes)}"></i></div>
     <div class="legend">
-      <span><i style="background:var(--accent)"></i>设备在用 <b>${fmtBytes(st.in_use_bytes)}</b>（${st.in_use_files} 个文件，不会被清理）</span>
-      <span><i style="background:var(--blue-soft)"></i>缓存中 <b>${fmtBytes(st.cached_bytes)}</b>（${st.files - st.in_use_files} 个，可复用、满了自动清理）</span>
+      <span><i class="inuse"></i>设备在用 <b>${fmtSize(st.in_use_bytes)}</b>（${st.in_use_files} 个文件，不会被清理）</span>
+      <span><i class="cached"></i>缓存中 <b>${fmtSize(st.cached_bytes)}</b>（${st.files - st.in_use_files} 个，可复用、满了自动清理）</span>
       <span>配额 <b>${st.quota_gb} GB</b></span>
-      ${st.disk_free_bytes >= 0 ? `<span class="muted">磁盘剩余 ${fmtBytes(st.disk_free_bytes)}</span>` : ""}
+      ${st.disk_free_bytes >= 0 ? `<span class="muted">磁盘剩余 ${fmtSize(st.disk_free_bytes)}</span>` : ""}
     </div>
     ${st.in_use_bytes >= quota ? `<div class="bad-note">设备在用的文件已占满配额，<b>新上传会被拒收</b>。请调大缓存区，或先删除不再使用的内容。</div>` : ""}
     <div class="row" style="margin-top:10px">配额 <input type="number" id="cacheQuota" min="${st.min_quota_gb}" step="1" value="${st.quota_gb}" style="width:6em"> GB
       <button class="primary" onclick="saveQuota()">保存</button>
       <span class="muted">最小 ${st.min_quota_gb} GB（设备在用文件的总大小）</span></div>
-    ${overDisk ? `<div class="warn">配额超过了磁盘可用空间（剩余 ${fmtBytes(st.disk_free_bytes)}），缓存区可能把磁盘写满。</div>` : ""}
-    <p class="muted">上传的图片、视频、PDF 处理好后存在服务端的缓存区里。在设备上删除文件、删除设备，内容不会立即删掉：
-      之后再上传同一个文件（不论哪台设备）会直接复用，<b>不用重新转码</b>。缓存区超过配额时，从最久没用的内容开始自动清理；
-      设备正在播放的内容永远不会被清理。调小配额会立即按新配额清理。</p>`;
+    ${overDisk ? `<div class="warn">配额超过了磁盘可用空间（剩余 ${fmtSize(st.disk_free_bytes)}），缓存区可能把磁盘写满。</div>` : ""}
+    <p class="muted">处理好的内容都留在缓存区：删了再上传同一个文件（不论哪台设备）直接复用、不用重新转码。
+      超出配额时从最久没用的开始清理，设备在播的永远不清。</p>`;
 }
 
 async function saveQuota() {
   const v = parseInt($("#cacheQuota").value, 10);
   if (!(v > 0)) return toast("请输入配额（GB）");
-  try { await api("/api/v1/admin/cache", { method: "PUT", ...J({ quota_gb: v }) }); } catch { return; }
-  toast("已保存");
-  loadStorage();
+  if (await send("PUT", "/api/v1/admin/cache", { quota_gb: v }, "已保存")) loadStorage();
 }
 
 // ================= 设备 =================
 // healthLine 把设备心跳翻译成一眼能看懂的提示：解码方式、温度、输出分辨率、运行时长、剩余空间。
 // 要盯的现场问题：硬解失效、过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
-function healthLine(hb) {
-  const parts = [];
+function healthLine(d) {
+  const hb = d.heartbeat, parts = [];
   if (hb.update_error) parts.push(`<span class="bad" title="${esc(hb.update_error)}">程序更新失败</span>`);
   if (hb.hwdec === "no") parts.push('<span class="bad" title="硬解没起来，视频在软解：会发热、卡顿。在设备上运行 check-display.sh 排查">软解</span>');
   else if (hb.hwdec) parts.push(`<span class="okc" title="实际使用的硬件解码器">硬解 ${esc(hb.hwdec)}</span>`);
@@ -504,7 +506,8 @@ function healthLine(hb) {
     ? `<span class="bad" title="H3 到 85°C 开始降频，再高会关机">${hb.temp_c}°C</span>`
     : `${hb.temp_c}°C`);
   if (hb.output_w) {
-    const ok = hb.output_w === 1440 && hb.output_h === 900;
+    const tpl = tplById(d.active_template) || { w: 1440, h: 900 }; // 测试卡按默认画布
+    const ok = hb.output_w === tpl.w && hb.output_h === tpl.h;
     parts.push(ok ? `${hb.output_w}×${hb.output_h}`
       : `<span class="warn" title="显示屏实际输出与模板画布不一致（叠加图会被缩放）；检查 /boot/armbianEnv.txt 的 video= 参数">输出 ${hb.output_w}×${hb.output_h}</span>`);
   }
@@ -529,34 +532,27 @@ const SYNC = {
 
 function renderDevices() {
   const g = tplById(global.template_id);
-  $("#globalBar").innerHTML = g
+  let bar = g
     ? `当前全局默认模板：<b>${esc(g.name)}</b>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}
        <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
     : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
   // 服务器时钟偏差：时段计划按服务器时间切换。离线环境下服务器没有 NTP，漂移不会有人察觉；
   // 浏览器所在的电脑通常时间是准的，拿它比一下。
-  if (info.server_time) {
-    const skewMin = Math.round((info.server_time - infoFetchedAt) / 60000);
-    if (Math.abs(skewMin) >= 2) {
-      $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务器时间与本机相差约 <b>${Math.abs(skewMin)} 分钟</b>
-        （服务器：${esc(new Date(info.server_time).toLocaleString())}，时区 ${esc(info.timezone || "")}）。
-        时段计划会按服务器时间切换，请校准服务器时钟（无外网时见部署文档"无外网运行"一节）。
-        设备播放与认证不受影响。</div>`;
-    }
+  const skewMin = Math.round((info.server_time - infoFetchedAt) / 60000);
+  if (Math.abs(skewMin) >= 2) {
+    bar += `<div class="bad-note">⚠ 服务器时间与本机相差约 <b>${Math.abs(skewMin)} 分钟</b>
+      （服务器：${esc(new Date(info.server_time).toLocaleString())}，时区 ${esc(info.timezone)}）。
+      时段计划按服务器时间切换，请校准服务器时钟；设备播放与认证不受影响。</div>`;
   }
   if (!info.transcode) {
-    $("#globalBar").innerHTML += `<div class="bad-note">⚠ 服务端的 ffmpeg 不可用，暂时<b>不能上传视频</b>
-      （未转码的原片码率过高，会让设备过热关机）。
-      ${info.ffmpeg_error ? `<div>原因：<code>${esc(info.ffmpeg_error)}</code></div>` : ""}
-      <div class="muted">注意服务是以 <code>display</code> 用户、systemd 的精简 PATH 运行的，不是你登录 shell 的环境：
-        用 <code>sudo -u display ffmpeg -version</code> 能跑通才算可用。推荐 <code>apt install ffmpeg</code>（装到 /usr/bin）；
-        装在别处就在 server.json 写 <code>ffmpeg_path</code> 绝对路径。装好后重启服务端生效。</div></div>`;
+    bar += `<div class="bad-note">⚠ 服务端的 ffmpeg 不可用，暂时<b>不能上传视频</b>：<code>${esc(info.ffmpeg_error)}</code>
+      <div class="muted">装好（apt install ffmpeg）后重启服务端；排查见服务端 INSTALL.md。</div></div>`;
   }
   if (!info.pdf) {
-    $("#globalBar").innerHTML += `<div class="muted">服务端没装 poppler-utils，暂时不能上传 PDF
-      （<code>apt install poppler-utils</code> 后重启服务端）。
-      ${info.pdf_error ? `原因：<code>${esc(info.pdf_error)}</code>` : ""}</div>`;
+    bar += `<div class="muted">服务端没装 poppler-utils，暂时不能上传 PDF（apt install poppler-utils 后重启服务端）：
+      <code>${esc(info.pdf_error)}</code></div>`;
   }
+  $("#globalBar").innerHTML = bar;
   const rows = devices.map(d => {
     const st = d.online
       ? `<span class="dot on"></span>在线<div class="contact" data-seen="${Date.parse(d.last_seen)}"
@@ -569,7 +565,7 @@ function renderDevices() {
     show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
       d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
-    const agentVer = d.hw?.agent_version;
+    const agentVer = d.hw.agent_version;
     let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
     if (d.update_target) {
       const t = d.update_target;
@@ -578,14 +574,14 @@ function renderDevices() {
         : ` → <span class="warn">${esc(t.version)}${t.not_before && new Date(t.not_before) > new Date() ? " (定时 " + esc(fmtTime(t.not_before)) + ")" : " (待更新)"}</span>`;
     }
     ver += "</div>";
-    const hw = d.hw ? `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>` : "";
-    const rk = d.hw && d.hw.rekey;
+    const hw = `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>`;
+    const rk = d.hw.rekey;
     const rekey = rk ? `<div class="bad-note">⚠ 收到用<b>新密钥</b>的注册请求（key ${esc(rk.fingerprint)}，
         ${esc(rk.hostname || "?")} ${esc(rk.ip || "")}，${esc(fmtTime(rk.at))}），设备在用缓存内容播放、暂时收不到更新。
         <div class="row" style="margin:6px 0 0"><button class="primary sm" onclick="rekeyDialog('${esc(d.id)}')">核对并处理</button></div></div>` : "";
     return `<tr>
       <td>${st}</td>
-      <td><b>${esc(d.id)}</b>${hw}${ver}${d.heartbeat ? healthLine(d.heartbeat) : ""}${rekey}</td>
+      <td><b>${esc(d.id)}</b>${hw}${ver}${d.heartbeat ? healthLine(d) : ""}${rekey}</td>
       <td data-label="属性">${attrs}</td>
       <td data-label="当前显示">${show}</td>
       <td class="acts">
@@ -637,15 +633,14 @@ function testDialog(id) {
       <button class="danger" onclick="doTest('${esc(id)}',0)">取消测试</button>
     </div><div class="actions"><button onclick="closeModal()">关闭</button></div>`);
 }
-async function doTest(id, secs) {
-  await api(`/api/v1/admin/devices/${id}/test`, { method: "POST", ...J({ duration_s: secs }) });
-  toast(secs > 0 ? "已下发测试屏" : "已取消测试"); closeModal(); refresh();
-}
+const devPath = id => `/api/v1/admin/devices/${encodeURIComponent(id)}`;
+const mediaURL = (dev, name) => devPath(dev) + "/media" + (name ? "/" + encodeURIComponent(name) : "");
+const doTest = (id, secs) => send("POST", devPath(id) + "/test", { duration_s: secs }, secs > 0 ? "已下发测试屏" : "已取消测试", { close: true });
 // rekeyDialog 处理"同编号、新密钥"的注册请求。设备丢了身份文件（重装系统、换 SD 卡、
 // 手工删了 /var/lib/display-agent）就会这样；也可能是另一台机器撞了编号或有人冒充，
 // 所以要人核对：设备日志里会打印 key=xxxx，与这里的指纹一致才是本机。
 function rekeyDialog(id) {
-  const d = devices.find(x => x.id === id), rk = d.hw.rekey, cur = d.hw;
+  const d = devById(id), rk = d.hw.rekey, cur = d.hw;
   modal(`<h2>换密钥请求 — ${esc(id)}</h2>
     <table>
       <tr><th></th><th>当前登记</th><th>新请求</th></tr>
@@ -662,19 +657,15 @@ function rekeyDialog(id) {
       <button class="danger" onclick="doRekey('${esc(id)}', false)">忽略</button>
       <button class="primary" onclick="doRekey('${esc(id)}', true)">接受新密钥</button></div>`);
 }
-async function doRekey(id, accept) {
-  await api(`/api/v1/admin/devices/${id}/rekey`, { method: "POST", ...J({ accept }) });
-  toast(accept ? "已接受：设备一分钟内会重新注册成功" : "已忽略"); closeModal(); refresh();
-}
+const doRekey = (id, accept) => send("POST", devPath(id) + "/rekey", { accept }, accept ? "已接受：设备一分钟内会重新注册成功" : "已忽略", { close: true });
 async function deleteDevice(id) {
   if (!await confirmDialog(`删除设备 ${id}？`, "属性、播放内容、更新目标一并删除；设备若仍在线会用新密钥重新注册。", { ok: "删除", danger: true })) return;
-  await api(`/api/v1/admin/devices/${id}`, { method: "DELETE" });
-  toast("已删除"); refresh();
+  send("DELETE", devPath(id), undefined, "已删除");
 }
 
 // ---- 属性 ----
 function attrsDialog(id) {
-  const d = devices.find(x => x.id === id);
+  const d = devById(id);
   const rows = Object.entries(d.attrs || {}).map(([k, v]) => attrRow(k, v)).join("");
   modal(`<h2>设备属性 — ${esc(id)}</h2><div id="attrRows">${rows}</div>
     <p><button onclick="addAttrRow()">+ 添加属性</button> <span class="muted">如 room=302；模板的 attribute 区域按 key 显示对应值</span></p>
@@ -685,29 +676,27 @@ function addAttrRow() { $("#attrRows").insertAdjacentHTML("beforeend", attrRow()
 async function saveAttrs(id) {
   const attrs = {};
   for (const row of document.querySelectorAll(".attr-row")) { const k = row.querySelector(".k").value.trim(); if (k) attrs[k] = row.querySelector(".v").value; }
-  await api(`/api/v1/admin/devices/${id}/attributes`, { method: "PUT", ...J(attrs) });
-  toast("属性已保存"); closeModal(); refresh();
+  send("PUT", devPath(id) + "/attributes", attrs, "属性已保存", { close: true });
 }
 
 // ---- 内容：模板选择 + 左右对调 + 播放列表 ----
 // 一台设备要配的东西都在这一个对话框里。播放列表的增删、排序即时生效（自动保存）；
 // 模板与左右对调要点"保存"。
 const mediaRegionOf = tid => (tplById(tid)?.regions || []).find(r => r.type === "media");
-// 设备实际会用到的模板：专属优先，否则全局默认。
-const effectiveTplID = d => d.display.template_id || global.template_id;
+// 内容对话框里选的是不是专属模板
+const ownTemplate = () => document.querySelector('input[name=mode]:checked').value === "template";
 
 async function contentDialog(id) {
-  const d = devices.find(x => x.id === id);
+  const d = devById(id);
   let list = [];
-  try { list = await api(`/api/v1/admin/devices/${id}/media`); } catch { /* 显示空列表 */ }
+  try { list = await api(mediaURL(id)); } catch { /* 显示空列表 */ }
   plOpen(id, list);
   const own = !!d.display.template_id;
-  const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   modal(`<h2>内容 — ${esc(d.id)}</h2>
     <div class="row"><label><input type="radio" name="mode" value="global" ${own ? "" : "checked"} onchange="onModeChange()">
         跟随全局模板<span class="muted">（${esc(tplById(global.template_id)?.name || "未设置")}）</span></label></div>
     <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
-      <select id="ovSel" ${own ? "" : "disabled"} onchange="renderContentBody('${esc(id)}')">${opts}</select>
+      <select id="ovSel" ${own ? "" : "disabled"} onchange="renderContentBody()">${tplOptions(d.display.template_id)}</select>
       <button class="sm" onclick="copyGlobalTemplate()">复制全局模板再改</button></div>
     <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""}> 左右对调
       <span class="muted">同一个模板，属性放到另一边（不镜像文字）</span></label></div>
@@ -716,13 +705,12 @@ async function contentDialog(id) {
     <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
     <div class="actions"><button onclick="closeModal()">关闭</button><button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button></div>`);
   modalGuard = plCloseGuard;
-  renderContentBody(id);
+  renderContentBody();
 }
 
 function onModeChange() {
-  const own = document.querySelector('input[name=mode]:checked').value === "template";
-  $("#ovSel").disabled = !own;
-  renderContentBody(plDev);
+  $("#ovSel").disabled = !ownTemplate();
+  renderContentBody();
 }
 
 // copyGlobalTemplate 以全局模板为蓝本建一个副本，供这台设备单独改。
@@ -731,33 +719,32 @@ async function copyGlobalTemplate() {
   if (!g) { toast("尚无全局模板"); return; }
   const copy = { ...g, name: g.name + " 副本" };
   delete copy.id; // 由服务端生成
-  const created = await api("/api/v1/admin/templates", { method: "POST", ...J(copy) });
+  let created;
+  try { created = await api("/api/v1/admin/templates", { method: "POST", ...J(copy) }); } catch { return; }
   templates.push(created);
   const sel = $("#ovSel");
-  sel.insertAdjacentHTML("beforeend", `<option value="${esc(created.id)}">${esc(created.name)}</option>`);
-  sel.value = created.id; sel.disabled = false;
+  sel.innerHTML = tplOptions(created.id);
+  sel.disabled = false;
   document.querySelector('input[name=mode][value=template]').checked = true;
   toast("已复制为专属模板，可在「模板与时段」页继续编辑");
-  renderContentBody(plDev);
+  renderContentBody();
 }
 
 // renderContentBody 画出与当前所选模板匹配的内容区：有媒体区才显示播放列表。
-function renderContentBody(id) {
+function renderContentBody() {
   const box = $("#contentBody");
   if (!box) return;
-  const own = document.querySelector('input[name=mode]:checked').value === "template";
-  const tid = own ? $("#ovSel").value : global.template_id;
-  const tpl = tplById(tid);
+  const tid = ownTemplate() ? $("#ovSel").value : global.template_id;
+  const tpl = tplById(tid), region = mediaRegionOf(tid);
   if (!tpl) {
     box.innerHTML = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
     return;
   }
-  if (!mediaRegionOf(tid)) {
+  if (!region) {
     box.innerHTML = `<p class="muted">模板「${esc(tpl.name)}」没有媒体区，这台设备不播放列表内容。
       要放图片/视频，请换一个带媒体区的模板。</p>`;
     return;
   }
-  const region = mediaRegionOf(tid);
   plImageDur = tpl.image_duration_s;
   plMediaAspect = region.w / region.h;
   box.innerHTML = `<div class="row"><b>播放内容</b>
@@ -797,7 +784,6 @@ function uploadHint() {
   return h + " 上传、处理过程中可以随时拖动调整顺序。";
 }
 
-const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
 const IMAGE_RE = /\.(png|jpe?g)$/i, VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v|ts)$/i, PDF_RE = /\.pdf$/i;
 const typeOfName = n => IMAGE_RE.test(n) ? "image" : VIDEO_RE.test(n) ? "video" : PDF_RE.test(n) ? "document" : "";
 
@@ -908,9 +894,9 @@ function pageStrip(it) {
 }
 
 // thumbURL 是缩略图接口地址；PDF 可带页码。
-const thumbURL = (name, page) => `/api/v1/admin/devices/${encodeURIComponent(plDev)}/media/${encodeURIComponent(name)}/thumb` +
+const thumbURL = (name, page) => mediaURL(plDev, name) + "/thumb" +
   (page ? `?page=${page}` : "");
-const fetchThumb = url => fetch(url, { headers: { "X-Admin-Token": token() } })
+const fetchThumb = url => authFetch(url)
   .then(r => r.ok ? r.blob() : null).then(b => b && URL.createObjectURL(b)).catch(() => null);
 
 // loadPages 逐页取缩略图（一次一页，不把服务器压垮），取到一页就更新那一格。
@@ -962,14 +948,21 @@ function updateRow(it, full) {
   if (stt) stt.textContent = stateText(it) + progressText(it);
 }
 
+// abortUpload 取消一个还在传的文件（不再触发它的回调）
+function abortUpload(it) {
+  if (it.xhr) { it.xhr.onload = it.xhr.onerror = null; it.xhr.abort(); }
+}
+
 function renderSummary() {
   const el = $("#plSum");
   if (!el) return;
   const c = s => plItems.filter(it => s.includes(it.state)).length;
-  const parts = [`共 ${plItems.filter(it => it.state !== "rejected").length} 项`];
-  if (c(["waiting", "uploading", "processing"])) parts.push(`上传中 ${c(["waiting", "uploading", "processing"])}`);
-  if (c(["queued", "transcoding"])) parts.push(`处理中 ${c(["queued", "transcoding"])}`);
-  if (c(["rejected", "failed"])) parts.push(`<span class="bad">失败 ${c(["rejected", "failed"])}</span>`);
+  const parts = [`共 ${plItems.length - c(["rejected"])} 项`];
+  for (const [label, states, cls] of [["上传中", ["waiting", "uploading", "processing"]], ["处理中", ["queued", "transcoding"]],
+    ["失败", ["rejected", "failed"], "bad"]]) {
+    const n = c(states);
+    if (n) parts.push(cls ? `<span class="${cls}">${label} ${n}</span>` : `${label} ${n}`);
+  }
   el.innerHTML = parts.join(" · ");
 }
 
@@ -1043,7 +1036,7 @@ function plAddFiles(files) {
     const it = { key: ++plSeq, label: f.name, name: "", type: type || "image", size: f.size,
       state: "waiting", progress: 0, error: plPrecheck(f, type), file: null };
     if (it.error) { it.state = "rejected"; plItems.push(it); continue; }
-    it.ready = snapshot(f).then(blob => {
+    it.loaded = snapshot(f).then(blob => {
       it.file = blob;
       if (type === "image" && !it.thumb) { it.thumb = URL.createObjectURL(blob); updateRow(it, true); }
     }, () => {
@@ -1067,7 +1060,7 @@ async function uploadOne(it) {
   const dev = plDev;
   it.state = "uploading"; it.progress = 0; // 先占住，等读文件期间不会被再派一次
   updateRow(it, true); renderSummary();
-  await it.ready;
+  await it.loaded;
   if (!it.file || dev !== plDev || !plItems.includes(it)) { // 读失败，或等待期间被移除/关了对话框
     if (it.state === "uploading") it.state = "rejected";
     return pumpUploads();
@@ -1076,7 +1069,7 @@ async function uploadOne(it) {
   fd.append("files", it.file, it.label);
   const xhr = new XMLHttpRequest();
   it.xhr = xhr;
-  xhr.open("POST", `/api/v1/admin/devices/${encodeURIComponent(dev)}/media`);
+  xhr.open("POST", mediaURL(dev));
   xhr.setRequestHeader("X-Admin-Token", token());
   xhr.upload.onprogress = e => {
     if (!e.lengthComputable) return;
@@ -1123,7 +1116,7 @@ async function plRemove(key) {
   const it = plItems.find(x => x.key === key);
   if (!it) return;
   if (isLocal(it)) { // 还没到服务端：取消上传、移出列表即可
-    if (it.xhr) { it.xhr.onload = it.xhr.onerror = null; it.xhr.abort(); }
+    abortUpload(it);
     plItems = plItems.filter(x => x !== it);
     dropThumb(it);
     renderPlaylist(); pumpUploads();
@@ -1132,7 +1125,7 @@ async function plRemove(key) {
   const what = it.state === "ready" ? `删除 ${it.name}？`
     : it.state === "failed" ? null : `取消 ${it.name} 的转码？`;
   if (what && !await confirmDialog(what, "", { ok: it.state === "ready" ? "删除" : "取消转码", danger: true })) return;
-  const list = await api(`/api/v1/admin/devices/${encodeURIComponent(plDev)}/media/${encodeURIComponent(it.name)}`, { method: "DELETE" });
+  const list = await api(mediaURL(plDev, it.name), { method: "DELETE" });
   plItems = plItems.filter(x => x !== it);
   dropThumb(it);
   plEpoch++; applyServer(list);
@@ -1151,14 +1144,14 @@ function saveOrder(dev, names) {
     if (dev === plDev && sameList(names, plServerOrder)) { setSaveState(""); return; }
     setSaveState("正在保存顺序…");
     try {
-      const list = await api(`/api/v1/admin/devices/${encodeURIComponent(dev)}/media`, { method: "PUT", ...J(names) });
+      const list = await api(mediaURL(dev), { method: "PUT", ...J(names) });
       if (dev !== plDev) return;
       plEpoch++; applyServer(list);
       setSaveState("✓ 顺序已保存");
     } catch {
       // 多半是别处删了文件：重新取一次列表，界面以服务端为准
       if (dev !== plDev) return;
-      try { plEpoch++; applyServer(await api(`/api/v1/admin/devices/${encodeURIComponent(dev)}/media`)); } catch { }
+      try { plEpoch++; applyServer(await api(mediaURL(dev))); } catch { }
       setSaveState("");
     }
   });
@@ -1173,7 +1166,7 @@ function schedulePlPoll() {
     if (dev !== plDev) return;
     const epoch = plEpoch;
     let list;
-    try { list = await api(`/api/v1/admin/devices/${encodeURIComponent(dev)}/media`); } catch { return schedulePlPoll(); }
+    try { list = await api(mediaURL(dev)); } catch { return schedulePlPoll(); }
     if (dev !== plDev) return;
     if (epoch !== plEpoch) return schedulePlPoll(); // 期间有写操作，这份结果可能已过时
     applyServer(list);
@@ -1184,7 +1177,7 @@ function schedulePlPoll() {
 async function plCloseGuard() {
   const busy = plItems.filter(isBusy);
   if (busy.length && !await confirmDialog(`还有 ${busy.length} 个文件没传完`, "关闭会取消上传。", { ok: "关闭", danger: true })) return false;
-  for (const it of busy) if (it.xhr) { it.xhr.onload = it.xhr.onerror = null; it.xhr.abort(); }
+  busy.forEach(abortUpload);
   if (plSaveTimer) saveOrder(plDev, readyNames());
   clearTimeout(plPollTimer);
   for (const it of plItems) if (it.thumb && !thumbCache.has(plDev + "/" + it.name)) URL.revokeObjectURL(it.thumb);
@@ -1346,24 +1339,24 @@ function startDrag(li, pointerId, startY, curY) {
 }
 
 async function saveContent(id) {
-  const own = document.querySelector('input[name=mode]:checked').value === "template";
+  const own = ownTemplate();
   const body = { template_id: own ? $("#ovSel").value : "", mirror: $("#mirrorChk").checked };
   if (own && !body.template_id) { toast("请选择模板"); return; }
-  await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
-  const d = devices.find(x => x.id === id);
+  try { await api(devPath(id) + "/display", { method: "PUT", ...J(body) }); } catch { return; }
+  const d = devById(id);
   if (d) Object.assign(d.display, body); // 对话框不关时，再次保存/预览用的是新设置
   if (plItems.some(isBusy)) { toast("模板设置已保存；文件仍在上传"); return; }
   toast("已保存"); closeModal();
 }
 
 async function previewDevice(id) {
-  const d = devices.find(x => x.id === id);
-  const tid = d.active_template || effectiveTplID(d);
+  const d = devById(id);
+  const tid = d.active_template || (d.display.template_id || global.template_id);
   if (!tid) { toast("该设备当前没有模板"); return; }
   await showPreview(`/api/v1/admin/templates/${tid}/preview?device=${id}`, "#previewBox");
 }
 async function showPreview(url, target) {
-  const r = await fetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now(), { headers: { "X-Admin-Token": token() } });
+  const r = await authFetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
   if (!r.ok) { toast(await r.text()); return; }
   const blob = await r.blob();
   const html = `<img class="preview" src="${URL.createObjectURL(blob)}">`;
@@ -1373,8 +1366,7 @@ async function showPreview(url, target) {
 // ================= 模板 / 全局 / 时段 =================
 const REGION_LABEL = { attribute: "属性", text: "文字", media: "播放内容" };
 function renderTemplates() {
-  $("#globalSel").innerHTML =
-    templates.map(t => `<option value="${esc(t.id)}" ${global.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+  $("#globalSel").innerHTML = tplOptions(global.template_id);
   const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
   const rows = templates.map(t => `<tr>
     <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒</div></td>
@@ -1388,87 +1380,76 @@ function renderTemplates() {
     </td></tr>`).join("");
   $("#tplTable").innerHTML = `<tr class="head"><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
-async function setGlobal(id) { $("#globalSel").value = id; await saveGlobal(); }
-async function saveGlobal() {
-  await api("/api/v1/admin/global", { method: "PUT", ...J({ template_id: $("#globalSel").value }) });
-  toast("已保存"); refresh();
+function setGlobal(id) { $("#globalSel").value = id; saveGlobal(); }
+const saveGlobal = () => send("PUT", "/api/v1/admin/global", { template_id: $("#globalSel").value }, "已保存");
+// splitTemplate 生成"一半属性、一半播放内容"的模板（画布 w×h）：表单新建/保存与 JSON 示例共用。
+function splitTemplate({ name = "左右分屏", w = 1440, h = 900, mediaLeft = false, key = "room", font_size = 160,
+  color = "#FFFFFF", bg = "#1E3A8A", image_duration_s = 10 } = {}) {
+  const half = Math.round(w / 2);
+  const attr = { id: "attr", x: mediaLeft ? half : 0, y: 0, w: w - half, h, type: "attribute", key, font_size, color, bg, align: "center" };
+  const media = { id: "media", x: mediaLeft ? 0 : w - half, y: 0, w: half, h, type: "media" };
+  return { name, w, h, background: "#000000", image_duration_s, regions: mediaLeft ? [media, attr] : [attr, media] };
 }
-// templateForm 表单编辑左右分屏模板（一半属性、一半播放内容）。
-// 结构更复杂的模板表单表达不了，转到 JSON 编辑。
+// splitShape 判断模板是不是表单能表达的"一半属性 + 一半播放内容"；表达不了的转到 JSON 编辑。
+const splitShape = t => t.regions.length === 2 &&
+  t.regions.some(r => r.type === "attribute") && t.regions.some(r => r.type === "media");
+
 function templateForm(id) {
   const t = id ? tplById(id) : null;
   if (t && !splitShape(t)) { editTemplateJSON(id); return; }
-  const attr = t?.regions.find(r => r.type === "attribute") || { key: "room", font_size: 160, color: "#FFFFFF", bg: "#1E3A8A" };
+  const def = splitTemplate(), attr = (t || def).regions.find(r => r.type === "attribute");
   const mediaLeft = t ? t.regions.find(r => r.type === "media").x === 0 : false;
   modal(`<h2>${t ? "编辑模板" : "新建模板"}</h2>
-    <div class="row">名称 <input type="text" id="f_name" value="${esc(t?.name || "左右分屏")}"></div>
+    <div class="row">名称 <input type="text" id="f_name" value="${esc(t?.name || def.name)}"></div>
     <div class="row">左右版式
       <select id="f_side">
         <option value="right" ${mediaLeft ? "" : "selected"}>左边属性 / 右边播放内容</option>
         <option value="left" ${mediaLeft ? "selected" : ""}>左边播放内容 / 右边属性</option>
       </select>
-      <span class="muted">单台设备想反过来，不用另建模板——在该设备"内容"里打开左右对调</span></div>
-    <div class="row">属性 key <input type="text" id="f_key" value="${esc(attr.key || "room")}">
+      <span class="muted">单台设备想反过来，在该设备"内容"里打开左右对调即可</span></div>
+    <div class="row">属性 key <input type="text" id="f_key" value="${esc(attr.key)}">
       <span class="muted">显示设备属性里该 key 对应的值，如 room</span></div>
-    <div class="row">字号 <input type="text" id="f_size" value="${esc(attr.font_size || 160)}" style="width:5em">
-      文字色 <input type="text" id="f_color" value="${esc(attr.color || "#FFFFFF")}" style="width:7em">
-      底色 <input type="text" id="f_bg" value="${esc(attr.bg || "#1E3A8A")}" style="width:7em"></div>
-    <div class="row">图片停留 <input type="number" id="f_dur" min="1" max="3600" style="width:5em" value="${esc(t?.image_duration_s || 10)}"> 秒
-      <span class="muted">播放内容里每张图片停留多久；视频按自身长度播完即切</span></div>
+    <div class="row">字号 <input type="text" id="f_size" value="${esc(attr.font_size)}" style="width:5em">
+      文字色 <input type="text" id="f_color" value="${esc(attr.color)}" style="width:7em">
+      底色 <input type="text" id="f_bg" value="${esc(attr.bg)}" style="width:7em"></div>
+    <div class="row">图片停留 <input type="number" id="f_dur" min="1" max="3600" style="width:5em" value="${esc(t?.image_duration_s || def.image_duration_s)}"> 秒
+      <span class="muted">视频按自身长度播完即切</span></div>
     <div class="actions"><button onclick="closeModal()">取消</button>
       <button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button></div>`);
 }
-// splitShape 判断模板是不是表单能表达的"一半属性 + 一半播放内容"。
-function splitShape(t) {
-  return t.regions.length === 2 &&
-    t.regions.filter(r => r.type === "attribute").length === 1 &&
-    t.regions.filter(r => r.type === "media").length === 1;
+function saveTemplateForm(id) {
+  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸
+  saveTemplate(id, splitTemplate({
+    name: $("#f_name").value.trim(), w: t?.w, h: t?.h, mediaLeft: $("#f_side").value === "left",
+    key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || undefined,
+    color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), image_duration_s: parseInt($("#f_dur").value) || undefined,
+  }));
 }
-async function saveTemplateForm(id) {
-  const half = 720, h = 900;
-  const mediaLeft = $("#f_side").value === "left";
-  const attrRegion = { id: "attr", x: mediaLeft ? half : 0, y: 0, w: half, h, type: "attribute",
-    key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || 160,
-    color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), align: "center" };
-  const mediaRegion = { id: "media", x: mediaLeft ? 0 : half, y: 0, w: half, h, type: "media" };
-  const tpl = { name: $("#f_name").value.trim(), w: 1440, h, background: "#000000",
-    image_duration_s: parseInt($("#f_dur").value) || 10,
-    regions: mediaLeft ? [mediaRegion, attrRegion] : [attrRegion, mediaRegion] };
-  if (id) tpl.id = id;
-  await api("/api/v1/admin/templates" + (id ? "/" + id : ""), { method: id ? "PUT" : "POST", ...J(tpl) });
-  toast("模板已保存"); closeModal(); refresh();
-}
+const saveTemplate = (id, tpl) => send(id ? "PUT" : "POST", "/api/v1/admin/templates" + (id ? "/" + encodeURIComponent(id) : ""), tpl, "模板已保存", { close: true });
+
 // editTemplateJSON 高级编辑：表单表达不了的版式（多区域、局部媒体区等）在这里直接改。
 function editTemplateJSON(id) {
   const t = tplById(id);
-  const sample = t || { name: "示例", w: 1440, h: 900, background: "#000000", image_duration_s: 10,
-    regions: [
-      { id: "attr", x: 0, y: 0, w: 720, h: 900, type: "attribute", key: "room", font_size: 160, color: "#FFFFFF", bg: "#1E3A8A", align: "center" },
-      { id: "media", x: 720, y: 0, w: 720, h: 900, type: "media" }] };
-  modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2><textarea id="tplJSON">${esc(JSON.stringify(sample, null, 2))}</textarea>
-    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、
-      media（设备播放的图片/视频，每个模板至多一个）。</p>
+  modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2><textarea id="tplJSON">${esc(JSON.stringify(t || splitTemplate({ name: "示例" }), null, 2))}</textarea>
+    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、media（设备播放的图片/视频，每个模板至多一个）。</p>
     <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button></div>`);
 }
-async function saveTemplateJSON(id) {
+function saveTemplateJSON(id) {
   let tpl; try { tpl = JSON.parse($("#tplJSON").value); } catch (e) { toast("JSON 语法错误: " + e.message); return; }
-  await api("/api/v1/admin/templates" + (id ? "/" + id : ""), { method: id ? "PUT" : "POST", ...J(tpl) });
-  toast("模板已保存"); closeModal(); refresh();
+  saveTemplate(id, tpl);
 }
 async function deleteTemplate(id) {
   if (!await confirmDialog(`删除模板「${tplById(id)?.name || id}」？`, "", { ok: "删除", danger: true })) return;
-  await api(`/api/v1/admin/templates/${id}`, { method: "DELETE" });
-  toast("已删除"); refresh();
+  send("DELETE", "/api/v1/admin/templates/" + encodeURIComponent(id), undefined, "已删除");
 }
 
 // ---- 时段计划（整表编辑）----
 let schEdit = null;
 function renderSchedules() {
   if (schEdit === null) schEdit = schedules.map(s => ({ ...s, days: [...(s.days || [])] }));
-  const tplOpts = sel => templates.map(t => `<option value="${esc(t.id)}" ${sel === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   const rows = schEdit.map((s, i) => `<tr>
     <td class="wide-cell"><b>${i + 1}</b></td>
-    <td data-label="时段 ${i + 1} · 模板"><select onchange="schEdit[${i}].template_id=this.value">${tplOpts(s.template_id)}</select></td>
+    <td data-label="时段 ${i + 1} · 模板"><select onchange="schEdit[${i}].template_id=this.value">${tplOptions(s.template_id)}</select></td>
     <td class="days" data-label="星期（全不选 = 每天）">${DAYS.map((d, k) => `<label><input type="checkbox" data-d="${d}" aria-label="星期${d}" ${s.days.includes(k) ? "checked" : ""} onchange="toggleDay(${i},${k},this.checked)"></label>`).join("")}</td>
     <td data-label="开始"><input type="time" value="${esc(s.start)}" onchange="schEdit[${i}].start=this.value"></td>
     <td data-label="结束"><input type="time" value="${esc(s.end)}" onchange="schEdit[${i}].end=this.value"></td>
@@ -1484,45 +1465,44 @@ function addSchedule() {
 }
 async function saveSchedules() {
   const body = schEdit.map(s => ({ id: s.id, template_id: s.template_id, days: s.days.slice().sort(), start: s.start, end: s.end }));
-  await api("/api/v1/admin/schedules", { method: "PUT", ...J(body) });
-  toast("时段计划已保存"); schEdit = null; refresh();
+  if (await send("PUT", "/api/v1/admin/schedules", body, "时段计划已保存")) { schEdit = null; renderSchedules(); }
 }
 
 // ================= 程序更新 =================
-function renderFirmware() {
-  const rows = firmware.map(f => `<tr>
+function renderPackages() {
+  const rows = packages.map(f => `<tr>
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
-    <td data-label="大小">${(f.size / 1048576).toFixed(1)} MB<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
+    <td data-label="大小">${fmtSize(f.size)}<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
     <td data-label="上传时间">${esc(fmtTime(f.uploaded_at))}</td>
-    <td data-label="覆盖">${devices.filter(d => d.hw?.agent_version === f.version).length} / ${devices.length} 台在用</td>
+    <td data-label="覆盖">${devices.filter(d => d.hw.agent_version === f.version).length} / ${devices.length} 台在用</td>
     <td class="acts"><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
-        <button class="danger" onclick="deleteFirmware('${esc(f.version)}')">删除</button></td></tr>`).join("");
+        <button class="danger" onclick="deletePackage('${esc(f.version)}')">删除</button></td></tr>`).join("");
   $("#installCmd").textContent =
-    `curl -fsSL http://${location.hostname}:${info.bootstrap_port || 9000}/install.sh | ENROLL_TOKEN=注册口令 sh`;
-  $("#tlsFP").textContent = info.tls_fingerprint || "";
-  $("#fwTable").innerHTML = `<tr class="head"><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序</td></tr>'}`;
+    `curl -fsSL http://${location.hostname}:${info.bootstrap_port}/install.sh | ENROLL_TOKEN=注册口令 sh`;
+  $("#tlsFP").textContent = info.tls_fingerprint;
+  $("#pkgTable").innerHTML = `<tr class="head"><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序包</td></tr>'}`;
 }
-async function uploadFirmware() {
-  const f = $("#fwFile").files[0];
+async function uploadPackage() {
+  const f = $("#pkgFile").files[0];
   if (!f) { toast("请选择程序包"); return; }
-  const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#fwNotes").value);
-  let fw;
-  try { fw = await api("/api/v1/admin/packages", { method: "POST", body: fd }); } catch { return; }
-  toast("已上传 " + fw.version); $("#fwFile").value = ""; $("#fwNotes").value = ""; refresh();
+  const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#pkgNotes").value);
+  let p;
+  try { p = await api("/api/v1/admin/packages", { method: "POST", body: fd }); } catch { return; }
+  toast("已上传 " + p.version); $("#pkgFile").value = ""; $("#pkgNotes").value = ""; refresh();
 }
-async function deleteFirmware(v) {
+async function deletePackage(v) {
   if (!await confirmDialog(`删除程序版本 ${v}？`, "", { ok: "删除", danger: true })) return;
-  await api(`/api/v1/admin/packages/${encodeURIComponent(v)}`, { method: "DELETE" }); toast("已删除"); refresh();
+  send("DELETE", "/api/v1/admin/packages/" + encodeURIComponent(v), undefined, "已删除");
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.hw?.agent_version || "?")}</span></span></label>`).join("");
+  const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.hw.agent_version || "?")}</span></span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>
     <div class="row"><label><input type="radio" name="who" value="all" checked> 全部设备</label>
       <label><input type="radio" name="who" value="some"> 指定设备：</label></div>
     <div class="checklist">${devOpts || '<label class="muted">暂无设备</label>'}</div>
-    <p class="muted">设备在轮询时取到指令 → 下载整包并校验 → 执行包内 update.sh → 切换重启；新版本首个心跳成功即确认，连续 3 次启动失败自动回滚。失败原因会显示在设备列表里。</p>
+    <p class="muted">设备下载整包、执行包内 update.sh 后切换；新版本连续 3 次启动失败自动回滚，失败原因显示在设备列表里。</p>
     <div class="actions"><button onclick="closeModal()">取消</button>
       <button class="danger" onclick="doRollout('', true)">取消所有待更新</button>
       <button class="primary" onclick="doRollout('${esc(version)}')">下发</button></div>`);
@@ -1539,8 +1519,7 @@ async function doRollout(version, cancel = false) {
       if (!body.devices.length) { toast("请勾选设备"); return; }
     }
   }
-  await api("/api/v1/admin/rollout", { method: "PUT", ...J(body) });
-  toast(cancel ? "已取消待更新" : "已下发"); closeModal(); refresh();
+  send("PUT", "/api/v1/admin/rollout", body, cancel ? "已取消待更新" : "已下发", { close: true });
 }
 
 refresh();

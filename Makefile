@@ -75,6 +75,6 @@ test:
 	go vet ./...
 	go test ./...
 
-# 只删构建产物；$(SECRETS) 不动，口令换了整个设备群就要重刷
+# 只删构建产物；$(SECRETS) 不动（换了口令要同步改服务端 server.json）
 clean:
 	rm -rf bin

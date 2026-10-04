@@ -1,14 +1,10 @@
 #!/bin/sh
 # 现场自检：确认显示输出模式、硬件解码、SoC 温度是否正常。
-# 装机后、以及怀疑"画面错位 / 卡顿 / 自动关机"时在设备上运行。
-#
-#   /usr/local/lib/display-agent/check-display.sh
+# 装机后、以及怀疑"画面错位 / 卡顿 / 自动关机"时在设备上运行：/usr/local/lib/display-agent/check-display.sh
 #
 # 退出码：0 全部正常；1 有问题（每一项都会打印怎么修）。
 set -u
-STATUS="${STATUS_FILE:-/var/lib/display-agent/status.json}"
-WANT_W="${WANT_W:-1440}"
-WANT_H="${WANT_H:-900}"
+STATUS=/var/lib/display-agent/status.json
 bad=0
 
 say()  { printf '%-14s %s\n' "$1" "$2"; }
@@ -16,11 +12,16 @@ fail() { printf '%-14s %s\n' "$1" "$2"; bad=1; }
 # 从 JSON 里抠一个字段（不引 jq）
 jget() { sed -n "s/.*\"$1\":\([^,}]*\).*/\1/p" | head -1 | tr -d '" '; }
 
+# 期望的输出分辨率：agent.json 的 display_mode（装机时写入），没配就按模板画布
+WANT=$(jget display_mode < /etc/display-agent/agent.json 2>/dev/null)
+WANT="${WANT:-1440x900}"
+WANT_W="${WANT%x*}" WANT_H="${WANT#*x}"
+
 echo "=== 1. 内核输出模式 ==="
-MODES=$(cat /sys/class/drm/card*-HDMI-A-1/modes 2>/dev/null | head -3)
+MODES=$(for c in /sys/class/drm/card*-*; do [ "$(cat "$c/status" 2>/dev/null)" = connected ] && cat "$c/modes"; done | head -3)
 CUR=$(echo "$MODES" | head -1)
 if [ -z "$CUR" ]; then
-	fail "HDMI" "读不到 /sys/class/drm/card*-HDMI-A-1/modes（HDMI 没接？驱动没加载？）"
+	fail "显示接口" "没有已连接的显示屏（/sys/class/drm/card*-*/status 都不是 connected：HDMI 没接？驱动没加载？）"
 else
 	say "可用模式" "$(echo "$MODES" | tr '\n' ' ')"
 	if echo "$MODES" | grep -qx "${WANT_W}x${WANT_H}"; then
@@ -45,17 +46,21 @@ else
 	echo "               内核没带 sunxi-cedrus 驱动，或设备树里 video-codec 节点没启用："
 	echo "               ls /dev/video* /dev/media*；dmesg | grep -i cedrus；lsmod | grep cedrus"
 fi
-if ! command -v gst-inspect-1.0 >/dev/null 2>&1; then
-	fail "GStreamer" "没装 gstreamer1.0-tools，无法检查（重跑 install-agent.sh）"
-elif gst-inspect-1.0 v4l2slh264dec >/dev/null 2>&1; then
-	say "硬解元素" "v4l2slh264dec ✓"
+# 用播放进程同样的 Python 绑定查元素：查得到就说明播放进程也用得上
+gst_has() {
+	python3 -c "import gi, sys; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); sys.exit(0 if Gst.ElementFactory.find('$1') else 1)" 2>/dev/null
+}
+if ! python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst' 2>/dev/null; then
+	fail "Python" "缺少 GStreamer 的 Python 绑定（apt install python3-gst-1.0 gir1.2-gst-plugins-base-1.0）"
 else
-	fail "硬解元素" "v4l2slh264dec 不可用——视频会退化成软解，发热、卡顿"
-	echo "               确认 cedrus 已加载（上一项），并已安装 gstreamer1.0-plugins-bad："
-	echo "               apt install gstreamer1.0-plugins-bad；rm -rf ~/.cache/gstreamer-1.0 后重试"
-fi
-if command -v gst-inspect-1.0 >/dev/null 2>&1 && ! gst-inspect-1.0 kmssink >/dev/null 2>&1; then
-	fail "kmssink" "不可用（apt install gstreamer1.0-plugins-bad）"
+	if gst_has v4l2slh264dec; then
+		say "硬解元素" "v4l2slh264dec ✓"
+	else
+		fail "硬解元素" "v4l2slh264dec 不可用——视频会退化成软解，发热、卡顿"
+		echo "               确认 cedrus 已加载（上一项），并已安装 gstreamer1.0-plugins-bad："
+		echo "               apt install gstreamer1.0-plugins-bad；rm -rf ~/.cache/gstreamer-1.0 后重试"
+	fi
+	gst_has kmssink || fail "kmssink" "不可用（apt install gstreamer1.0-plugins-bad）"
 fi
 # cedrus 的解码缓冲（1440×900 一帧约 2MB，要二十来帧）、模板叠加层的两块帧缓冲（各约 5MB）、控制台帧缓冲
 # 都从 CMA（连续物理内存）里分；实测 128MB 在播放时只剩约 5MB，不够时视频直接放不出来。
@@ -74,10 +79,6 @@ elif [ "$CMA_T" -lt "$CMA_WANT" ]; then
 else
 	say "CMA" "共 ${CMA_T}MB，空闲 ${CMA_F}MB ✓"
 fi
-if ! python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst' 2>/dev/null; then
-	fail "Python" "缺少 GStreamer 的 Python 绑定（apt install python3-gst-1.0 gir1.2-gst-plugins-base-1.0）"
-fi
-
 echo
 echo "=== 3. 实际播放状态 ==="
 if [ ! -s "$STATUS" ]; then
@@ -89,7 +90,7 @@ else
 		if [ "$OW" = "$WANT_W" ] && [ "$OH" = "$WANT_H" ]; then
 			say "输出分辨率" "${OW}x${OH} ✓"
 		else
-			say "输出分辨率" "${OW}x${OH}（与模板画布 ${WANT_W}x${WANT_H} 不一致，画面按比例缩放；按第 1 项修）"
+			say "输出分辨率" "${OW}x${OH}（与 display_mode ${WANT} 不一致，画面按比例缩放；按第 1 项修）"
 		fi
 	fi
 	case "${HW:-}" in
@@ -103,7 +104,7 @@ echo
 echo "=== 4. SoC 温度与降频 ==="
 T=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 if [ -n "${T:-}" ]; then
-	[ "$T" -gt 1000 ] && T=$((T / 1000))
+	T=$((T / 1000)) # 内核给的是毫摄氏度
 	if [ "$T" -ge 80 ]; then
 		fail "温度" "${T}°C —— 偏高"
 		echo "               H3 到 85°C 开始降频、更高会关机。确认：散热片装了没、通风是否良好、"

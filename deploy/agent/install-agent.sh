@@ -11,11 +11,7 @@
 #   CMA=256M        连续内存，默认按内存大小定（1GB 板 256M，512MB 板 192M）
 #   NO_REBOOT=1     装完不自动重启（显示参数要重启才生效）
 #
-# 安装布局（之后的程序更新由 OTA 完成，见 update.sh）：
-#   /usr/local/lib/display-agent/versions/<版本>/   本程序包
-#   /usr/local/lib/display-agent/current -> versions/<版本>
-#   /usr/local/lib/display-agent/rollback-check.sh  （update.sh 安装）
-#   /etc/display-agent/agent.json
+# 按 OTA 布局安装到 /usr/local/lib/display-agent（布局说明见 internal/agent/update.go），之后的程序更新都由 OTA 完成。
 set -eu
 : "${SERVER_URL:?需要 SERVER_URL，如 https://display.lan:9001（建议用域名而非 IP：server_url 写在设备上，换服务器只改解析）}"
 : "${TLS_FINGERPRINT:?需要 TLS_FINGERPRINT（管理后台「程序更新」页显示的服务端证书指纹）}"
@@ -43,11 +39,10 @@ echo "== 安装依赖（GStreamer）"
 # libav 是软解兜底（硬解不可用时至少还能放，后台会标红提示）。
 apt-get update
 apt-get install -y --no-install-recommends python3 python3-gi python3-gst-1.0 gir1.2-gst-plugins-base-1.0 \
-	gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
-	gstreamer1.0-tools libdrm2
+	gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav libdrm2
 
 echo "== 安装 display-agent $VERSION 到 $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/versions" /etc/display-agent /var/lib/display-agent
+mkdir -p "$INSTALL_DIR/versions" /etc/display-agent
 rm -rf "$INSTALL_DIR/versions/$VERSION"
 cp -a "$HERE" "$INSTALL_DIR/versions/$VERSION"
 sh "$INSTALL_DIR/versions/$VERSION/update.sh" "$INSTALL_DIR"
