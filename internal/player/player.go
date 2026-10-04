@@ -40,6 +40,9 @@ type Player interface {
 	Start(ctx context.Context) error
 	// Load 用新画面替换当前画面（Items 为空表示黑屏待机）。
 	Load(scene Scene) error
+	// SetPaused 暂停/恢复播放：暂停时播放进程退出、释放显示屏（内核随即把控制台显示回来），
+	// 期间 Load 只记下画面，恢复时再播放。现场救援（插键盘看控制台）用它。
+	SetPaused(paused bool)
 	// Stats 返回随心跳上报的播放器运行状态（如实际解码方式、输出分辨率）。
 	// 问不到的项留空，不影响心跳。
 	Stats() Stats

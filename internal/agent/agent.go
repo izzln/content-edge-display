@@ -42,6 +42,7 @@ type Agent struct {
 	updateFailedAt map[string]time.Time
 	updateErr      string       // 最近一次 OTA 失败的原因（随心跳上报）；成功或换了版本后清空
 	verified       bool         // 本次运行是否已确认过版本（首个成功心跳后）
+	link           linkStatus   // 与服务端的最近一次成功/失败（救援控制台显示，见 rescue.go）
 	clock          *serverClock // 签名用的时间以服务端为准，见 clock.go
 	sched          *schedule    // 轮询/心跳间隔由服务端规定，见 schedule.go
 }
@@ -91,6 +92,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.player.Start(ctx); err != nil {
 		return err
 	}
+	if a.cfg.Player == "gst" { // 只有真正占着显示屏时才需要：插键盘按任意键交还控制台
+		go a.rescueLoop(ctx, watchKeyboards(ctx), vtConsole{}, rescueIdle)
+	}
 	// 断网兜底：先恢复播放本地已缓存内容，再联网。
 	if err := a.LoadCurrent(); err != nil {
 		log.Printf("agent: no local playlist to restore (%v)", err)
@@ -117,6 +121,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-pollTimer.C:
 			sdNotify("WATCHDOG=1")
 			changed, err := retrySkew(func() (bool, error) { return a.PollOnce(ctx) })
+			if !errors.Is(err, ErrRestartForUpdate) {
+				a.link.record(err)
+			}
 			switch {
 			case errors.Is(err, ErrRestartForUpdate):
 				return err
@@ -146,7 +153,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			sdNotify("WATCHDOG=1")
 		case <-hbTimer.C:
 			sdNotify("WATCHDOG=1")
-			if _, err := retrySkew(func() (bool, error) { return false, a.Heartbeat(ctx) }); err != nil {
+			_, err := retrySkew(func() (bool, error) { return false, a.Heartbeat(ctx) })
+			a.link.record(err)
+			if err != nil {
 				a.dropConnections()
 				log.Printf("agent: heartbeat failed: %v", err)
 			}
@@ -179,6 +188,7 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 	delay := 5 * time.Second
 	for {
 		err := a.Register(ctx)
+		a.link.record(err)
 		if err == nil {
 			return nil
 		}

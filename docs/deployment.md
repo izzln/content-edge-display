@@ -276,7 +276,12 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
    与服务端的连接状态和最近一次错误、程序版本；下面就是登录提示，可直接登录 root；
 3. 键盘 **15 分钟**不动自动恢复播放。要更久就在控制台里 `systemctl stop display-agent`，排查完 `systemctl start display-agent`。
 
-不需要任何网络，也不需要事先知道 IP。
+不需要任何网络，也不需要事先知道 IP。只认真正的键盘（有字母键、回车、空格），红外遥控、板载按键不会误触发。
+键盘随时插拔都行（代理每 3 秒扫描一次 `/dev/input`）。恢复播放时会重启 tty1 的登录程序，留在控制台上的会话随之注销，
+免得有人对着播放画面盲打进一个已登录的 root shell。
+
+实现上：播放进程退出、释放显示屏后，内核把控制台显示回来；信息写在 `/etc/issue.d/display-agent.issue`，
+由 tty1 的 getty 显示在登录提示上方。**样机上确认一次**：按键后控制台确实出现（不是黑屏）。
 
 ## 4. 设备端：批量部署
 

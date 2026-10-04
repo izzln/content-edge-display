@@ -529,3 +529,33 @@ func TestPlayerScriptAppliesCoverCrop(t *testing.T) {
 		t.Fatalf("没有算出裁剪\n%s", stderr.String())
 	}
 }
+
+// 暂停时播放进程退出（释放显示屏）且不被守护重启；期间 Load 只记下画面，恢复后重新拉起并播放最新画面。
+func TestPauseStopsPlayerAndResumeReloads(t *testing.T) {
+	p, logPath := startFake(t, 1440, 900)
+	if err := p.Load(Scene{Items: []Item{{Path: "/m/a.jpg", Type: "image", Duration: 5}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "首次下发画面", func() bool { return len(cmds(logPath, "load")) == 1 })
+
+	p.SetPaused(true)
+	waitFor(t, 5*time.Second, "暂停后播放进程退出", func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.proc == nil
+	})
+	if err := p.Load(Scene{Items: []Item{{Path: "/m/b.jpg", Type: "image", Duration: 5}}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // 远超 restartDelay：暂停期间不应被重启
+	if n := len(cmds(logPath, "config")); n != 1 {
+		t.Fatalf("暂停期间不应重启播放进程，config 次数 %d", n)
+	}
+
+	p.SetPaused(false)
+	waitFor(t, 5*time.Second, "恢复后重新下发画面", func() bool { return len(cmds(logPath, "load")) == 2 })
+	loads := cmds(logPath, "load")
+	if got := loads[1]["items"].([]any)[0].(map[string]any)["path"]; got != "/m/b.jpg" {
+		t.Fatalf("恢复后应播放暂停期间收到的最新画面，得到 %v", got)
+	}
+}

@@ -43,9 +43,12 @@ type GST struct {
 	pingInterval time.Duration // 看门狗间隔
 	restartDelay time.Duration // 播放进程退出后隔多久重启
 
-	mu      sync.Mutex
-	desired *Scene
-	proc    *gstProc
+	mu        sync.Mutex
+	desired   *Scene
+	proc      *gstProc
+	paused    bool
+	runCancel context.CancelFunc // 结束当前这一轮播放进程（暂停时用）
+	wake      chan struct{}      // 恢复播放
 }
 
 // NewGST 创建播放器；脚本写在 dir 下，显示输出分辨率为 width×height。
@@ -53,6 +56,7 @@ func NewGST(dir string, width, height int) *GST {
 	return &GST{
 		python: "python3", script: filepath.Join(dir, "gstplayer.py"), width: width, height: height,
 		callTimeout: 5 * time.Second, pingInterval: 10 * time.Second, restartDelay: 2 * time.Second,
+		wake: make(chan struct{}, 1),
 	}
 }
 
@@ -77,6 +81,47 @@ func (p *GST) Load(scene Scene) error {
 		return nil
 	}
 	return p.send(proc, s)
+}
+
+// SetPaused 暂停时结束播放进程（DRM 随之释放，内核恢复控制台显示），恢复时重新拉起并补发当前画面。
+func (p *GST) SetPaused(paused bool) {
+	p.mu.Lock()
+	changed := p.paused != paused
+	p.paused = paused
+	cancel := p.runCancel
+	p.mu.Unlock()
+	if !changed {
+		return
+	}
+	if paused {
+		log.Printf("player(gst): pausing playback (player process stopped, display released)")
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+	log.Printf("player(gst): resuming playback")
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+// waitUnpaused 等到不处于暂停；ctx 取消返回 false。
+func (p *GST) waitUnpaused(ctx context.Context) bool {
+	for {
+		p.mu.Lock()
+		paused := p.paused
+		p.mu.Unlock()
+		if !paused {
+			return true
+		}
+		select {
+		case <-p.wake:
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 // Stats 问播放进程实际用的解码器与输出分辨率；问不到时各项留空。
@@ -133,9 +178,29 @@ func (p *GST) send(proc *gstProc, s Scene) error {
 // supervise 拉起播放进程并在其退出后自动重启（进程级守护的最内层）。
 func (p *GST) supervise(ctx context.Context) {
 	for ctx.Err() == nil {
-		p.runOnce(ctx)
+		if !p.waitUnpaused(ctx) {
+			return
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		p.mu.Lock()
+		if p.paused { // 刚好在这期间被暂停
+			p.mu.Unlock()
+			cancel()
+			continue
+		}
+		p.runCancel = cancel
+		p.mu.Unlock()
+		p.runOnce(runCtx)
+		p.mu.Lock()
+		p.runCancel = nil
+		paused := p.paused
+		p.mu.Unlock()
+		cancel()
 		if ctx.Err() != nil {
 			return
+		}
+		if paused {
+			continue
 		}
 		log.Printf("player(gst): player process exited, restarting in %s", p.restartDelay)
 		select {
