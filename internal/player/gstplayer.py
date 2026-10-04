@@ -64,7 +64,7 @@ IMAGE_OUTPUT = ("videoconvert ! videocrop name=crop ! videoscale method=4-tap ! 
 #   - 线性格式：硬解出 NV12，软解（没有 cedrus 时）出 I420，图层都能直接显示。
 # 每个文件按顺序尝试，记住它第一个放得起来的方式；只有前一种放不出来时才往后退：
 VIDEO_CAPS = 'capsfilter caps="video/x-raw,format=(string){{NV12,I420}}"'
-VIDEO_DIRECT = "filesrc name=src ! qtdemux ! h264parse ! {decoder} ! " + VIDEO_CAPS
+VIDEO_DIRECT = "filesrc name=src ! qtdemux ! h264parse name=parse ! {decoder} name=dec ! " + VIDEO_CAPS
 VIDEO_OUTPUTS = (
     ("cover", VIDEO_DIRECT + " ! videocrop name=crop ! {sink}"),  # 裁剪标记 → 图层取源矩形，撑满媒体区
     ("fit", VIDEO_DIRECT + " ! {sink}"),                          # 不裁：按比例缩放居中，留黑边
@@ -392,6 +392,25 @@ def cover_crop(src_w, src_h, dst_w, dst_h):
     return 0, 0, cut // 2 & ~1, cut - (cut // 2 & ~1)
 
 
+def prime_decoder(pipe):
+    """让解码器先白解一次第一帧。
+
+    cedrus 每个解码会话解的第一帧会坏：只解出顶上一截，其余是没写过的缓冲（YUV 全 0，显示成绿色）；
+    后面的帧都参考它，绿斑要到下一个 I 帧才消失。会话里第二次起的解码都正常。所以把第一帧的码流
+    复制一份先送进解码器当牺牲品，它解出来的那一帧在解码器出口丢掉——两份时间戳相同，
+    解码器先输出的就是先解的那份。软解时多解一帧，无害。"""
+    def dup_first(pad, info):
+        pad.remove_probe(info.id)
+        pad.push(info.get_buffer().copy())
+        return Gst.PadProbeReturn.OK
+
+    def drop_first(pad, info):
+        pad.remove_probe(info.id)
+        return Gst.PadProbeReturn.DROP
+    pipe.get_by_name("parse").get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, dup_first)
+    pipe.get_by_name("dec").get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER, drop_first)
+
+
 class Player:
     def __init__(self):
         self.test = os.environ.get("DISPLAY_PLAYER_SINK") == "fakesink"
@@ -552,6 +571,7 @@ class Player:
             out = pipe = Gst.parse_launch(desc)
             pipe.get_by_name("src").set_property("location", item["path"])
             self._note_decoder(decoder)
+            prime_decoder(pipe)
         if d:
             GstVideo.VideoOverlay.set_render_rectangle(out.get_by_name("sink"), x, y, w, h)
         crop = out.get_by_name("crop")
