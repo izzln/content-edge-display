@@ -33,7 +33,7 @@ apt install -y poppler-utils
 #   server.json 里的 admin_token / enroll_token 已由 make 生成填好；
 #   若是从 GitHub Releases 下载的包，里面是占位值 change-me，服务端会拒绝启动，
 #   需在构建机上执行 make tokens 生成后替换。
-#   media/ data/ 会在首次启动时自动创建
+#   data/ 会在首次启动时自动创建
 
 useradd -r -s /usr/sbin/nologin display 2>/dev/null || true
 sudo -u display ffmpeg -version | head -1   # 必须以服务的运行用户能跑通（见下方说明）
@@ -49,9 +49,9 @@ systemctl daemon-reload && systemctl enable --now display-server
 /srv/display/
   display-server      二进制
   server.json         配置
-  media/<设备ID>/     该设备要播的图片与视频（后台上传，也可直接拷进来）
   fonts/              渲染用字体
-  data/               服务端状态：state.json、firmware/、rendered/、incoming/（待转码原片）、tls/（证书）
+  data/               服务端状态：state.json、cache.json、packages/（程序包）、rendered/、incoming/（待转码原片）、tls/（证书）
+  data/media/<设备ID>/  该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）
 ```
 
 > **"明明装了 ffmpeg，后台却说不可用"**：服务由 systemd 以 `display` 用户启动，PATH 只有

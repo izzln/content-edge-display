@@ -52,57 +52,44 @@ git tag v1.2.0 && git push origin v1.2.0     # 随后在 Releases 页面下载
 
 ## 2. 服务端部署（运营方本地服务器）
 
-推荐**自包含目录**布局：二进制、配置、内容、状态、字体全在一个目录下，整个目录拷走即可搬迁。
-
-```sh
-scp bin/display-server-*.tar.gz root@<服务器>:/root/
-ssh root@<服务器>
-tar xzf display-server-*.tar.gz && cd display-server-*/
-
-apt install -y fonts-noto-cjk          # 模板中文由服务端渲染，缺字体会变方框
-install -d /srv/display/fonts
-install -m 0755 display-server /srv/display/
-cp server.example.json /srv/display/server.json          # 按下表改写
-cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /srv/display/fonts/
-
-useradd -r -s /usr/sbin/nologin display 2>/dev/null || true
-chown -R display:display /srv/display
-install -m 0644 display-server.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now display-server
-```
+安装步骤（拷包、装字体/ffmpeg/poppler、systemd 单元）只写在服务端包里的
+[`deploy/server/INSTALL.md`](../deploy/server/INSTALL.md)，现场不用带着仓库也能照做。装好后的**自包含目录**布局：
+二进制、配置、内容、状态、字体全在一个目录下，整个目录拷走即可搬迁。
 
 ```
 /srv/display/
   display-server      二进制
   server.json         配置
-  media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
-  media/.store/       文件缓存区：处理好的内容各存一份，设备目录里是指向它的硬链接（见 5 节"文件缓存区"）
   fonts/              渲染用字体
-  data/               服务端状态：state.json、firmware/、rendered/、incoming/、tls/（首次启动自动创建）
+  data/               服务端状态（首次启动自动创建）：
+    state.json          设备、属性、模板、时段、程序包、更新目标
+    cache.json          文件缓存区索引（见 5.1"文件缓存区"）
+    media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
+    media/.store/       文件缓存区：处理好的内容各存一份，设备目录里是指向它的硬链接
+    packages/           上传的设备端程序包
+    rendered/ incoming/ 模板渲染结果、待转码原片
+    tls/                服务端证书与私钥
 ```
 
 **配置里的相对路径按 `server.json` 所在目录解析**，与进程工作目录无关——systemd 启动服务时
-工作目录是 `/`，若按工作目录解析，`"data"` 会悄悄落到 `/data`。要用 FHS 布局
-（二进制 `/usr/local/bin`、配置 `/etc`、数据 `/var/lib`）就在配置里写绝对路径，并相应改
-`display-server.service` 的 ExecStart。
+工作目录是 `/`，若按工作目录解析，`"data"` 会悄悄落到 `/data`。要用 FHS 布局就在配置里写绝对路径，
+并相应改 `display-server.service` 的 ExecStart。
 
-`server.json` 关键字段：
+`server.json` 字段（样例里只写了要改的几项，其余用默认值）：
 
 | 字段 | 说明 |
 |---|---|
-| `admin_token` | 管理后台口令，由 `make` 生成并已填好（见 2.1）。**留空则所有写接口一律拒绝**，避免管理面裸奔 |
-| `enroll_token` | 设备注册口令，由 `make` 生成并已填好；新设备装机时在一键装机命令里输入 |
-| `listen` | HTTPS 主端口，默认 `:9001`：管理后台、设备通信都走这里 |
-| `bootstrap_listen` | HTTP 装机端口，默认 `:9000`：**只**提供一键装机脚本和装机用程序包，其余请求一律 301 跳到 HTTPS |
-| `media_root` | 各设备播放内容的根目录，下面按设备 ID 分子目录；后台上传的图片/视频落在这里 |
-| `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
+| `admin_token` | 管理后台口令，由 `make` 生成并已填好（见 2.1）。必填：留空或是样例里的占位值时服务端拒绝启动 |
+| `enroll_token` | 设备注册口令，同上；新设备装机时在一键装机命令里输入 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
-| `timezone` | 时段计划与测试卡显示所用的时区（IANA 名称，如 `Asia/Shanghai`、`Asia/Tokyo`），留空取服务器系统时区。全部时区数据已内嵌，不依赖系统 tzdata。样例里是 `Asia/Shanghai`，在其他地区部署时记得改 |
-| `poll_interval_s` | 设备轮询间隔，默认 10 秒（1~300）。决定后台改动多快上屏、多快发现设备离线（约 3 个周期没来即离线，至少 30 秒）。**所有设备照这里的值执行**：随每个响应下发，改完重启服务端，设备下一次请求就跟上，不用逐台改 |
-| `heartbeat_interval_s` | 设备心跳间隔，默认 60 秒（10~3600）。心跳只上报温度、硬解、输出分辨率等健康数据，不影响在线判断；同样由设备照办 |
-| `ffmpeg_path` | 可选，ffmpeg 路径；留空在**服务进程的** PATH 里找（systemd 下只有 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`）。不可用时不能上传视频（见 5.1） |
-
-`media_root` 与 `data_dir` 及其子目录在服务端启动时自动创建，不用手工 mkdir。
+| `timezone` | 时段计划与测试卡所用的时区（IANA 名称，如 `Asia/Shanghai`），留空取服务器系统时区。时区数据已内嵌，不依赖系统 tzdata |
+| `listen` | HTTPS 主端口，默认 `:9001`：管理后台、设备通信都走这里 |
+| `bootstrap_listen` | HTTP 装机端口，默认 `:9000`：**只**提供一键装机脚本和程序包，其余请求一律 301 跳到 HTTPS |
+| `media_root` | 各设备播放内容的根目录，默认 `data/media` |
+| `data_dir` | 服务端状态，默认 `data` |
+| `poll_interval_s` | 设备轮询间隔，默认 10 秒（1~300）。决定后台改动多快上屏、多快发现设备离线（约 3 个周期没来即离线，至少 30 秒）。**所有设备照这里的值执行**：随每个响应下发，改完重启服务端即可，不用逐台改 |
+| `heartbeat_interval_s` | 设备心跳间隔，默认 60 秒（10~3600）。心跳只上报健康数据，不影响在线判断 |
+| `ffmpeg_path` | 可选，ffmpeg 路径；留空在**服务进程的** PATH 里找。不可用时不能上传视频（排查见 INSTALL.md） |
 
 图片停留时长不在这里配置——它是版式的一部分，写在模板里，在管理后台改。
 
@@ -171,10 +158,10 @@ make tokens     # 查看当前口令；文件不存在时生成
 | 位置 | 内容 | 管什么 |
 |---|---|---|
 | `/boot/armbianEnv.txt` 的 `extraargs` | `video=HDMI-A-1:1440x900@60 consoleblank=0` | 内核控制台的输出模式；`consoleblank=0` 禁用息屏 |
-| `/etc/display-agent/agent.json` | `"display_mode": "1440x900@60"` | 播放进程设置的显示模式 |
+| `/etc/display-agent/agent.json` | `"display_mode": "1440x900"` | 播放进程设置的显示模式 |
 
 只改第一处是不够的：**播放进程自己设置显示模式，不理会内核的 `video=` 参数**，不指定就用 EDID 的
-首选模式，于是控制台是 1440×900、一播放内容又变回 1080p。显示屏不提供 `display_mode` 时，
+首选模式，于是控制台是 1440×900、一播放内容又变回 1080p。显示屏不提供 `display_mode` 这个模式时，
 代理退回首选模式（日志里会提示）——设一个显示屏不认的模式只会黑屏。
 
 驱动板 EDID 里压根没有 1440×900 时，内核会忽略 `video=`，该模式也不会出现在可用列表里。
@@ -243,8 +230,8 @@ SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹
 
 | 项 | 怎么判断 | 不对时的现场表现 |
 |---|---|---|
-| 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 里有没有 1440×900 | 播放时退回首选模式，画面按比例缩放 |
-| 硬件解码条件 | cedrus 已加载、`gst-inspect-1.0 v4l2slh264dec` 存在、`kmssink` 与 Python 绑定可用、CMA 达到建议值（1GB 板 256MB、512MB 板 192MB，`install-agent.sh` 自动写入 `cma=`） | 视频退化成软解：发热、卡顿，严重时过热关机；CMA 太小时视频放不出来 |
+| 内核输出模式 | 已连接的显示接口（`/sys/class/drm/card*-*`）是否提供 `agent.json` 里的 `display_mode` | 播放时退回首选模式，画面按比例缩放 |
+| 硬件解码条件 | cedrus 已加载、播放进程用的 Python GStreamer 绑定里查得到 `v4l2slh264dec` 与 `kmssink`、CMA 达到建议值（1GB 板 256MB、512MB 板 192MB，`install-agent.sh` 自动写入 `cma=`） | 视频退化成软解：发热、卡顿，严重时过热关机；CMA 太小时视频放不出来 |
 | 实际播放状态 | 代理每次心跳写的 `/var/lib/display-agent/status.json`：解码器、输出分辨率 | — |
 | SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
 
@@ -260,7 +247,7 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 
 `v4l2slh264dec` 不出现时，按顺序查：`ls /dev/video* /dev/media*` 有没有 cedrus 的设备、
 `dmesg | grep -i cedrus` 有没有报错（如 CMA 内存不足）、`gstreamer1.0-plugins-bad` 装了没有；
-改完后 `rm -rf ~/.cache/gstreamer-1.0` 让 GStreamer 重新扫描插件。
+改完后 `rm -rf /root/.cache/gstreamer-1.0` 让 GStreamer 重新扫描插件。
 
 媒体区不出画面时看 `journalctl -u display-agent -n 80`：每一项第一次显示时记
 `showing <文件> (<类型>, <源尺寸 格式>, crop …)`；放不出来记 `cannot play <文件>: <原因> [<出错元素>: <细节>]`；
@@ -292,11 +279,10 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 
 代理首次启动按以下优先级确定编号，并持久化到 `/var/lib/display-agent/identity.json`：
 
-1. `agent.json` 里显式的 `device_id`（手工配置场景）；
-2. **主机名**——装机前 `hostnamectl set-hostname scr-0017`（或烧录时在 Armbian Imager 的"自定义设置"里填 hostname）即为设备编号；
-3. 主机名是默认值（`orangepione` 等）时，取 SoC 序列号后 8 位 → `opi-1a2b3c4d`（再退回 eth0 MAC）。
+1. **主机名**——装机前 `hostnamectl set-hostname scr-0017`（或烧录时在 Armbian Imager 的"自定义设置"里填 hostname）即为设备编号；
+2. 主机名是公版默认值（`orangepione` 等）时，取 SoC 序列号后 8 位 → `opi-1a2b3c4d`（再退回网卡 MAC）。
 
-> 不设主机名也没关系：规则 3 保证编号唯一，在管理后台把名称改成"3 楼大堂"即可。
+> 不设主机名也没关系：规则 2 保证编号唯一，在后台给设备加个属性（如 `location=3楼大堂`）便于辨认。
 
 密钥在首启随机生成，只存在于设备与服务端两处；`enroll_token` 仅用于首次注册。
 同 ID 不同密钥的注册会被拒绝（409），防止冒名顶替。
@@ -347,8 +333,7 @@ agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                       
 ```
 
 代理已做的防护：身份文件写入后 fsync（防断电丢失）；文件损坏时另存为 `identity.json.bad-<时间>`
-留作证据而不是悄悄覆盖；同一缓存目录只允许一个代理进程（服务在跑时再手工启动一个会直接报错退出）；
-`agent.json` 里的相对路径按配置文件所在目录解析（不会因为启动方式不同而用到两份身份文件）。
+留作证据而不是悄悄覆盖；同一缓存目录只允许一个代理进程（服务在跑时再手工启动一个会直接报错退出）。
 
 ### 4.2 制作母镜像（可选）
 
@@ -356,8 +341,7 @@ agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                       
 
 ```sh
 systemctl stop display-agent
-rm -f /var/lib/display-agent/identity.json /var/lib/display-agent/current.json
-rm -rf /var/lib/display-agent/media/* /var/lib/display-agent/status.json /var/lib/display-agent/gstplayer.py
+rm -rf /var/lib/display-agent/*                                  # 身份、缓存内容、记住的服务端地址等，首启重建
 rm -f /usr/local/lib/display-agent/pending-verify
 rm -f /etc/ssh/ssh_host_*                                        # 首启重新生成
 journalctl --rotate && journalctl --vacuum-time=1s
@@ -448,23 +432,19 @@ PDF 同样在后台逐页渲染，列表里显示"转换中 3/12 页"；有密�
 upload started: device scr-0017, promo.mov (about 186.4MB)
 upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for processing as promo.mp4
 transcode started: device scr-0017, promo.mp4 (source 186.4MB, 62s)
-transcoding: device scr-0017, promo.mp4 37% (30s elapsed)
-transcoding: device scr-0017, promo.mp4 74% (1m0s elapsed)
+transcoding: device scr-0017, promo.mp4 37% / 23s done (30s elapsed)
+transcoding: device scr-0017, promo.mp4 74% / 46s done (1m0s elapsed)
 transcode done: device scr-0017, promo.mp4 (186.4MB -> 19.2MB in 1m22s), added to playlist
-admin PUT /devices/scr-0017/media -> 200 (2ms)
+admin PUT /devices/scr-0017/media -> 204 (2ms)
 new content pushed: device scr-0017, version 3f9a…, 4 file(s) + template overlay
 device scr-0018 online (192.168.1.58, agent 1.3.0)
 ```
 
 拒收（文件损坏、超限、ffmpeg 不可用）与转码失败也都会写明原因。
 
-服务端需要装 `ffmpeg`（`apt install ffmpeg`，或在 `server.json` 里用 `ffmpeg_path` 写绝对路径），
-并且要**以服务的运行用户能跑通**：`sudo -u display ffmpeg -version`。服务由 systemd 以 `display`
-用户、精简 PATH 启动，snap 版（`/snap/bin`，系统用户没有家目录会运行失败）、装在 `/root` 或家目录下、
-装在 `/opt` 等位置的 ffmpeg 在你的 shell 里能用，服务却用不了。不可用时后台顶部与
-`journalctl -u display-server` 会写明是哪一种原因；装好后重启服务端（`systemctl restart display-server`）生效。
-**没装时不能上传视频**（图片照常），管理后台顶部会醒目提示。未转码的原片码率控制不住，
-下发到设备就是过热隐患，所以宁可当场拒收。
+**ffmpeg 不可用时不能上传视频**（poppler 不可用时不能上传 PDF，图片照常），管理后台顶部会醒目提示原因。
+未转码的原片码率控制不住，下发到设备就是过热隐患，所以宁可当场拒收。"明明装了却说不可用"的排查见
+`deploy/server/INSTALL.md`（服务以 `display` 用户、精简 PATH 运行）；装好后重启服务端生效。
 
 **模板**：至多有一个"播放内容"区域（设备只有一个视频图层）。
 只剩一个模板时不能删除——系统始终需要一个全局默认模板；删掉当前的全局模板时，
@@ -530,11 +510,12 @@ check-display.sh        -> current/check-display.sh
 
 | 路径 | 内容 | 要不要保留 |
 |---|---|---|
-| `data/state.json` | 设备（含自注册设备的密钥）、属性、模板、时段、全局设置、固件元数据、更新目标 | **必须** |
-| `data/firmware/` | 上传的设备端程序包 | 建议（否则待下发的更新目标会失效，新设备也没有包可装） |
+| `data/state.json` | 设备（含自注册设备的密钥）、属性、模板、时段、全局设置、程序包元数据、更新目标 | **必须** |
 | `data/tls/` | 服务端证书与私钥 | **必须**。丢了重新生成指纹就变了，已装设备全部拒绝连接 |
+| `data/media/` | 各设备的播放内容与文件缓存区 | **必须** |
+| `data/cache.json` | 文件缓存区索引 | 建议（缺了缓存区里的内容无法复用，会重新转码） |
+| `data/packages/` | 上传的设备端程序包 | 建议（否则待下发的更新目标会失效，新设备也没有包可装） |
 | `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
-| `media/` | 各设备的播放内容 | **必须** |
 | `server.json` | 配置（含两个口令） | **必须**。另外把 `.secrets/tokens.env` 也备份到构建机之外 |
 
 ### 6.1 原地升级
@@ -545,8 +526,7 @@ cp display-server /srv/display/display-server     # 只换二进制
 systemctl start display-server
 ```
 
-`state.json` 的字段是增量演进的，新版本读旧文件时缺失字段取零值，不需要迁移脚本。
-保险起见升级前先 `cp -a /srv/display/data /srv/display/data.bak`。
+升级前先 `cp -a /srv/display/data /srv/display/data.bak`（硬链接会被 `cp -a` 保留）。
 
 ### 6.2 换一台服务器
 
@@ -571,7 +551,7 @@ tar czf display-backup.tar.gz -C /srv display
 tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/data/rendered'
 ```
 
-排除 `rendered/` 可以显著减小体积，它会按需重新生成。`media/` 里的设备文件与 `media/.store/` 是硬链接，
+排除 `rendered/` 可以显著减小体积，它会按需重新生成。`data/media/` 里的设备文件与 `data/media/.store/` 是硬链接，
 `tar` 会原样保留（只存一份）；改用 rsync 时要加 `-H`，否则恢复后每份内容会变成两份。
 
 ## 7. 验机清单（每台设备交付前）
@@ -619,7 +599,7 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 | 情况 | 不处理会怎样 | 现在的做法 |
 |---|---|---|
 | 设备没有 RTC、连不上外网 NTP，时钟偏了 | 签名请求全部 401，设备收不到任何更新 | 设备按服务端响应里的时间签名，并把自己的系统时钟校到服务端时间 |
-| 局域网 DNS 是路由器转发到运营商，外网一断域名就解析不了 | 设备找不到服务端 | 设备记住上次解析成功的地址（`cache_dir/server-addr`），解析失败时用它 |
+| 局域网 DNS 是路由器转发到运营商，外网一断域名就解析不了 | 设备找不到服务端 | 设备记住上次实际连上的地址（`/var/lib/display-agent/server-addr`），解析失败时用它 |
 | 服务端暂时连不上（服务器关机、交换机故障） | 注册重试的等待超过看门狗 90 秒，代理连同播放进程被杀，屏幕每隔一分半黑一下 | 等待期间持续喂看门狗；屏幕一直播放本地缓存 |
 | 设备开机时网络还没就绪（网线没插、DHCP 拿不到地址） | 服务要等 network-online 超时（最长约 2 分钟），这期间黑屏 | 不再等网络，开机立即播放本地缓存，网络就绪后再注册、拉清单 |
 | 服务端卡住或网络时断时续 | 一个请求能挂 10 分钟，看门狗把代理杀掉 | 清单/心跳/注册 30 秒超时；大文件下载按"60 秒没收到数据"判定停滞，下次从断点续传 |
@@ -644,9 +624,9 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 ## 10. 当前已知简化
 
 - 图片展示时长写在**模板**里，同一份清单里的图片共用一个时长；单张静态图一直显示，不会周期性重载；
-- 模板里的"播放内容"区域靠两个硬件图层叠加（见架构文档 5.2）。本地用真实 GStreamer 验证了排期、
+- 模板里的"播放内容"区域靠两个硬件图层叠加（见架构文档 4.2）。本地用真实 GStreamer 验证了排期、
   淡入淡出与解码器上报（fakesink 代替显示、软解代替 cedrus），**样机上必须确认：图层叠加与透明洞、
   cedrus 硬解（后台显示"硬解 v4l2slh264dec"）、温度，再对整批设备下发 OTA**；
 - 清单更新时先把当前内容淡出再换（"播完当前项再切"留待优化）；
-- SoC 硬件看门狗（`/dev/watchdog`）与只读根文件系统在 M4 实现；当前已有 systemd 软看门狗
-  （进程假死 90s 内重启），以及播放进程守护（退出或 10 秒 ping 不回就重启，并重新下发当前画面）。
+- SoC 硬件看门狗（`/dev/watchdog`）、只读根文件系统、离线告警尚未实现；当前已有 systemd 软看门狗
+  （代理假死 90 秒内重启）与播放进程守护（见架构文档第 6 节）。
