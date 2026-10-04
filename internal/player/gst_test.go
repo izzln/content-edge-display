@@ -276,6 +276,14 @@ assert g.pick_planes(untyped) == (35, 33), g.pick_planes(untyped)
 assert g.pick_planes([]) == (-1, -1)
 assert g.pick_planes(de2, crtc_bit=2) == (41, -1)  # 只看所用 CRTC 上的图层
 
+# 视频 caps：只放线性格式的系统内存帧——分块格式（NV12_32L32）会被解码器优先选中而显示不了，DMA_DRM 协商不过
+from gi.repository import Gst
+Gst.init(None)
+vcaps = Gst.Caps.from_string(g.VIDEO_CAPS.split('"')[1].replace("{{", "{").replace("}}", "}"))
+assert vcaps.can_intersect(Gst.Caps.from_string("video/x-raw,format=NV12"))
+assert not vcaps.can_intersect(Gst.Caps.from_string("video/x-raw,format=NV12_32L32"))
+assert not vcaps.can_intersect(Gst.Caps.from_string("video/x-raw(memory:DMABuf),format=DMA_DRM"))
+
 # 上层画面：只在洞里填半透明黑（BGRA 预乘即 0,0,0,a），洞外的叠加图原样不动；行宽可能带对齐填充
 base = bytes([9, 9, 9, 255]) * 8  # 4×2
 hole = (2, 0, 2, 2)

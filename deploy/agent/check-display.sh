@@ -57,16 +57,17 @@ fi
 if command -v gst-inspect-1.0 >/dev/null 2>&1 && ! gst-inspect-1.0 kmssink >/dev/null 2>&1; then
 	fail "kmssink" "不可用（apt install gstreamer1.0-plugins-bad）"
 fi
-# cedrus 的解码缓冲（1440×900 一帧约 2MB，要二十来帧）和显示用的帧缓冲都从 CMA（连续物理内存）里分，
-# 不够时视频直接放不出来。
+# cedrus 的解码缓冲（1440×900 一帧约 2MB，要二十来帧）、模板叠加层的两块帧缓冲（各约 5MB）、控制台帧缓冲
+# 都从 CMA（连续物理内存）里分；实测 128MB 在播放时只剩约 5MB，不够时视频直接放不出来。
 CMA_T=$(awk '/^CmaTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 CMA_F=$(awk '/^CmaFree:/ {print int($2 / 1024)}' /proc/meminfo)
 if [ -z "$CMA_T" ]; then
 	say "CMA" "读不到（/proc/meminfo 里没有 CmaTotal）"
-elif [ "$CMA_T" -lt 96 ]; then
-	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 太小，硬解视频可能分不到缓冲"
-	echo "               编辑 /boot/armbianEnv.txt，在 extraargs 里加上 cma=128M"
+elif [ "$CMA_T" -lt 160 ]; then
+	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 偏小，播放视频时余量只剩几 MB，换片时可能分不到缓冲"
+	echo "               编辑 /boot/armbianEnv.txt，在 extraargs 里加上 cma=192M"
 	echo "               （已有 extraargs 就用空格追加在后面），然后 reboot。"
+	echo "               CMA 空闲时仍可被普通内存借用，调大不浪费内存。"
 else
 	say "CMA" "共 ${CMA_T}MB，空闲 ${CMA_F}MB ✓"
 fi
