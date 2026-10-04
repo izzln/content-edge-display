@@ -11,10 +11,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
@@ -32,8 +33,8 @@ const (
 	maxVideoUploadBytes = 500 << 20
 )
 
-// mediaNamePattern 限制上传文件名（后缀另行按类型校验）。
-var mediaNamePattern = regexp.MustCompile(`^[\p{L}\p{N}_ .-]{1,128}$`)
+// maxMediaStem 是上传文件主名（不含后缀）的最大字符数。
+const maxMediaStem = 100
 
 // MediaFile 是设备播放列表里的一项。转码中/转码失败的视频也会列出来，
 // 让运营方看到进度和失败原因；它们排在已就绪文件之后，不参与排序与播放。
@@ -224,9 +225,7 @@ func reject(ui, log string) *rejectReason { return &rejectReason{ui: ui, log: lo
 //   - 视频：原片放进暂存区排队转码，产物名统一为 .mp4。没有 ffmpeg 就不收视频——
 //     未转码的原片码率过高，会让设备过热关机，宁可当场拒绝。
 func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name string) (string, bool, *rejectReason) {
-	if !mediaNamePattern.MatchString(name) {
-		return "", false, reject("文件名非法（仅支持字母、数字、空格和 . _ -，最长 128 字符）", "invalid file name")
-	}
+	name = cleanMediaName(name)
 	isVideo := false
 	switch manifest.TypeOf(name) {
 	case "image":
@@ -294,6 +293,43 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name st
 		return fail(reject(err.Error(), err.Error()))
 	}
 	return name, false, nil
+}
+
+// cleanMediaName 把浏览器给的原文件名整理成能安全落盘、放进 URL 的名字——整理而不是拒收：
+// 截图、网页下载的文件名里常有 | : / 和各种特殊空格（macOS 截图在 "PM" 前用的是窄不换行空格）。
+// 字母（含中文）、数字、组合附标和 _ . - 原样保留；各种空白变成普通空格并合并；其余字符换成 _；
+// 去掉开头的点（否则成了隐藏文件）与首尾空格；主名截到 maxMediaStem 个字符，后缀保留。
+func cleanMediaName(name string) string {
+	name = path.Base(strings.ReplaceAll(name, `\`, "/"))
+	clean := func(s string) string {
+		var b strings.Builder
+		space := false
+		for _, r := range s {
+			switch {
+			case unicode.IsSpace(r):
+				if !space {
+					b.WriteByte(' ')
+				}
+				space = true
+				continue
+			case unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || strings.ContainsRune("_.-", r):
+				b.WriteRune(r)
+			default:
+				b.WriteByte('_')
+			}
+			space = false
+		}
+		return b.String()
+	}
+	ext := filepath.Ext(name)
+	stem := strings.Trim(clean(strings.TrimSuffix(name, ext)), " .")
+	if r := []rune(stem); len(r) > maxMediaStem {
+		stem = strings.TrimRight(string(r[:maxMediaStem]), " .")
+	}
+	if stem == "" {
+		stem = "file"
+	}
+	return stem + clean(ext)
 }
 
 // claimMediaName 为一次上传选定不重名的文件名，并在上传期间占住它。

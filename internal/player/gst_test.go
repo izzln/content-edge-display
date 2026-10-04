@@ -431,6 +431,13 @@ func TestPlayerScriptSequencing(t *testing.T) {
 	if len(played()) != n {
 		t.Fatalf("单张图片不应反复切换：%v", played()[n:])
 	}
+
+	// 视频应当用首选的输出方式放起来，而不是靠退路（退路会掩盖管线描述写错之类的问题）
+	cmd.Process.Kill()
+	cmd.Wait()
+	if video != "" && !strings.Contains(stderr.String(), "video output: cover") {
+		t.Fatalf("视频没有用 cover 方式播放：\n%s", stderr.String())
+	}
 }
 
 // cover 裁剪要真的在管线里算出来并设上（gst-python 1.26 改了 caps 结构的取法，曾在这里崩过）。
