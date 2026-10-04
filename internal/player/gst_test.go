@@ -236,7 +236,7 @@ func gstPython(t *testing.T) string {
 	t.Helper()
 	check := `import gi; gi.require_version("Gst","1.0"); gi.require_version("GstVideo","1.0")
 from gi.repository import Gst, GstVideo; Gst.init(None)
-assert all(Gst.ElementFactory.find(n) for n in ("playbin","videocrop","videoscale","videoconvert","fakesink","jpegdec"))`
+assert all(Gst.ElementFactory.find(n) for n in ("playbin","videocrop","videoscale","videoconvert","fakesink","jpegdec","qtdemux","h264parse","avdec_h264"))`
 	for _, py := range []string{"python3", "python3.13", "python3.12", "python3.11", "/usr/bin/python3"} {
 		if exec.Command(py, "-c", check).Run() == nil {
 			return py
@@ -443,7 +443,7 @@ func TestPlayerScriptSequencing(t *testing.T) {
 	// 视频应当用首选的输出方式放起来，而不是靠退路（退路会掩盖管线描述写错之类的问题）
 	cmd.Process.Kill()
 	cmd.Wait()
-	if video != "" && !strings.Contains(stderr.String(), "video output: cover") {
+	if video != "" && !strings.Contains(stderr.String(), "via cover") {
 		t.Fatalf("视频没有用 cover 方式播放：\n%s", stderr.String())
 	}
 }

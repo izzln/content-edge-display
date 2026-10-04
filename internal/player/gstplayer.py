@@ -54,17 +54,22 @@ FOURCC_ARGB8888 = 0x34325241
 # 图片：先裁成媒体区的宽高比（videocrop，属性在拿到图片尺寸后设），再缩放到媒体区大小，转成图层吃的格式。
 IMAGE_OUTPUT = ("videoconvert ! videocrop name=crop ! videoscale method=4-tap ! "
                 "video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1 ! videoconvert ! {sink}")
-# 视频：按顺序尝试，第一个真正放起来的就一直用（本进程内）。只有前一种在这台设备上放不出来时才往后退。
-# 开头的 capsfilter 限定解码器输出两件事：
-#   - 系统内存 caps：不加的话 v4l2slh264dec 与 kmssink 会协商成 DMA_DRM caps，而这条路上的分配查询
-#     拿不到 VideoMeta，解码器直接判协商失败。限定之后帧仍是解码器自己的 dmabuf，kmssink 照样直接导入。
-#   - 线性格式（NV12；软解时是 I420）：kmssink 也声明能吃 Allwinner 分块格式 NV12_32L32，解码器会优先选它，
-#     结果显示不了，只能退到软件转格式——逐帧解分块，卡顿，而且没有裁剪。
+# 视频：解封装 → 解码 → 显示写死成一条管线（服务端已把视频统一转成 MP4/H.264），不走 playbin 的自动连接。
+# 原因在格式协商：解码器第一次协商时，playbin 还没把它连到我们的输出上，由 playbin 代答"下游吃什么"，
+# 而 playbin 会把解码器自己能出的全部格式也附在答案末尾；v4l2slh264dec 再按自己的偏好排序，
+# 选中 Allwinner 分块格式 NV12_32L32——下游其实显示不了，只能退到逐帧软件解分块（卡顿）。
+# 写死管线后解码器从一开始就连着下面的 capsfilter，只能在其中选：
+#   - 系统内存 caps：放开的话会协商成 DMA_DRM caps，这条路上的分配查询拿不到 VideoMeta，解码器判协商失败；
+#     限定之后帧仍是解码器自己的 dmabuf，kmssink 照样直接导入显示，不拷贝。
+#   - 线性格式：硬解出 NV12，软解（没有 cedrus 时）出 I420，图层都能直接显示。
+# 每个文件按顺序尝试，记住它第一个放得起来的方式；只有前一种放不出来时才往后退：
 VIDEO_CAPS = 'capsfilter caps="video/x-raw,format=(string){{NV12,I420}}"'
+VIDEO_DIRECT = "filesrc name=src ! qtdemux ! h264parse ! {decoder} ! " + VIDEO_CAPS
 VIDEO_OUTPUTS = (
-    ("cover", VIDEO_CAPS + " ! videocrop name=crop ! {sink}"),  # 裁剪标记 → 图层取源矩形，撑满媒体区
-    ("fit", VIDEO_CAPS + " ! {sink}"),                          # 不裁：按比例缩放居中，留黑边
-    ("convert", "capsfilter caps=video/x-raw ! videoconvert ! videocrop name=crop ! {sink}"),  # 任意格式软件转换后再裁
+    ("cover", VIDEO_DIRECT + " ! videocrop name=crop ! {sink}"),  # 裁剪标记 → 图层取源矩形，撑满媒体区
+    ("fit", VIDEO_DIRECT + " ! {sink}"),                          # 不裁：按比例缩放居中，留黑边
+    # 兜底：playbin 自动连接，什么封装、编码都能放（如运营方直接拷进目录、没转码的文件），软件转格式后再裁
+    ("playbin", "capsfilter caps=video/x-raw ! videoconvert ! videocrop name=crop ! {sink}"),
 )
 PLAYBIN_VIDEO, PLAYBIN_NATIVE_VIDEO = 0x1, 0x40  # 只要视频（屏幕一律静音，不开声卡）；不让 playbin 自己插转换
 
@@ -407,8 +412,8 @@ class Player:
         self.fading = 0           # 进行中的淡入淡出（GLib 定时器 id）
         self.alpha = 255          # 洞里黑色的不透明度：255 全黑，0 透出播放内容
         self.decoder = ""         # 最近一次视频用的解码器
-        self.video_out = 0        # 视频输出方式（VIDEO_OUTPUTS 的下标）
-        self.video_ok = False     # 当前输出方式已经放起来过视频
+        self.out_mode = None          # 当前视频项用的输出方式（VIDEO_OUTPUTS 的下标）
+        self.video_mode = {}      # 视频文件 → 它放得起来的输出方式
 
     # ---- 请求 ----
 
@@ -467,6 +472,8 @@ class Player:
         def switch():
             self.scene, self.base, self.hole, self.items = scene, base, hole, items
             self.shown = set()
+            paths = {it["path"] for it in items}
+            self.video_mode = {p: m for p, m in self.video_mode.items() if p in paths}
             self._stop_item()
             self.alpha = 255
             self._show()
@@ -525,26 +532,36 @@ class Player:
             sink = "fakesink name=sink sync=true"
         else:
             sink = "kmssink name=sink fd=%d connector-id=%d plane-id=%d skip-vsync=true" % (d.fd, d.conn, d.video)
+        mode = None
         if item.get("type") == "video":
-            desc = VIDEO_OUTPUTS[self.video_out][1].format(sink=sink)
+            mode = self.video_mode.get(item["path"], 0)
+            name, desc = VIDEO_OUTPUTS[mode]
+            decoder = "v4l2slh264dec" if Gst.ElementFactory.find("v4l2slh264dec") else "avdec_h264"
+            desc = desc.format(decoder=decoder, sink=sink)
         else:
-            desc = IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
-        bin_ = Gst.parse_bin_from_description(desc, True)
+            name, desc = "playbin", IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
+
+        if name == "playbin":
+            out = Gst.parse_bin_from_description(desc, True)
+            pipe = Gst.ElementFactory.make("playbin", None)
+            pipe.set_property("uri", Gst.filename_to_uri(item["path"]))
+            pipe.set_property("video-sink", out)
+            pipe.set_property("flags", PLAYBIN_VIDEO | PLAYBIN_NATIVE_VIDEO)
+            pipe.connect("deep-element-added", self._on_element)
+        else:
+            out = pipe = Gst.parse_launch(desc)
+            pipe.get_by_name("src").set_property("location", item["path"])
+            self._note_decoder(decoder)
         if d:
-            GstVideo.VideoOverlay.set_render_rectangle(bin_.get_by_name("sink"), x, y, w, h)
-        crop = bin_.get_by_name("crop")
+            GstVideo.VideoOverlay.set_render_rectangle(out.get_by_name("sink"), x, y, w, h)
+        crop = out.get_by_name("crop")
         if crop:
             crop.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._on_caps, (crop, w, h))
 
-        pipe = Gst.ElementFactory.make("playbin", None)
-        pipe.set_property("uri", Gst.filename_to_uri(item["path"]))
-        pipe.set_property("video-sink", bin_)
-        pipe.set_property("flags", PLAYBIN_VIDEO | PLAYBIN_NATIVE_VIDEO)
-        pipe.connect("deep-element-added", self._on_element)
         bus = pipe.get_bus()
         bus.add_signal_watch()
         self.bus_handler = bus.connect("message", lambda _bus, msg: self._on_item_message(pipe, msg))
-        self.pipe, self.started, self.source = pipe, False, ""
+        self.pipe, self.started, self.source, self.out_mode = pipe, False, "", mode
         if pipe.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._item_failed("cannot start pipeline")
 
@@ -573,10 +590,10 @@ class Player:
     def _on_element(self, _bin, _sub, element):
         f = element.get_factory()
         if f and "Decoder/Video" in (f.get_metadata("klass") or ""):
-            name = f.get_name()
-            if name != self.decoder:
-                log("video decoder: %s" % name)
-            self.decoder = name
+            self._note_decoder(f.get_name())
+
+    def _note_decoder(self, name):
+        self.decoder = name  # 写进 showing 日志，也供 stats 上报硬解/软解
 
     def _on_item_message(self, pipe, msg):
         if pipe is not self.pipe:
@@ -600,28 +617,30 @@ class Player:
         return True
 
     def _video_fallback(self, detail):
-        """视频放不出来、而当前输出方式还没在这台设备上成功过时，换下一种方式重放同一项。"""
-        if self.items[self.index].get("type") != "video" or self.video_ok:
+        """视频放不出来时，换下一种输出方式重放同一项；都试过了就返回 False（按坏文件跳过）。"""
+        item = self.items[self.index]
+        if item.get("type") != "video" or self.started:
             return False
-        name = VIDEO_OUTPUTS[self.video_out][0]
-        if self.video_out + 1 >= len(VIDEO_OUTPUTS):
-            self.video_out = 0  # 每种都不行：多半是文件本身的问题，下一个视频从头试
+        if self.out_mode + 1 >= len(VIDEO_OUTPUTS):
+            self.video_mode.pop(item["path"], None)  # 下次从头再试
             return False
-        self.video_out += 1
-        log("video output '%s' failed: %s; retrying with '%s'" % (name, detail, VIDEO_OUTPUTS[self.video_out][0]))
+        self.video_mode[item["path"]] = self.out_mode + 1
+        log("video output '%s' failed for %s: %s; retrying with '%s'" % (
+            VIDEO_OUTPUTS[self.out_mode][0], os.path.basename(item["path"]), detail, VIDEO_OUTPUTS[self.out_mode + 1][0]))
         self._stop_item()
         self._play(self.index)
         return True
 
     def _on_started(self):
         item = self.items[self.index]
-        if item.get("type") == "video" and not self.video_ok:
-            self.video_ok = True
-            log("video output: %s" % VIDEO_OUTPUTS[self.video_out][0])
         if self.index not in self.shown:
             self.shown.add(self.index)
-            log("showing %s (%s%s)" % (os.path.basename(item["path"]), item.get("type"),
-                                      ", " + self.source if self.source else ""))
+            how = ""
+            if item.get("type") == "video":
+                self.video_mode[item["path"]] = self.out_mode
+                how = ", %s via %s" % (self.decoder, VIDEO_OUTPUTS[self.out_mode][0])
+            log("showing %s (%s%s%s)" % (os.path.basename(item["path"]), item.get("type"), how,
+                                        ", " + self.source if self.source else ""))
         emit({"event": "playing", "index": self.index, "path": item["path"]})
         self._fade_to(0)
         if len(self.items) == 1 and item.get("type") != "video":
