@@ -100,7 +100,7 @@
   <button class="tab" data-tab="templates">模板与时段</button>
   <button class="tab" data-tab="firmware">程序更新</button>
   <button class="tab" data-tab="storage">存储</button>
-  <span class="right">操作生效延迟 ≈ 设备轮询间隔 <button onclick="setToken()">设置Token</button></span>
+  <span class="right"><button onclick="setToken()">设置Token</button></span>
 </header>
 <main>
   <div id="tab-devices">
@@ -865,7 +865,7 @@ async function plRemove(key) {
     renderPlaylist(); pumpUploads();
     return;
   }
-  const what = it.state === "ready" ? `删除 ${it.name}？文件会从服务器上删除，设备下次刷新后不再播放。`
+  const what = it.state === "ready" ? `删除 ${it.name}？`
     : it.state === "failed" ? null : `取消 ${it.name} 的转码？`;
   if (what && !confirm(what)) return;
   const list = await api(`/api/v1/admin/devices/${encodeURIComponent(plDev)}/media/${encodeURIComponent(it.name)}`, { method: "DELETE" });
