@@ -2,111 +2,303 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="data:,">
 <title>显示屏管理后台</title>
 <style>
-  :root { --line:#ddd; --muted:#888; --accent:#1a6ee0; --bad:#d33; --ok:#2a2; --warn:#c60; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#f5f6f8; color:#222; }
-  header { background:#fff; border-bottom:1px solid var(--line); padding:10px 20px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0 16px 0 0; }
-  header button.tab { border:none; background:none; padding:6px 10px; cursor:pointer; font-size:14px; border-bottom:2px solid transparent; }
-  header button.tab.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
-  header .right { margin-left:auto; color:var(--muted); font-size:12px; }
-  main { padding:20px; max-width:1200px; margin:0 auto; }
-  h2.sec { font-size:15px; margin:24px 0 8px; }
-  table { width:100%; border-collapse:collapse; background:#fff; }
-  th,td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
-  th { background:#fafafa; font-weight:600; white-space:nowrap; }
-  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
-  .on { background:var(--ok); } .off { background:var(--bad); }
-  .muted { color:var(--muted); font-size:12px; }
-  .warn { color:var(--warn); font-weight:600; }
-  button.link { background:none; border:none; color:var(--accent); padding:0 4px; font-size:inherit; cursor:pointer; }
-  .okc { color:var(--ok); }
-  button { padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; margin:1px 4px 1px 0; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.danger { color:var(--bad); border-color:var(--bad); }
-  button.sm { padding:1px 6px; font-size:12px; }
-  input[type=text], input[type=time], input[type=datetime-local], select, textarea { padding:6px 8px; border:1px solid var(--line); border-radius:4px; font:inherit; }
-  textarea { width:100%; min-height:220px; font-family:ui-monospace,monospace; font-size:12px; }
-  .row { display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap; }
-  .bar { background:#fff; border:1px solid var(--line); padding:10px 12px; margin-bottom:12px; }
-  #overlay { position:fixed; inset:0; background:rgba(0,0,0,.4); display:none; align-items:flex-start; justify-content:center; padding:40px 16px; overflow:auto; }
-  #overlay.show { display:flex; }
-  #modal { background:#fff; border-radius:8px; padding:20px; width:100%; max-width:680px; }
-  #modal h2 { margin:0 0 14px; font-size:16px; }
-  #modal img.preview { max-width:100%; border:1px solid var(--line); margin-top:8px; }
-  #modal .actions { margin-top:16px; text-align:right; }
-  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:#fff; padding:8px 16px; border-radius:6px; opacity:0; transition:opacity .3s; pointer-events:none; z-index:10; }
-  .toast.show { opacity:1; }
-  .badge { display:inline-block; background:#eef; border-radius:4px; padding:1px 6px; font-size:12px; margin:1px 2px; }
-  .badge.global { background:#dfd; }
-  .days label { margin-right:6px; font-size:12px; white-space:nowrap; }
-  button[disabled] { opacity:.45; cursor:not-allowed; }
-  .pl-drop { display:block; border:2px dashed var(--line); border-radius:8px; padding:14px; text-align:center; cursor:pointer; background:#fcfcfd; transition:border-color .15s, background .15s; }
-  .pl-drop:hover, .pl-drop.hover { border-color:var(--accent); background:#eef5ff; }
+  /* 视觉参照 iOS / macOS 系统控件：系统字体、系统色、分组列表、分段控件、开关、sheet。支持深色模式与触摸。 */
+  :root {
+    color-scheme: light dark;
+    --bg:#f2f2f7; --card:#fff; --card2:#f2f2f7; --elev:#fff;
+    --label:#000; --label2:rgba(60,60,67,.6); --label3:rgba(60,60,67,.3);
+    --sep:rgba(60,60,67,.18); --fill:rgba(120,120,128,.12); --fill2:rgba(120,120,128,.08);
+    --blue:#007aff; --red:#ff3b30; --green:#34c759; --orange:#ff9500;
+    --blue-t:rgba(0,122,255,.12); --red-t:rgba(255,59,48,.12); --green-t:rgba(52,199,89,.15); --orange-t:rgba(255,149,0,.15);
+    --blue-soft:#99c7ff;
+    --bar:rgba(249,249,249,.82); --scrim:rgba(0,0,0,.32); --shadow:0 10px 40px rgba(0,0,0,.18);
+    --r:12px; --ctl:32px;
+    /* 旧名字：JS 里内联样式还在用 */
+    --line:var(--sep); --muted:var(--label2); --accent:var(--blue); --bad:var(--red); --ok:var(--green); --warn:var(--orange);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#000; --card:#1c1c1e; --card2:#2c2c2e; --elev:#2c2c2e;
+      --label:#fff; --label2:rgba(235,235,245,.6); --label3:rgba(235,235,245,.3);
+      --sep:rgba(84,84,88,.55); --fill:rgba(118,118,128,.24); --fill2:rgba(118,118,128,.16);
+      --blue:#0a84ff; --red:#ff453a; --green:#30d158; --orange:#ff9f0a;
+      --blue-t:rgba(10,132,255,.2); --red-t:rgba(255,69,58,.2); --green-t:rgba(48,209,88,.2); --orange-t:rgba(255,159,10,.2);
+      --blue-soft:#3a6ea8;
+      --bar:rgba(22,22,24,.8); --scrim:rgba(0,0,0,.5); --shadow:0 10px 40px rgba(0,0,0,.6);
+    }
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue","Microsoft YaHei",system-ui,sans-serif;
+    background:var(--bg); color:var(--label); -webkit-font-smoothing:antialiased; }
+  a { color:var(--blue); }
+  code { font:12px ui-monospace,"SF Mono",Menlo,monospace; background:var(--fill2); padding:1px 4px; border-radius:4px; overflow-wrap:anywhere; }
+  #tlsFP { word-break:break-all; }
+  b { font-weight:600; }
+
+  /* 导航栏：半透明 + 模糊，标签用分段控件 */
+  header { position:sticky; top:0; z-index:20; background:var(--bar); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
+    border-bottom:.5px solid var(--sep); padding:10px max(20px, env(safe-area-inset-right)) 10px max(20px, env(safe-area-inset-left));
+    display:flex; gap:12px 16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; font-weight:600; margin:0; letter-spacing:-.2px; }
+  .seg { display:inline-flex; background:var(--fill); border-radius:9px; padding:2px; gap:2px; }
+  .seg button.tab { appearance:none; border:none; margin:0; background:none; color:var(--label); font:500 13px/1 inherit; font-family:inherit;
+    padding:0 14px; height:28px; border-radius:7px; cursor:pointer; white-space:nowrap; transition:background .2s, box-shadow .2s; }
+  .seg button.tab.active { background:var(--elev); box-shadow:0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04); font-weight:600; }
+  header .right { margin-left:auto; }
+  main { padding:20px max(20px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); max-width:1200px; margin:0 auto; }
+  h2.sec { font-size:20px; font-weight:700; margin:28px 0 8px; letter-spacing:-.3px; }
+  h2.sec .muted { font-weight:400; letter-spacing:0; display:block; margin-top:2px; }
+  p { margin:10px 0; }
+
+  /* 分组卡片 */
+  .bar { background:var(--card); border-radius:var(--r); padding:14px 16px; margin-bottom:16px; }
+  .bar > b:first-child { font-size:15px; }
+  .bar > span.muted { display:block; margin-top:6px; }
+
+  /* 分组列表样式的表格 */
+  table { width:100%; border-collapse:separate; border-spacing:0; background:var(--card); border-radius:var(--r); overflow:hidden; }
+  th, td { padding:10px 14px; text-align:left; vertical-align:top; border-bottom:.5px solid var(--sep); }
+  tr:last-child > td { border-bottom:none; }
+  th { font-size:12px; font-weight:500; color:var(--label2); white-space:nowrap; background:var(--card); }
+  #modal table { background:var(--card2); }
+  #modal th { background:var(--card2); }
+
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:1px; }
+  .on { background:var(--green); } .off { background:var(--label3); }
+  .muted { color:var(--label2); font-size:12px; }
+  .warn { color:var(--orange); font-weight:600; }
+  .okc { color:var(--green); }
+  .bad { color:var(--red); font-weight:600; }
+
+  /* 按钮：填充 / 浅色 / 文字 / 破坏性 */
+  button { appearance:none; font:500 14px/1 inherit; font-family:inherit; height:var(--ctl); padding:0 12px; margin:2px 6px 2px 0; border:none; border-radius:8px;
+    background:var(--fill); color:var(--blue); cursor:pointer; white-space:nowrap; touch-action:manipulation; transition:opacity .15s, background .15s;
+    display:inline-flex; align-items:center; justify-content:center; gap:4px; vertical-align:middle; }
+  button:active { opacity:.55; }
+  button.primary { background:var(--blue); color:#fff; font-weight:600; }
+  button.danger { background:var(--red-t); color:var(--red); }
+  button.sm { height:26px; padding:0 9px; font-size:13px; border-radius:7px; }
+  button.link { background:none; color:var(--blue); height:auto; padding:0 4px; font-size:inherit; margin:0; }
+  button[disabled] { opacity:.35; cursor:not-allowed; }
+  button:focus-visible, .seg button.tab:focus-visible { outline:3px solid var(--blue-t); outline-offset:1px; }
+  @media (hover:hover) {
+    button:hover:not([disabled]) { filter:brightness(.96); }
+    button.primary:hover:not([disabled]) { filter:brightness(1.08); }
+  }
+
+  /* 输入框 */
+  input[type=text], input[type=password], input[type=number], input[type=time], input[type=datetime-local], select, textarea {
+    font:inherit; color:var(--label); background:var(--fill2); border:.5px solid var(--sep); border-radius:8px; padding:0 10px; height:var(--ctl);
+    outline:none; transition:box-shadow .15s, border-color .15s; max-width:100%; }
+  select { padding-right:28px; appearance:none; -webkit-appearance:none; cursor:pointer;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:right 10px center; }
+  input:focus, select:focus, textarea:focus { border-color:var(--blue); box-shadow:0 0 0 3px var(--blue-t); }
+  input[type=file] { font:inherit; color:var(--label2); max-width:100%; }
+  input[type=file]::file-selector-button { font:500 14px inherit; font-family:inherit; border:none; border-radius:8px; background:var(--fill); color:var(--blue); height:var(--ctl); padding:0 12px; margin-right:10px; cursor:pointer; }
+  textarea { width:100%; min-height:220px; height:auto; padding:8px 10px; font:12px/1.5 ui-monospace,"SF Mono",Menlo,monospace; }
+  input[type=radio] { accent-color:var(--blue); width:18px; height:18px; margin:0 6px 0 0; vertical-align:-4px; }
+  label { cursor:pointer; }
+
+  /* 复选框 → 开关 */
+  input[type=checkbox] { appearance:none; -webkit-appearance:none; position:relative; flex:none; width:44px; height:26px; border-radius:13px; margin:0 8px 0 0;
+    background:var(--fill); vertical-align:middle; cursor:pointer; transition:background .25s; }
+  input[type=checkbox]::after { content:""; position:absolute; top:2px; left:2px; width:22px; height:22px; border-radius:50%; background:#fff;
+    box-shadow:0 2px 4px rgba(0,0,0,.2), 0 0 0 .5px rgba(0,0,0,.04); transition:transform .25s cubic-bezier(.3,.7,.4,1); }
+  input[type=checkbox]:checked { background:var(--green); }
+  input[type=checkbox]:checked::after { transform:translateX(18px); }
+  input[type=checkbox]:focus-visible { outline:3px solid var(--blue-t); }
+  /* 星期：胶囊切换 */
+  .days label { display:inline-flex; margin:0 4px 4px 0; }
+  .days input[type=checkbox] { width:32px; height:32px; border-radius:16px; margin:0; background:var(--fill); }
+  .days input[type=checkbox]::after { content:attr(data-d); position:static; display:flex; align-items:center; justify-content:center; width:100%; height:100%;
+    background:none; box-shadow:none; color:var(--label); font-size:13px; transform:none !important; transition:none; }
+  .days input[type=checkbox]:checked { background:var(--blue); }
+  .days input[type=checkbox]:checked::after { color:#fff; font-weight:600; }
+  /* 列表多选：圆形对勾 */
+  .checklist { background:var(--card2); border-radius:10px; max-height:240px; overflow:auto; }
+  .checklist label { display:flex; align-items:center; gap:10px; padding:10px 12px; border-bottom:.5px solid var(--sep); }
+  .checklist label:last-child { border-bottom:none; }
+  .checklist input[type=checkbox] { width:22px; height:22px; border-radius:50%; margin:0; background:none; border:1.5px solid var(--label3); }
+  .checklist input[type=checkbox]::after { content:none; }
+  .checklist input[type=checkbox]:checked { background:var(--blue); border-color:var(--blue);
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='10'%3E%3Cpath d='M1 5l3.5 3.5L11 1.5' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:center; }
+
+  .row { display:flex; gap:8px; margin-bottom:10px; align-items:center; flex-wrap:wrap; }
+  .row > label { display:inline-flex; align-items:center; flex-wrap:wrap; gap:0 6px; }
+  .row > label > input { margin-right:2px; }
+
+  /* sheet：桌面居中浮层，手机从底部滑出 */
+  #overlay, #alertLayer { position:fixed; inset:0; background:var(--scrim); display:flex; align-items:center; justify-content:center; padding:40px 16px;
+    overflow:auto; opacity:0; visibility:hidden; transition:opacity .25s, visibility 0s .25s; z-index:30; }
+  #overlay.show, #alertLayer.show { opacity:1; visibility:visible; transition:opacity .25s; }
+  #modal { background:var(--elev); border-radius:14px; padding:20px 22px; width:100%; max-width:680px; margin:auto; box-shadow:var(--shadow);
+    transform:scale(.96); transition:transform .3s cubic-bezier(.2,.9,.3,1); }
+  #overlay.show #modal { transform:none; }
+  #modal h2 { margin:0 0 14px; font-size:17px; font-weight:600; text-align:center; }
+  #modal img.preview { max-width:100%; border-radius:8px; margin-top:8px; display:block; }
+  #modal .actions { margin-top:18px; display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; }
+  #modal .actions button { margin:0; min-width:80px; }
+  #modal hr { border:none; border-top:.5px solid var(--sep); margin:14px 0; }
+  .grabber { display:none; }
+
+  /* 警告框（确认、输入）：iOS alert */
+  #alertLayer { z-index:40; }
+  #alert { width:280px; background:var(--elev); border-radius:14px; overflow:hidden; text-align:center; box-shadow:var(--shadow);
+    transform:scale(1.1); transition:transform .25s cubic-bezier(.2,.9,.3,1); }
+  #alertLayer.show #alert { transform:none; }
+  #alert .body { padding:18px 16px 14px; }
+  #alert h3 { margin:0 0 4px; font-size:16px; font-weight:600; }
+  #alert p { margin:0; font-size:13px; color:var(--label); }
+  #alert input { width:100%; margin-top:12px; text-align:left; }
+  #alert .btns { display:flex; border-top:.5px solid var(--sep); }
+  #alert .btns button { flex:1; height:44px; margin:0; border-radius:0; background:none; font-size:16px; font-weight:400; }
+  #alert .btns button + button { border-left:.5px solid var(--sep); }
+  #alert .btns button.default { font-weight:600; }
+  #alert .btns button.destructive { color:var(--red); }
+  /* 动作菜单 */
+  #alert.sheet-menu { width:100%; max-width:400px; background:none; box-shadow:none; overflow:visible; }
+  .menu-group { background:var(--elev); border-radius:14px; overflow:hidden; margin-bottom:8px; }
+  .menu-group .ttl { padding:12px 16px; font-size:13px; color:var(--label2); border-bottom:.5px solid var(--sep); }
+  .menu-group button { display:flex; width:100%; height:56px; margin:0; border-radius:0; background:none; font-size:18px; font-weight:400; border-bottom:.5px solid var(--sep); }
+  .menu-group button:last-child { border-bottom:none; }
+  .menu-group button.destructive { color:var(--red); }
+  .menu-group.cancel button { font-weight:600; }
+
+  /* HUD 提示 */
+  .toast { position:fixed; top:calc(16px + env(safe-area-inset-top)); left:50%; transform:translate(-50%, -12px); max-width:min(92vw, 520px);
+    background:var(--bar); color:var(--label); -webkit-backdrop-filter:saturate(180%) blur(20px); backdrop-filter:saturate(180%) blur(20px);
+    padding:10px 18px; border-radius:22px; box-shadow:0 6px 24px rgba(0,0,0,.18), 0 0 0 .5px var(--sep); font-weight:500; text-align:center;
+    opacity:0; transition:opacity .25s, transform .3s cubic-bezier(.2,.9,.3,1); pointer-events:none; z-index:50; }
+  .toast.show { opacity:1; transform:translate(-50%, 0); }
+
+  .badge { display:inline-block; background:var(--fill); border-radius:6px; padding:1px 7px; font-size:12px; margin:1px 3px 1px 0; }
+  .badge.global { background:var(--green-t); color:var(--green); font-weight:600; }
+
+  /* 播放列表 */
+  .pl-drop { display:block; border:1.5px dashed var(--label3); border-radius:12px; padding:16px; text-align:center; cursor:pointer; background:var(--fill2); color:var(--blue); transition:border-color .15s, background .15s; }
+  .pl-drop.hover { border-color:var(--blue); background:var(--blue-t); }
+  @media (hover:hover) { .pl-drop:hover { border-color:var(--blue); background:var(--blue-t); } }
   .pl-drop .muted { margin-top:4px; }
-  .pl-head { display:flex; align-items:center; gap:8px; margin:10px 0 4px; font-size:12px; color:#555; }
+  .pl-head { display:flex; align-items:center; gap:8px; margin:12px 0 6px; font-size:12px; color:var(--label2); }
   .pl-head .sp { flex:1; }
-  .pl-list { list-style:none; margin:0; padding:0; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
-  .pl-item { display:flex; align-items:center; gap:10px; border:1px solid var(--line); border-radius:8px; padding:6px 8px; margin-bottom:6px; background:#fff; position:relative; }
+  .pl-list { list-style:none; margin:0; padding:0; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; background:var(--card2); border-radius:12px; overflow:hidden; }
+  .pl-item { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:8px 10px; background:var(--card2); position:relative; border-bottom:.5px solid var(--sep); }
+  .pl-item:last-child { border-bottom:none; }
   .pl-list.sorting .pl-item { transition:transform .18s ease; }
-  .pl-item.dragging { transition:none !important; z-index:5; scale:1.02; box-shadow:0 10px 28px rgba(0,0,0,.2); border-color:var(--accent); }
+  .pl-item.dragging { transition:none !important; z-index:5; scale:1.02; box-shadow:0 12px 32px rgba(0,0,0,.25); border-radius:10px; background:var(--elev); }
   .pl-item.dropping { transition:transform .18s ease !important; z-index:5; }
-  .pl-item .grip { touch-action:none; cursor:grab; padding:10px 6px; margin:-6px 0 -6px -4px; color:#999; font-size:18px; line-height:1; border-radius:4px; }
-  .pl-item .grip:focus-visible { outline:2px solid var(--accent); }
+  .pl-item .grip { touch-action:none; cursor:grab; padding:12px 8px; margin:-8px 0 -8px -6px; color:var(--label3); font-size:18px; line-height:1; border-radius:6px; }
+  .pl-item .grip:focus-visible { outline:3px solid var(--blue-t); }
   body.pl-dragging, body.pl-dragging * { cursor:grabbing !important; }
-  .pl-item .thumb { flex:none; width:64px; height:40px; border-radius:4px; background:#eef0f3; overflow:hidden; display:flex; align-items:center; justify-content:center; color:#888; }
+  .pl-item .thumb { flex:none; width:64px; height:40px; border-radius:6px; background:var(--fill); overflow:hidden; display:flex; align-items:center; justify-content:center; color:var(--label2); position:relative; }
   .pl-item .thumb img { width:100%; height:100%; object-fit:cover; pointer-events:none; -webkit-user-drag:none; }
   .pl-item .thumb .vid { font-size:16px; }
+  .pl-item .thumb .pg { position:absolute; right:2px; bottom:2px; background:rgba(0,0,0,.65); color:#fff; font-size:10px; line-height:1; padding:2px 3px; border-radius:3px; }
   .pl-item .info { flex:1; min-width:0; display:flex; flex-direction:column; }
   .pl-item .nm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .pl-item .meta { font-size:12px; color:var(--muted); }
-  .pl-item .pbar { height:4px; background:#e6e9ef; border-radius:2px; overflow:hidden; margin-top:4px; }
-  .pl-item .pbar > i { display:block; height:100%; background:var(--accent); transition:width .2s; }
+  .pl-item .meta { font-size:12px; color:var(--label2); }
+  .pl-item .pbar { height:4px; background:var(--fill); border-radius:2px; overflow:hidden; margin-top:5px; }
+  .pl-item .pbar > i { display:block; height:100%; background:var(--blue); border-radius:2px; transition:width .2s; }
   .pl-item .pbar.indeterminate > i { width:35%; animation:pl-slide 1.1s linear infinite; }
   @keyframes pl-slide { from { transform:translateX(-100%); } to { transform:translateX(290%); } }
   .pl-item.st-waiting { opacity:.7; }
-  .pl-item { flex-wrap:wrap; }
-  .pl-item .thumb { position:relative; }
-  .pl-item .thumb .pg { position:absolute; right:2px; bottom:2px; background:rgba(0,0,0,.65); color:#fff; font-size:10px; line-height:1; padding:2px 3px; border-radius:3px; }
   .pl-item .pages { flex-basis:100%; display:flex; gap:6px; overflow-x:auto; padding:6px 0 2px 34px; }
-  .pl-item .pages span { flex:none; width:60px; height:84px; border-radius:3px; background:#eef0f3; overflow:hidden; display:flex; align-items:center; justify-content:center; font-size:11px; color:#999; position:relative; }
+  .pl-item .pages span { flex:none; width:60px; height:84px; border-radius:4px; background:var(--fill); overflow:hidden; display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--label2); position:relative; }
   .pl-item .pages img { width:100%; height:100%; object-fit:contain; background:#fff; }
   .pl-item .pages i { position:absolute; left:2px; top:2px; font-style:normal; font-size:10px; color:#444; background:rgba(255,255,255,.85); padding:0 3px; border-radius:2px; }
-  .pl-item.st-rejected, .pl-item.st-failed { border-color:#f0b4b4; background:#fff8f8; }
-  .pl-empty { padding:12px 0; }
-  .sync { display:inline-block; white-space:nowrap; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; }
-  .sync.latest { background:#e3f6e3; color:#1a7a1a; }
-  .sync.waiting { background:#fff2dc; color:#a35a00; }
-  .sync.syncing { background:#e3eeff; color:var(--accent); }
-  .sync.offline { background:#eee; color:#777; }
-  .bad { color:var(--bad); font-weight:600; }
-  .cachebar { display:flex; height:18px; border-radius:4px; overflow:hidden; background:#eef0f3; margin:10px 0 6px; max-width:640px; }
+  .pl-item.st-rejected, .pl-item.st-failed { background:var(--red-t); }
+  .pl-empty { padding:14px 12px; }
+
+  .sync { display:inline-block; white-space:nowrap; padding:2px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+  .sync.latest { background:var(--green-t); color:var(--green); }
+  .sync.waiting { background:var(--orange-t); color:var(--orange); }
+  .sync.syncing { background:var(--blue-t); color:var(--blue); }
+  .sync.offline { background:var(--fill); color:var(--label2); }
+
+  .cachebar { display:flex; height:8px; border-radius:4px; overflow:hidden; background:var(--fill); margin:12px 0 8px; max-width:640px; }
   .cachebar i { display:block; height:100%; }
-  .cachebar .inuse { background:var(--accent); }
-  .cachebar .cached { background:#9ec0f5; }
+  .cachebar .inuse { background:var(--blue); }
+  .cachebar .cached { background:var(--blue-soft); }
   .legend span { display:inline-block; margin-right:14px; }
-  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
-  pre.cmd { background:#1e1e1e; color:#e8e8e8; padding:10px 12px; border-radius:6px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; user-select:all; }
-  .bad-note { margin-top:8px; padding:8px 10px; border:1px solid var(--bad); border-radius:4px; background:#fff4f4; color:#a00; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:4px; vertical-align:-1px; }
+  pre.cmd { background:#1c1c1e; color:#f2f2f7; padding:12px 14px; border-radius:10px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; user-select:all; -webkit-user-select:all;
+    font:13px/1.5 ui-monospace,"SF Mono",Menlo,monospace; margin:10px 0; }
+  .bad-note { margin-top:10px; padding:10px 12px; border-radius:10px; background:var(--red-t); color:var(--red); }
+  .bad-note .muted { color:inherit; opacity:.8; }
+  .narrow { display:none !important; }
+
+  /* 触摸设备：点击目标 ≥ 44pt，输入框 16px 防止 iOS 聚焦时自动放大 */
+  @media (pointer:coarse) {
+    :root { --ctl:44px; }
+    button { font-size:16px; padding:0 16px; border-radius:10px; }
+    button.sm { height:36px; padding:0 12px; font-size:15px; }
+    .seg button.tab { height:34px; font-size:14px; }
+    input[type=text], input[type=password], input[type=number], input[type=time], input[type=datetime-local], select, textarea { font-size:16px; border-radius:10px; }
+    input[type=checkbox] { width:51px; height:31px; border-radius:16px; }
+    input[type=checkbox]::after { width:27px; height:27px; }
+    input[type=checkbox]:checked::after { transform:translateX(20px); }
+    .days input[type=checkbox] { width:40px; height:40px; border-radius:20px; }
+    input[type=radio] { width:22px; height:22px; }
+    .pl-item .grip { padding:14px 10px; }
+  }
+
+  /* 窄屏（手机竖屏）：表格变卡片，行内次要操作收进"更多"菜单，对话框从底部滑出 */
+  @media (max-width:720px) {
+    header { padding-top:calc(8px + env(safe-area-inset-top)); }
+    header h1 { flex:1; }
+    header .right { order:2; margin-left:0; }
+    .seg { order:3; width:100%; overflow-x:auto; scrollbar-width:none; }
+    .seg::-webkit-scrollbar { display:none; }
+    .seg button.tab { flex:1; padding:0 10px; }
+    main { padding-top:14px; }
+    .wide { display:none !important; }
+    .narrow { display:inline-flex !important; }
+    table.cards, table.cards > tbody, table.cards > tbody > tr, table.cards > tbody > tr > td { display:block; width:100%; }
+    table.cards { background:none; border-radius:0; overflow:visible; }
+    table.cards tr.head { display:none !important; }
+    table.cards > tbody > tr { background:var(--card); border-radius:var(--r); padding:10px 14px; margin-bottom:12px; }
+    table.cards > tbody > tr > td { border:none; padding:4px 0; }
+    table.cards td[data-label]::before { content:attr(data-label); display:block; font-size:12px; color:var(--label2); margin-bottom:2px; }
+    table.cards td.wide-cell { display:none; }
+    table.cards td.acts { padding-top:10px; display:flex; flex-wrap:wrap; gap:8px; }
+    table.cards td.acts button { margin:0; height:var(--ctl); }
+    table.cards td.acts button.primary { flex:1; }
+    #overlay { align-items:flex-end; padding:0; }
+    #modal { max-width:none; border-radius:14px 14px 0 0; margin:auto 0 0; padding:8px 16px calc(16px + env(safe-area-inset-bottom));
+      max-height:94vh; overflow:auto; transform:translateY(100%); transition:transform .35s cubic-bezier(.2,.9,.3,1); }
+    #overlay.show #modal { transform:none; }
+    .grabber { display:block; width:36px; height:5px; border-radius:3px; background:var(--label3); margin:0 auto 10px; }
+    #modal .actions { position:sticky; bottom:calc(-16px - env(safe-area-inset-bottom)); background:var(--elev); margin:16px -16px calc(-16px - env(safe-area-inset-bottom));
+      padding:10px 16px calc(10px + env(safe-area-inset-bottom)); border-top:.5px solid var(--sep); }
+    #modal .actions button { flex:1; }
+    #alertLayer.menu { align-items:flex-end; padding:8px 8px calc(8px + env(safe-area-inset-bottom)); }
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>显示屏管理后台</h1>
-  <button class="tab active" data-tab="devices">设备</button>
-  <button class="tab" data-tab="templates">模板与时段</button>
-  <button class="tab" data-tab="firmware">程序更新</button>
-  <button class="tab" data-tab="storage">存储</button>
-  <span class="right"><button onclick="setToken()">设置Token</button></span>
+  <nav class="seg" role="tablist">
+    <button class="tab active" data-tab="devices">设备</button>
+    <button class="tab" data-tab="templates">模板与时段</button>
+    <button class="tab" data-tab="firmware">程序更新</button>
+    <button class="tab" data-tab="storage">存储</button>
+  </nav>
+  <span class="right"><button class="sm" onclick="setToken()">设置 Token</button></span>
 </header>
 <main>
   <div id="tab-devices">
     <div class="bar" id="globalBar"></div>
-    <table id="devTable"></table>
+    <table id="devTable" class="cards"></table>
   </div>
   <div id="tab-templates" style="display:none">
     <div class="bar">
@@ -118,9 +310,9 @@
     </div>
     <p><button class="primary" onclick="templateForm()">新建模板</button>
        <button onclick="editTemplateJSON()">新建(JSON)</button></p>
-    <table id="tplTable"></table>
+    <table id="tplTable" class="cards"></table>
     <h2 class="sec">时段计划 <span class="muted">按顺序匹配第一条命中的时段；无命中用全局默认模板；开始 &gt; 结束表示跨午夜</span></h2>
-    <table id="schTable"></table>
+    <table id="schTable" class="cards"></table>
     <p><button onclick="addSchedule()">+ 添加时段</button> <button class="primary" onclick="saveSchedules()">保存时段计划</button></p>
   </div>
   <div id="tab-firmware" style="display:none">
@@ -143,11 +335,12 @@
         传错文件会被服务端当场拒绝，不会下发到设备。
       </span>
     </div>
-    <table id="fwTable"></table>
+    <table id="fwTable" class="cards"></table>
   </div>
   <div id="tab-storage" style="display:none"><div id="storageBox" class="bar">读取中…</div></div>
 </main>
-<div id="overlay"><div id="modal"></div></div>
+<div id="overlay"><div id="modal" role="dialog" aria-modal="true"></div></div>
+<div id="alertLayer"><div id="alert" role="alertdialog" aria-modal="true"></div></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -156,8 +349,8 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const token = () => localStorage.getItem("admin_token") || "";
 const DAYS = ["日","一","二","三","四","五","六"];
-function setToken() {
-  const t = prompt("管理 Token（服务端 server.json 的 admin_token）", token());
+async function setToken() {
+  const t = await promptDialog("管理 Token", "服务端 server.json 里的 admin_token", token(), { secure: true });
   if (t !== null) { localStorage.setItem("admin_token", t.trim()); refresh(); }
 }
 async function api(path, opts = {}) {
@@ -169,14 +362,69 @@ async function api(path, opts = {}) {
 }
 const J = body => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 3500); }
-let modalGuard = null; // 关闭前的检查（如还有文件在上传），返回 false 则不关
-function modal(html) { modalGuard = null; $("#modal").innerHTML = html; $("#overlay").classList.add("show"); }
-function closeModal() {
-  if (modalGuard && !modalGuard()) return;
+let modalGuard = null; // 关闭前的检查（如还有文件在上传），返回 false（或 Promise<false>）则不关
+function modal(html) {
+  modalGuard = null;
+  $("#modal").innerHTML = `<div class="grabber"></div>${html}`;
+  $("#modal").scrollTop = 0;
+  $("#overlay").classList.add("show");
+}
+async function closeModal() {
+  if (modalGuard && !(await modalGuard())) return;
   modalGuard = null;
   $("#overlay").classList.remove("show");
 }
 $("#overlay").addEventListener("click", e => { if (e.target.id === "overlay") closeModal(); });
+
+// ---- 系统风格的提示框：确认、输入、动作菜单（代替浏览器的 confirm/prompt）----
+let alertDone = null;
+function showAlert(html, cls, done) {
+  alertDone = done;
+  $("#alert").className = cls || "";
+  $("#alert").innerHTML = html;
+  $("#alertLayer").className = "show" + (cls === "sheet-menu" ? " menu" : "");
+}
+function finishAlert(v) {
+  $("#alertLayer").className = "";
+  const done = alertDone; alertDone = null;
+  if (done) done(v);
+}
+$("#alertLayer").addEventListener("click", e => { if (e.target.id === "alertLayer") finishAlert(null); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if ($("#alertLayer").classList.contains("show")) finishAlert(null);
+  else if ($("#overlay").classList.contains("show")) closeModal();
+});
+// confirmDialog(标题, 说明, {ok, danger}) → Promise<boolean>
+function confirmDialog(title, msg = "", { ok = "好", danger = false } = {}) {
+  return new Promise(resolve => {
+    showAlert(`<div class="body"><h3>${esc(title)}</h3>${msg ? `<p>${esc(msg)}</p>` : ""}</div>
+      <div class="btns"><button onclick="finishAlert(false)">取消</button>
+        <button class="${danger ? "destructive" : "default"}" onclick="finishAlert(true)">${esc(ok)}</button></div>`, "", v => resolve(v === true));
+    $("#alert .btns button:last-child").focus();
+  });
+}
+// promptDialog(标题, 说明, 默认值, {secure}) → Promise<string|null>
+function promptDialog(title, msg, value = "", { secure = false } = {}) {
+  return new Promise(resolve => {
+    showAlert(`<div class="body"><h3>${esc(title)}</h3><p>${esc(msg)}</p>
+        <input type="${secure ? "password" : "text"}" id="alertInput" value="${esc(value)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div class="btns"><button onclick="finishAlert(null)">取消</button><button class="default" onclick="finishAlert($('#alertInput').value)">好</button></div>`,
+      "", v => resolve(typeof v === "string" ? v : null));
+    const inp = $("#alertInput");
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") finishAlert(inp.value); });
+    inp.focus(); inp.select();
+  });
+}
+// actionSheet(标题, [{label, run, destructive}])：窄屏时收起来的行内操作
+function actionSheet(title, items) {
+  window._sheetItems = items;
+  showAlert(`<div class="menu-group">${title ? `<div class="ttl">${esc(title)}</div>` : ""}${items.map((it, i) =>
+      `<button class="${it.destructive ? "destructive" : ""}" onclick="finishAlert(${i})">${esc(it.label)}</button>`).join("")}</div>
+    <div class="menu-group cancel"><button onclick="finishAlert(null)">取消</button></div>`, "sheet-menu",
+    i => { if (typeof i === "number") items[i].run(); });
+}
+
 document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
   document.querySelectorAll("header .tab").forEach(x => x.classList.toggle("active", x === b));
   for (const t of ["devices", "templates", "firmware", "storage"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
@@ -222,7 +470,7 @@ async function loadStorage() {
       <i class="inuse" style="width:${pct(st.in_use_bytes)}"></i><i class="cached" style="width:${pct(st.cached_bytes)}"></i></div>
     <div class="legend">
       <span><i style="background:var(--accent)"></i>设备在用 <b>${fmtBytes(st.in_use_bytes)}</b>（${st.in_use_files} 个文件，不会被清理）</span>
-      <span><i style="background:#9ec0f5"></i>缓存中 <b>${fmtBytes(st.cached_bytes)}</b>（${st.files - st.in_use_files} 个，可复用、满了自动清理）</span>
+      <span><i style="background:var(--blue-soft)"></i>缓存中 <b>${fmtBytes(st.cached_bytes)}</b>（${st.files - st.in_use_files} 个，可复用、满了自动清理）</span>
       <span>配额 <b>${st.quota_gb} GB</b></span>
       ${st.disk_free_bytes >= 0 ? `<span class="muted">磁盘剩余 ${fmtBytes(st.disk_free_bytes)}</span>` : ""}
     </div>
@@ -338,16 +586,17 @@ function renderDevices() {
     return `<tr>
       <td>${st}</td>
       <td><b>${esc(d.id)}</b>${hw}${ver}${d.heartbeat ? healthLine(d.heartbeat) : ""}${rekey}</td>
-      <td>${attrs}</td>
-      <td>${show}</td>
-      <td>
+      <td data-label="属性">${attrs}</td>
+      <td data-label="当前显示">${show}</td>
+      <td class="acts">
         <button class="primary" onclick="contentDialog('${esc(d.id)}')">内容</button>
-        <button onclick="attrsDialog('${esc(d.id)}')">属性</button>
-        <button onclick="testDialog('${esc(d.id)}')">测试</button>
-        <button onclick="deleteDevice('${esc(d.id)}')" class="danger sm">删除</button>
+        <button class="wide" onclick="attrsDialog('${esc(d.id)}')">属性</button>
+        <button class="wide" onclick="testDialog('${esc(d.id)}')">测试</button>
+        <button class="wide danger" onclick="deleteDevice('${esc(d.id)}')">删除</button>
+        <button class="narrow" onclick="deviceMenu('${esc(d.id)}')" aria-label="更多操作">更多…</button>
       </td></tr>`;
   }).join("");
-  $("#devTable").innerHTML = `<tr><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">暂无设备。设备烧录母镜像上电后会自动注册出现在这里。</td></tr>'}`;
+  $("#devTable").innerHTML = `<tr class="head"><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">暂无设备。新设备装机（见「程序更新」页）后会自动注册出现在这里。</td></tr>'}`;
   tickContact();
 }
 
@@ -369,6 +618,14 @@ function tickContact() {
   }
 }
 setInterval(tickContact, 1000);
+
+function deviceMenu(id) {
+  actionSheet(id, [
+    { label: "属性", run: () => attrsDialog(id) },
+    { label: "测试屏", run: () => testDialog(id) },
+    { label: "删除设备", destructive: true, run: () => deleteDevice(id) },
+  ]);
+}
 
 function testDialog(id) {
   modal(`<h2>测试屏 — ${esc(id)}</h2>
@@ -410,7 +667,7 @@ async function doRekey(id, accept) {
   toast(accept ? "已接受：设备一分钟内会重新注册成功" : "已忽略"); closeModal(); refresh();
 }
 async function deleteDevice(id) {
-  if (!confirm(`删除设备 ${id}？其属性/图片绑定/更新目标一并删除；设备若仍在线会重新自注册（新密钥）。`)) return;
+  if (!await confirmDialog(`删除设备 ${id}？`, "属性、播放内容、更新目标一并删除；设备若仍在线会用新密钥重新注册。", { ok: "删除", danger: true })) return;
   await api(`/api/v1/admin/devices/${id}`, { method: "DELETE" });
   toast("已删除"); refresh();
 }
@@ -454,7 +711,7 @@ async function contentDialog(id) {
       <button class="sm" onclick="copyGlobalTemplate()">复制全局模板再改</button></div>
     <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""}> 左右对调
       <span class="muted">同一个模板，属性放到另一边（不镜像文字）</span></label></div>
-    <hr style="border:none;border-top:1px solid var(--line);margin:12px 0">
+    <hr>
     <div id="contentBody"></div>
     <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
     <div class="actions"><button onclick="closeModal()">关闭</button><button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button></div>`);
@@ -874,7 +1131,7 @@ async function plRemove(key) {
   }
   const what = it.state === "ready" ? `删除 ${it.name}？`
     : it.state === "failed" ? null : `取消 ${it.name} 的转码？`;
-  if (what && !confirm(what)) return;
+  if (what && !await confirmDialog(what, "", { ok: it.state === "ready" ? "删除" : "取消转码", danger: true })) return;
   const list = await api(`/api/v1/admin/devices/${encodeURIComponent(plDev)}/media/${encodeURIComponent(it.name)}`, { method: "DELETE" });
   plItems = plItems.filter(x => x !== it);
   dropThumb(it);
@@ -924,9 +1181,9 @@ function schedulePlPoll() {
 }
 
 // plCloseGuard 关闭对话框前：有文件没传完要确认；待保存的顺序立即提交。
-function plCloseGuard() {
+async function plCloseGuard() {
   const busy = plItems.filter(isBusy);
-  if (busy.length && !confirm(`还有 ${busy.length} 个文件没传完，关闭会取消上传。确定关闭？`)) return false;
+  if (busy.length && !await confirmDialog(`还有 ${busy.length} 个文件没传完`, "关闭会取消上传。", { ok: "关闭", danger: true })) return false;
   for (const it of busy) if (it.xhr) { it.xhr.onload = it.xhr.onerror = null; it.xhr.abort(); }
   if (plSaveTimer) saveOrder(plDev, readyNames());
   clearTimeout(plPollTimer);
@@ -1124,15 +1381,15 @@ function renderTemplates() {
   const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
   const rows = templates.map(t => `<tr>
     <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒</div></td>
-    <td>${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
-    <td>
+    <td data-label="区域">${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
+    <td class="acts">
       ${global.template_id === t.id ? "" : `<button onclick="setGlobal('${esc(t.id)}')">设为全局</button>`}
       <button onclick="showPreview('/api/v1/admin/templates/${esc(t.id)}/preview')">预览</button>
       <button onclick="templateForm('${esc(t.id)}')">编辑</button>
       <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
       <button class="danger" onclick="deleteTemplate('${esc(t.id)}')" ${only ? 'disabled title="这是最后一个模板，不能删除"' : ""}>删除</button>
     </td></tr>`).join("");
-  $("#tplTable").innerHTML = `<tr><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
+  $("#tplTable").innerHTML = `<tr class="head"><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
 async function setGlobal(id) { $("#globalSel").value = id; await saveGlobal(); }
 async function saveGlobal() {
@@ -1202,7 +1459,7 @@ async function saveTemplateJSON(id) {
   toast("模板已保存"); closeModal(); refresh();
 }
 async function deleteTemplate(id) {
-  if (!confirm(`确认删除模板「${tplById(id)?.name || id}」？`)) return;
+  if (!await confirmDialog(`删除模板「${tplById(id)?.name || id}」？`, "", { ok: "删除", danger: true })) return;
   await api(`/api/v1/admin/templates/${id}`, { method: "DELETE" });
   toast("已删除"); refresh();
 }
@@ -1213,14 +1470,14 @@ function renderSchedules() {
   if (schEdit === null) schEdit = schedules.map(s => ({ ...s, days: [...(s.days || [])] }));
   const tplOpts = sel => templates.map(t => `<option value="${esc(t.id)}" ${sel === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   const rows = schEdit.map((s, i) => `<tr>
-    <td>${i + 1}</td>
-    <td><select onchange="schEdit[${i}].template_id=this.value">${tplOpts(s.template_id)}</select></td>
-    <td class="days">${DAYS.map((d, k) => `<label><input type="checkbox" ${s.days.includes(k) ? "checked" : ""} onchange="toggleDay(${i},${k},this.checked)">${d}</label>`).join("")}<div class="muted">全不勾 = 每天</div></td>
-    <td><input type="time" value="${esc(s.start)}" onchange="schEdit[${i}].start=this.value"></td>
-    <td><input type="time" value="${esc(s.end)}" onchange="schEdit[${i}].end=this.value"></td>
-    <td><button class="sm" onclick="moveSch(${i},-1)">↑</button><button class="sm" onclick="moveSch(${i},1)">↓</button><button class="sm danger" onclick="schEdit.splice(${i},1);renderSchedules()">删</button></td>
+    <td class="wide-cell"><b>${i + 1}</b></td>
+    <td data-label="时段 ${i + 1} · 模板"><select onchange="schEdit[${i}].template_id=this.value">${tplOpts(s.template_id)}</select></td>
+    <td class="days" data-label="星期（全不选 = 每天）">${DAYS.map((d, k) => `<label><input type="checkbox" data-d="${d}" aria-label="星期${d}" ${s.days.includes(k) ? "checked" : ""} onchange="toggleDay(${i},${k},this.checked)"></label>`).join("")}</td>
+    <td data-label="开始"><input type="time" value="${esc(s.start)}" onchange="schEdit[${i}].start=this.value"></td>
+    <td data-label="结束"><input type="time" value="${esc(s.end)}" onchange="schEdit[${i}].end=this.value"></td>
+    <td class="acts"><button class="sm" onclick="moveSch(${i},-1)" aria-label="上移">↑</button><button class="sm" onclick="moveSch(${i},1)" aria-label="下移">↓</button><button class="sm danger" onclick="schEdit.splice(${i},1);renderSchedules()">删除</button></td>
   </tr>`).join("");
-  $("#schTable").innerHTML = `<tr><th>#</th><th>模板</th><th>星期</th><th>开始</th><th>结束</th><th></th></tr>${rows || '<tr><td colspan="6" class="muted">无时段计划：全天显示全局默认模板</td></tr>'}`;
+  $("#schTable").innerHTML = `<tr class="head"><th>#</th><th>模板</th><th>星期 <span class="muted">全不选 = 每天</span></th><th>开始</th><th>结束</th><th></th></tr>${rows || '<tr><td colspan="6" class="muted">无时段计划：全天显示全局默认模板</td></tr>'}`;
 }
 function toggleDay(i, k, on) { const d = schEdit[i].days; const idx = d.indexOf(k); if (on && idx < 0) d.push(k); if (!on && idx >= 0) d.splice(idx, 1); }
 function moveSch(i, delta) { const j = i + delta; if (j < 0 || j >= schEdit.length) return; [schEdit[i], schEdit[j]] = [schEdit[j], schEdit[i]]; renderSchedules(); }
@@ -1238,15 +1495,15 @@ async function saveSchedules() {
 function renderFirmware() {
   const rows = firmware.map(f => `<tr>
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
-    <td>${(f.size / 1048576).toFixed(1)} MB<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
-    <td>${esc(fmtTime(f.uploaded_at))}</td>
-    <td>${devices.filter(d => d.hw?.agent_version === f.version).length} / ${devices.length} 台在用</td>
-    <td><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
+    <td data-label="大小">${(f.size / 1048576).toFixed(1)} MB<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
+    <td data-label="上传时间">${esc(fmtTime(f.uploaded_at))}</td>
+    <td data-label="覆盖">${devices.filter(d => d.hw?.agent_version === f.version).length} / ${devices.length} 台在用</td>
+    <td class="acts"><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
         <button class="danger" onclick="deleteFirmware('${esc(f.version)}')">删除</button></td></tr>`).join("");
   $("#installCmd").textContent =
     `curl -fsSL http://${location.hostname}:${info.bootstrap_port || 9000}/install.sh | ENROLL_TOKEN=注册口令 sh`;
   $("#tlsFP").textContent = info.tls_fingerprint || "";
-  $("#fwTable").innerHTML = `<tr><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序</td></tr>'}`;
+  $("#fwTable").innerHTML = `<tr class="head"><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序</td></tr>'}`;
 }
 async function uploadFirmware() {
   const f = $("#fwFile").files[0];
@@ -1257,17 +1514,17 @@ async function uploadFirmware() {
   toast("已上传 " + fw.version); $("#fwFile").value = ""; $("#fwNotes").value = ""; refresh();
 }
 async function deleteFirmware(v) {
-  if (!confirm(`删除程序版本 ${v}？`)) return;
+  if (!await confirmDialog(`删除程序版本 ${v}？`, "", { ok: "删除", danger: true })) return;
   await api(`/api/v1/admin/firmware/${v}`, { method: "DELETE" }); toast("已删除"); refresh();
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label style="display:block"><input type="checkbox" class="rl-dev" value="${esc(d.id)}"> ${esc(d.id)} <span class="muted">当前 ${esc(d.hw?.agent_version || "?")}</span></label>`).join("");
+  const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.hw?.agent_version || "?")}</span></span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>
     <div class="row"><label><input type="radio" name="who" value="all" checked> 全部设备</label>
       <label><input type="radio" name="who" value="some"> 指定设备：</label></div>
-    <div style="max-height:200px;overflow:auto;border:1px solid var(--line);padding:6px">${devOpts}</div>
+    <div class="checklist">${devOpts || '<label class="muted">暂无设备</label>'}</div>
     <p class="muted">设备在轮询时取到指令 → 下载整包并校验 → 执行包内 update.sh → 切换重启；新版本首个心跳成功即确认，连续 3 次启动失败自动回滚。失败原因会显示在设备列表里。</p>
     <div class="actions"><button onclick="closeModal()">取消</button>
       <button class="danger" onclick="doRollout('', true)">取消所有待更新</button>
