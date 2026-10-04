@@ -28,7 +28,10 @@ type File struct {
 }
 
 // Package 按 make package 的结构（顶层目录 display-agent-<版本>/）打一个 tar.gz 程序包。
-func Package(version string, files ...File) []byte {
+func Package(version string, files ...File) []byte { return TarGz("display-agent-"+version, files...) }
+
+// TarGz 把 files 放在顶层目录 top/ 下打成 tar.gz。
+func TarGz(top string, files ...File) []byte {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -37,7 +40,7 @@ func Package(version string, files ...File) []byte {
 		if f.Exec {
 			mode = 0o755
 		}
-		tw.WriteHeader(&tar.Header{Name: "display-agent-" + version + "/" + f.Name, Mode: mode,
+		tw.WriteHeader(&tar.Header{Name: top + "/" + f.Name, Mode: mode,
 			Size: int64(len(f.Body)), Typeflag: tar.TypeReg})
 		tw.Write([]byte(f.Body))
 	}

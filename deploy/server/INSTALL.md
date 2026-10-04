@@ -50,7 +50,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   display-server      二进制
   server.json         配置
   fonts/              渲染用字体
-  data/               服务端状态：state.json、cache.json、packages/（程序包）、rendered/、incoming/（待转码原片）、tls/（证书）
+  data/               服务端状态：state.json、cache.json、packages/（程序包）、deps/（离线依赖包）、rendered/、incoming/（待转码原片）、tls/（证书）
   data/media/<设备ID>/  该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）
 ```
 
@@ -70,7 +70,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 9001（`listen`） | HTTPS | 管理后台、设备通信 |
-| 9000（`bootstrap_listen`） | HTTP | 只提供新设备一键装机脚本与程序包下载，其余请求 301 到 HTTPS |
+| 9000（`bootstrap_listen`） | HTTP | 只提供新设备一键装机脚本、程序包与离线依赖仓库，其余请求 301 到 HTTPS |
 
 防火墙两个端口都要放行。首次启动在 `data/tls/` 生成自签证书，日志里打印证书指纹
 （`journalctl -u display-server | grep fingerprint`）。设备固定这个指纹，所以 **`data/tls/` 必须随 `state.json` 一起备份**——
@@ -81,7 +81,8 @@ systemctl daemon-reload && systemctl enable --now display-server
 
 ## 新设备装机
 
-先在后台「程序更新」页上传设备端程序包（`display-agent-<版本>-armv7.tar.gz`），然后在刷好公版 Armbian 的设备上以 root 运行
+先在后台「程序更新」页上传设备端程序包（`display-agent-<版本>-armv7.tar.gz`）；建议再上传离线依赖包
+（`display-deps-<代号>-armhf.tar.gz`，装机从局域网装依赖、不需要外网）。然后在刷好公版 Armbian 的设备上以 root 运行
 （这条命令在「程序更新」页可直接复制）：
 
 ```sh

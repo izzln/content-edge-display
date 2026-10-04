@@ -17,7 +17,7 @@ type Config struct {
 	Listen          string `json:"listen"`           // HTTPS：设备与管理后台，默认 :9001
 	BootstrapListen string `json:"bootstrap_listen"` // HTTP：只提供一键装机入口，其余跳转 HTTPS，默认 :9000
 	MediaRoot       string `json:"media_root"`       // 各设备的播放内容，默认 data/media
-	DataDir         string `json:"data_dir"`         // state.json、cache.json、rendered/、packages/、incoming/、tls/，默认 data
+	DataDir         string `json:"data_dir"`         // state.json、cache.json、rendered/、packages/、deps/、incoming/、tls/，默认 data
 	FontPath        string `json:"font_path"`        // 模板渲染字体（中文需 CJK 字体）
 	AdminToken      string `json:"admin_token"`      // 管理后台口令
 	EnrollToken     string `json:"enroll_token"`     // 设备注册口令（一键装机时输入）

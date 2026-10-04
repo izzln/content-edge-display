@@ -34,7 +34,7 @@ internal/
   web/                内嵌的管理后台单页
 deploy/agent/         设备端程序包内容：安装/更新/回滚/自检脚本、systemd 单元
 deploy/server/        服务端包内容：systemd 单元、配置样例
-scripts/              构建辅助脚本（口令生成）
+scripts/              构建辅助脚本（口令生成、离线依赖包）
 bin/                  构建产物（gitignore）
 ```
 
@@ -44,6 +44,8 @@ bin/                  构建产物（gitignore）
 make package     # 需 Go ≥ 1.24；首次运行生成两个口令（.secrets/tokens.env，勿提交）
 # → bin/display-server-<版本>-<架构>.tar.gz   服务端：解开后按包内 INSTALL.md 安装
 # → bin/display-agent-<版本>-armv7.tar.gz     设备端程序包：在后台「程序更新」页上传，装机与 OTA 都用它
+make deps        # 可选（需 docker + qemu）：离线依赖包，后台上传一次，装机从局域网装 GStreamer 等依赖
+# → bin/display-deps-<代号>-armhf.tar.gz
 ```
 
 服务端装好后打开 `https://<服务器>:9001/admin`；新设备刷公版 Armbian 后运行后台「程序更新」页给出的一键装机命令。

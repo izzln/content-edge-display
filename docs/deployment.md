@@ -29,6 +29,18 @@ make package
 
 （`make build` / `make agent-arm` 只产出裸二进制，供本地调试；后台上传的是上面的设备端程序包。）
 
+另有**离线依赖包**（设备播放所需的 GStreamer 等 Debian 软件包连同全部依赖，一两百 MB），后台上传一次，
+之后装机从服务端局域网安装依赖，又快又不需要外网（见 3.3）：
+
+```sh
+make deps                  # 默认 bookworm；须与设备 Armbian 的 Debian 版本一致：make deps DEBIAN=trixie
+# → bin/display-deps-<代号>-armhf.tar.gz
+```
+
+需要 docker 和能跑 arm 容器的 qemu（`apt install qemu-user-static`）。依赖清单只有一份
+（`deploy/agent/deps.txt`）；它变了或想用上 Debian 的安全更新时重新打包上传即可。
+推送 `v*` 标签时 CI 也会打 bookworm、trixie、noble 三个版本附到 Release（手动运行 CI 也会打）。
+
 ### 1.2 从 GitHub 下载（本机没有 Go 环境时）
 
 仓库配了 GitHub Actions（`.github/workflows/ci.yml`）：
@@ -67,6 +79,7 @@ git tag v1.2.0 && git push origin v1.2.0     # 随后在 Releases 页面下载
     media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
     media/.store/       文件缓存区：处理好的内容各存一份，设备目录里是指向它的硬链接
     packages/           上传的设备端程序包
+    deps/<代号>/        离线依赖包（装机用的 apt 仓库）
     rendered/ incoming/ 模板渲染结果、待转码原片
     tls/                服务端证书与私钥
 ```
@@ -176,7 +189,8 @@ make tokens     # 查看当前口令；文件不存在时生成
 ### 3.3 一键安装
 
 前提：管理后台「程序更新」页**已上传过设备端程序包**（`display-agent-<版本>-armv7.tar.gz`，见 1 节）。
-装机下载的就是最新上传的那个包，之后 OTA 也是同一种包。
+装机下载的就是最新上传的那个包，之后 OTA 也是同一种包。建议同时上传**离线依赖包**（`display-deps-<代号>-armhf.tar.gz`）：
+没有它时每台设备都要从外网 apt 下载上百 MB 依赖，境外源常常要十几分钟甚至失败。
 
 在设备上以 root 运行（后台「程序更新」页的"新设备装机"里有这条命令，地址已填好，可直接复制）：
 
@@ -184,7 +198,7 @@ make tokens     # 查看当前口令；文件不存在时生成
 curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 ```
 
-它会：凭注册口令（`server.json` 的 `enroll_token`）下载程序包 → 装 GStreamer 依赖 → 按 OTA 布局安装 →
+它会：凭注册口令（`server.json` 的 `enroll_token`）下载程序包 → 装 GStreamer 依赖（见下）→ 按 OTA 布局安装 →
 写 `/etc/display-agent/agent.json`（服务端 HTTPS 地址与证书指纹已由服务端填好）→ 写 HDMI/CMA 启动参数 →
 `systemctl enable display-agent` → 10 秒后**自动重启**。重启后设备自动注册，1~2 分钟内出现在后台设备列表（在线）。
 
@@ -199,14 +213,21 @@ curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 
 出错时的提示：`注册口令不对`、`服务端还没有上传设备程序包`、`连不上服务端`（查网线、IP、9000 端口防火墙）。
 
-只有 9000 端口是明文 HTTP，而且只提供这个脚本和程序包下载（程序包要凭注册口令下载）；设备装好后一律走 9001 的 HTTPS，
-并固定服务端证书指纹。脚本本身不含任何口令。
+**依赖怎么装**：服务端有与设备 Debian 版本代号（`/etc/os-release` 的 `VERSION_CODENAME`）一致的离线依赖包时，
+只从服务端的 `http://<服务器>:9000/apt/<代号>/` 安装（日志：`从服务端离线依赖仓库安装`），局域网几秒下完，
+不访问外网，也不动系统的 apt 源配置；没有对应版本、或从服务端装失败时，自动退回在线 `apt-get`。
+下载的 `.deb` 装完即删，不占 SD 卡。
+
+只有 9000 端口是明文 HTTP，而且只提供这个脚本、程序包（凭注册口令）与离线依赖仓库（公开的 Debian 软件包）；
+设备装好后一律走 9001 的 HTTPS，并固定服务端证书指纹。脚本本身不含任何口令。
 
 **连不到 9000 端口时手工安装**：把程序包拷到设备上解开，在包目录里以 root 运行
 
 ```sh
 SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹> ENROLL_TOKEN=注册口令 ./install-agent.sh
 ```
+
+（能访问 9000 端口、只是不想走一键脚本时，加上 `DEPS_URL=http://<服务器>:9000/apt` 也能用离线依赖包。）
 
 `install-agent.sh` 的行为要知道：
 
@@ -216,7 +237,7 @@ SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹
 
 设备会自动注册并出现在管理后台（在线），编号规则见 4.1。
 
-`install-agent.sh` 会装好播放所需的 GStreamer 组件（`python3-gst-1.0`、`gstreamer1.0-plugins-good/bad`、
+播放所需的软件包列在程序包里的 `deps.txt`（`python3-gst-1.0`、`gstreamer1.0-plugins-good/bad`、
 `gstreamer1.0-libav` 等）。播放进程在无桌面环境下经 DRM/KMS 直接出画面，不需要 X11/Wayland，
 也不经 GPU。
 
@@ -496,7 +517,7 @@ check-display.sh        -> current/check-display.sh
 |---|---|
 | 程序包 OTA 即可 | 播放逻辑（含随代理分发的播放进程 `gstplayer.py`）、清单新字段的解析、下载与缓存策略、心跳内容；以及 `update.sh` 能做的系统调整：systemd 单元、启动参数、配置文件、换播放器所需的改动 |
 | 还需同时更新服务端 | 清单生成、模板渲染、管理后台界面（服务端在机房，更新它不用去现场） |
-| **OTA 做不到** | 需要从外网装的系统软件包（`update.sh` 约定离线运行、不调 `apt`，设备通常没有外网）；把设备从本服务端迁走（`server_url`、证书指纹写在设备的 `agent.json` 里——`update.sh` 技术上能改，但改错了设备就再也连不回来） |
+| **OTA 做不到** | 新增系统软件包（`update.sh` 约定离线运行、不调 `apt`；新依赖只对之后装机的设备生效，已装设备要重装）；把设备从本服务端迁走（`server_url`、证书指纹写在设备的 `agent.json` 里——`update.sh` 技术上能改，但改错了设备就再也连不回来） |
 
 `update.sh` 的约定：幂等（可重复执行）；离线可运行；对版本目录以外的改动要与上一个版本兼容——
 回滚只切回旧版本目录，**不会撤销** `update.sh` 做过的系统改动。新增设备端配置项时仍要让"缺省值即可用"。
@@ -515,6 +536,7 @@ check-display.sh        -> current/check-display.sh
 | `data/media/` | 各设备的播放内容与文件缓存区 | **必须** |
 | `data/cache.json` | 文件缓存区索引 | 建议（缺了缓存区里的内容无法复用，会重新转码） |
 | `data/packages/` | 上传的设备端程序包 | 建议（否则待下发的更新目标会失效，新设备也没有包可装） |
+| `data/deps/` | 离线依赖包 | 不必，可重新上传；缺了装机退回在线安装 |
 | `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
 | `server.json` | 配置（含两个口令） | **必须**。另外把 `.secrets/tokens.env` 也备份到构建机之外 |
 
@@ -591,7 +613,8 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 
 ## 9. 无外网运行
 
-安装过程可以联网（装 ffmpeg、字体、GStreamer 等），**安装完成后整个系统只需要局域网**：服务端、设备端、
+服务端安装时要联网（装 ffmpeg、字体等）；设备装机在服务端有离线依赖包时只需局域网（3.3）。
+**安装完成后整个系统只需要局域网**：服务端、设备端、
 管理后台都不访问外网——没有云服务、在线授权、CDN 或外部字体，管理后台的页面资源全部内嵌在服务端里。
 
 ### 9.1 已经处理掉的离线问题
@@ -614,12 +637,11 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
   服务器时间偏了且没有可用的时间源时，手工校准：`date -s "2026-10-02 09:30:00"` 后 `hwclock -w`。
 - **server_url 用的域名**：设备**第一次注册时**必须能解析（局域网 DNS 静态记录，或在设备的
   `/etc/hosts` 里写死）。之后 DNS 失效会用缓存的地址；但服务器换了 IP 而 DNS 又不可用时，设备找不到新地址。
-- **安装完成后不能再装软件**：ffmpeg、CJK 字体、GStreamer 要在安装时装好（`install-agent.sh`
-  已包含设备端所需的全部软件包）。
+- **服务器安装完成后不能再装软件**：ffmpeg、CJK 字体、poppler 要在安装时装好。
 - **程序升级**：在一台能联网的机器上 `make package`（或下载 Release），把程序包拷到局域网里的电脑，
   再从管理后台上传、下发即可——OTA 只在局域网内进行。
-- **装机时要能装 GStreamer**：一键安装会 `apt-get install` 播放依赖，装机那一刻设备需要能访问 Armbian/Debian 软件源
-  （或局域网镜像）。之后就不需要外网了。完全没有外网的现场用母镜像（4.2）。
+- **设备装机的依赖**：上传了与设备 Debian 版本一致的离线依赖包时装机完全离线；否则装机那一刻设备要能访问
+  Armbian/Debian 软件源。离线依赖包要在一台能联网、装了 docker 的机器上 `make deps`（或从 Release 下载）。
 
 ## 10. 当前已知简化
 

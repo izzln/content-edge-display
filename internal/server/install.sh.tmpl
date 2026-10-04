@@ -6,7 +6,7 @@
 # 可选：HDMI_MODE=1440x900@60（默认）、HDMI_FORCE=e（EDID 里没有该模式时强制）、CMA=256M（默认按内存大小定）。
 #
 # 做的事：凭注册口令从服务端下载最新的设备程序包 → 执行包内 install-agent.sh
-# （安装依赖、安装程序、写配置、设置显示参数、开机自启）→ 重启。
+# （安装依赖——服务端有离线依赖包时从局域网装——、安装程序、写配置、设置显示参数、开机自启）→ 重启。
 set -eu
 
 # 整个脚本包在函数里、读完再执行：经管道运行时脚本本身就是 stdin，不能让中途的命令读走后半截。
@@ -35,6 +35,7 @@ main() {
 	esac
 	tar -xzf "$tmp/agent.tar.gz" -C "$tmp"
 	cd "$tmp"/display-agent-*/
-	SERVER_URL="$SERVER_URL" TLS_FINGERPRINT="$TLS_FINGERPRINT" ENROLL_TOKEN="$ENROLL_TOKEN" sh ./install-agent.sh </dev/null
+	SERVER_URL="$SERVER_URL" TLS_FINGERPRINT="$TLS_FINGERPRINT" ENROLL_TOKEN="$ENROLL_TOKEN" DEPS_URL="$BOOTSTRAP/apt" \
+		sh ./install-agent.sh </dev/null
 }
 main

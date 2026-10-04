@@ -10,7 +10,7 @@ SECRETS = .secrets/tokens.env
 # 此时包里是占位值，服务端带着占位值会拒绝启动，提示用 make tokens 生成。
 BAKE_TOKENS ?= $(if $(CI),0,1)
 
-.PHONY: build agent-arm tokens package package-agent package-server test clean
+.PHONY: build agent-arm tokens package package-agent package-server deps test clean
 
 build:
 	go build -ldflags="$(LDFLAGS)" -o bin/display-server ./cmd/display-server
@@ -70,6 +70,12 @@ package-server: build
 	@tar -czf bin/display-server-$(VERSION)-$(HOST_ARCH).tar.gz -C bin/stage display-server-$(VERSION)
 	@rm -rf bin/stage
 	@echo "→ bin/display-server-$(VERSION)-$(HOST_ARCH).tar.gz (服务端)"
+
+# 设备端离线依赖包：后台上传一次，之后装机从局域网装依赖（需要 docker 与 qemu，见 scripts/build-deps.sh）。
+# DEBIAN 须与设备 Armbian 的 VERSION_CODENAME 一致，如 make deps DEBIAN=trixie
+DEBIAN ?= bookworm
+deps:
+	sh scripts/build-deps.sh $(DEBIAN)
 
 test:
 	go vet ./...

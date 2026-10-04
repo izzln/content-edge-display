@@ -1,7 +1,7 @@
 name: CI
 
 # 每次 push / PR 跑测试并产出成品包（Actions 页面可直接下载）；
-# 推送 v* 标签时额外发布 Release，把两个包挂成附件。
+# 推送 v* 标签时额外发布 Release，把两个包挂成附件，并打各 Debian 版本的离线依赖包（手动运行也会打）。
 on:
   push:
     branches: ["**"]
@@ -81,3 +81,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${{ github.ref_name }}" bin/*.tar.gz --title "${{ github.ref_name }}" --generate-notes
+
+  deps:
+    name: 离线依赖包 ${{ matrix.codename }}
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 附到 Release
+    strategy:
+      matrix:
+        codename: [bookworm, trixie, noble]   # Armbian 的 Debian/Ubuntu 版本
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+      - run: make deps DEBIAN=${{ matrix.codename }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: display-deps-${{ matrix.codename }}
+          path: bin/display-deps-*.tar.gz
+          retention-days: 90
+          if-no-files-found: error
+      - name: 附到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" bin/display-deps-*.tar.gz
