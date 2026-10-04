@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -50,6 +49,7 @@ type mediaJob struct {
 	kind     string
 	deviceID string
 	name     string // 最终文件名（视频容器统一为 .mp4；PDF 保持原名）
+	key      string // 缓存区的处理键（原片 sha256 + 处理参数），完成后登记，供同一原片复用
 	src      string // 暂存的原片
 	status   string
 	progress int // 0~100；拿不到视频时长时恒为 0
@@ -237,7 +237,11 @@ func (s *Server) transcodeOne(ctx context.Context, j *mediaJob) {
 		s.jobs.update(j, func(j *mediaJob) { j.status, j.err, j.cancel = jobFailed, err.Error(), nil })
 		return
 	}
-	// 完成：追加到播放列表末尾，然后从队列里摘掉
+	// 完成：纳入缓存区、追加到播放列表末尾，然后从队列里摘掉
+	if err := s.cacheAdopt(dir, j.name, j.key); err != nil {
+		log.Printf("cache: cannot add %s to the cache: %v", j.name, err)
+	}
+	s.kickCache()
 	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
 		log.Printf("transcoded but adding to playlist failed: device %s, %s: %v", j.deviceID, j.name, err)
 	}
@@ -313,6 +317,10 @@ func (s *Server) renderPDF(ctx context.Context, j *mediaJob) {
 		s.jobs.update(j, func(j *mediaJob) { j.status, j.err, j.cancel = jobFailed, uiErr, nil })
 		return
 	}
+	if err := s.cacheAdopt(dir, j.name, j.key); err != nil {
+		log.Printf("cache: cannot add %s to the cache: %v", j.name, err)
+	}
+	s.kickCache()
 	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
 		log.Printf("pdf rendered but adding to playlist failed: device %s, %s: %v", j.deviceID, j.name, err)
 	}
@@ -327,25 +335,11 @@ func moveFile(src, dst string) error {
 	if os.Rename(src, dst) == nil {
 		return nil
 	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
 	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
-	out, err := os.Create(tmp)
-	if err != nil {
+	if err := copyFile(src, tmp); err != nil {
 		return err
 	}
-	if _, err = io.Copy(out, in); err == nil {
-		err = out.Close()
-	} else {
-		out.Close()
-	}
-	if err == nil {
-		err = os.Rename(tmp, dst)
-	}
-	if err != nil {
+	if err := os.Rename(tmp, dst); err != nil {
 		os.Remove(tmp)
 		return err
 	}

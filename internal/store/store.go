@@ -138,7 +138,12 @@ type State struct {
 	Updates     map[string]UpdateTarget      `json:"updates"`
 	Global      GlobalConfig                 `json:"global"`
 	Schedules   []Schedule                   `json:"schedules"`
+	// CacheQuotaGB 是服务端文件缓存区的配额（GB）；0 表示用 DefaultCacheQuotaGB。
+	CacheQuotaGB int `json:"cache_quota_gb,omitempty"`
 }
+
+// DefaultCacheQuotaGB 是文件缓存区的默认配额。
+const DefaultCacheQuotaGB = 16
 
 func (s *State) init() {
 	if s.DeviceAttrs == nil {
@@ -225,6 +230,16 @@ func (st *Store) persistLocked() error {
 }
 
 // ---- 便捷读取 ----
+
+// CacheQuotaGB 返回文件缓存区配额（GB）。
+func (st *Store) CacheQuotaGB() int {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	if st.s.CacheQuotaGB > 0 {
+		return st.s.CacheQuotaGB
+	}
+	return DefaultCacheQuotaGB
+}
 
 // Attrs 返回设备属性的副本。
 func (st *Store) Attrs(deviceID string) map[string]string {

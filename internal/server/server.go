@@ -201,6 +201,7 @@ type Server struct {
 	encoderErr string       // 不可用的原因（日志与后台提示用）
 	pdf        pdfRenderer  // nil 表示没有可用的 poppler-utils：不收 PDF
 	pdfErr     string
+	cache      *contentCache // 文件缓存区，见 cache.go
 	jobs       *jobQueue
 	uploadMu   sync.Mutex
 	uploading  map[string]bool // 正在上传的 设备/文件名，见 claimMediaName
@@ -255,6 +256,9 @@ func New(cfg *Config) (*Server, error) {
 		return nil, err
 	}
 
+	if s.cache, err = openCache(filepath.Join(cfg.MediaRoot, ".store"), filepath.Join(cfg.DataDir, "cache.json")); err != nil {
+		return nil, err
+	}
 	s.jobs = newJobQueue()
 	// ffmpeg 只在启动时检测一次；装好或改了 ffmpeg_path 后重启服务端生效。
 	if enc, err := transcode.Find(cfg.FFmpegPath); err != nil {
@@ -278,7 +282,11 @@ func New(cfg *Config) (*Server, error) {
 	s.stop, s.stopped = cancel, make(chan struct{})
 	go func() {
 		defer close(s.stopped)
-		s.runJobs(ctx)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); s.runJobs(ctx) }()
+		go func() { defer wg.Done(); s.runCache(ctx.Done()) }()
+		wg.Wait()
 	}()
 	return s, nil
 }
@@ -317,7 +325,7 @@ func (s *Server) setPDFRenderer(r pdfRenderer) {
 	}
 }
 
-// Close 停止后台转码协程并等它退出（正在跑的 ffmpeg 会被杀掉），之后不会再有文件写入。
+// Close 停止后台转码与缓存整理协程并等它们退出（正在跑的 ffmpeg 会被杀掉），之后不会再有文件写入。
 func (s *Server) Close() {
 	if s.stop != nil {
 		s.stop()

@@ -84,6 +84,12 @@
   .sync.syncing { background:#e3eeff; color:var(--accent); }
   .sync.offline { background:#eee; color:#777; }
   .bad { color:var(--bad); font-weight:600; }
+  .cachebar { display:flex; height:18px; border-radius:4px; overflow:hidden; background:#eef0f3; margin:10px 0 6px; max-width:640px; }
+  .cachebar i { display:block; height:100%; }
+  .cachebar .inuse { background:var(--accent); }
+  .cachebar .cached { background:#9ec0f5; }
+  .legend span { display:inline-block; margin-right:14px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
   .bad-note { margin-top:8px; padding:8px 10px; border:1px solid var(--bad); border-radius:4px; background:#fff4f4; color:#a00; }
 </style>
 </head>
@@ -93,6 +99,7 @@
   <button class="tab active" data-tab="devices">设备</button>
   <button class="tab" data-tab="templates">模板与时段</button>
   <button class="tab" data-tab="firmware">程序更新</button>
+  <button class="tab" data-tab="storage">存储</button>
   <span class="right">操作生效延迟 ≈ 设备轮询间隔 <button onclick="setToken()">设置Token</button></span>
 </header>
 <main>
@@ -132,6 +139,7 @@
     </div>
     <table id="fwTable"></table>
   </div>
+  <div id="tab-storage" style="display:none"><div id="storageBox" class="bar">读取中…</div></div>
 </main>
 <div id="overlay"><div id="modal"></div></div>
 <div class="toast" id="toast"></div>
@@ -165,7 +173,8 @@ function closeModal() {
 $("#overlay").addEventListener("click", e => { if (e.target.id === "overlay") closeModal(); });
 document.querySelectorAll("header .tab").forEach(b => b.onclick = () => {
   document.querySelectorAll("header .tab").forEach(x => x.classList.toggle("active", x === b));
-  for (const t of ["devices", "templates", "firmware"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
+  for (const t of ["devices", "templates", "firmware", "storage"]) $("#tab-" + t).style.display = b.dataset.tab === t ? "" : "none";
+  if (b.dataset.tab === "storage") loadStorage();
 });
 
 let devices = [], templates = [], global = {}, schedules = [], firmware = [], info = {}, infoFetchedAt = 0;
@@ -190,6 +199,43 @@ async function refresh() {
     console.error(e);
     toast("界面渲染出错: " + e.message);
   }
+}
+
+// ================= 存储（文件缓存区） =================
+// fmtBytes 比 fmtSize 多了 GB 档，0 显示为 0（fmtSize 最少显示 1 KB，那是给"有文件"用的）。
+const fmtBytes = n => !n ? "0" : n >= 1 << 30 ? (n / (1 << 30)).toFixed(n >= 10 * (1 << 30) ? 0 : 1) + " GB" : fmtSize(n);
+
+async function loadStorage() {
+  let st;
+  try { st = await api("/api/v1/admin/cache"); } catch { return; }
+  const GB = 1 << 30, quota = st.quota_gb * GB, scale = Math.max(quota, st.used_bytes, 1);
+  const pct = n => (n * 100 / scale).toFixed(2) + "%";
+  const overDisk = st.disk_free_bytes >= 0 && quota > st.used_bytes + st.disk_free_bytes;
+  $("#storageBox").innerHTML = `<b>文件缓存区</b>
+    <div class="cachebar" title="相对配额 ${st.quota_gb} GB">
+      <i class="inuse" style="width:${pct(st.in_use_bytes)}"></i><i class="cached" style="width:${pct(st.cached_bytes)}"></i></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>设备在用 <b>${fmtBytes(st.in_use_bytes)}</b>（${st.in_use_files} 个文件，不会被清理）</span>
+      <span><i style="background:#9ec0f5"></i>缓存中 <b>${fmtBytes(st.cached_bytes)}</b>（${st.files - st.in_use_files} 个，可复用、满了自动清理）</span>
+      <span>配额 <b>${st.quota_gb} GB</b></span>
+      ${st.disk_free_bytes >= 0 ? `<span class="muted">磁盘剩余 ${fmtBytes(st.disk_free_bytes)}</span>` : ""}
+    </div>
+    ${st.in_use_bytes >= quota ? `<div class="bad-note">设备在用的文件已占满配额，<b>新上传会被拒收</b>。请调大缓存区，或先删除不再使用的内容。</div>` : ""}
+    <div class="row" style="margin-top:10px">配额 <input type="number" id="cacheQuota" min="${st.min_quota_gb}" step="1" value="${st.quota_gb}" style="width:6em"> GB
+      <button class="primary" onclick="saveQuota()">保存</button>
+      <span class="muted">最小 ${st.min_quota_gb} GB（设备在用文件的总大小）</span></div>
+    ${overDisk ? `<div class="warn">配额超过了磁盘可用空间（剩余 ${fmtBytes(st.disk_free_bytes)}），缓存区可能把磁盘写满。</div>` : ""}
+    <p class="muted">上传的图片、视频、PDF 处理好后存在服务端的缓存区里。在设备上删除文件、删除设备，内容不会立即删掉：
+      之后再上传同一个文件（不论哪台设备）会直接复用，<b>不用重新转码</b>。缓存区超过配额时，从最久没用的内容开始自动清理；
+      设备正在播放的内容永远不会被清理。调小配额会立即按新配额清理。</p>`;
+}
+
+async function saveQuota() {
+  const v = parseInt($("#cacheQuota").value, 10);
+  if (!(v > 0)) return toast("请输入配额（GB）");
+  try { await api("/api/v1/admin/cache", { method: "PUT", ...J({ quota_gb: v }) }); } catch { return; }
+  toast("已保存");
+  loadStorage();
 }
 
 // ================= 设备 =================
@@ -572,6 +618,8 @@ function rowInner(it, n) {
       <button class="link" data-act="pages">${it.open ? "收起页面 ▴" : "看页面 ▾"}</button>`;
   }
   if (it.state !== "ready") meta += ` · <span class="stt">${esc(stateText(it))}${progressText(it)}</span>`;
+  if (it.reused && it.state === "ready") meta += ` · <span class="okc" title="之前处理过同一个文件，直接用了缓存区里的结果">已复用，无需${
+    it.type === "video" ? "转码" : it.type === "document" ? "转换" : "处理"}</span>`;
   if (it.type === "document" && it.aspect && (it.aspect < 1) !== (plMediaAspect < 1) &&
       Math.max(it.aspect, plMediaAspect) / Math.min(it.aspect, plMediaAspect) > 1.4) {
     meta += `<div class="warn">${it.aspect < 1 ? "竖版页面放进横向媒体区，上下会被裁掉" : "横版页面放进竖向媒体区，左右会被裁掉"}，建议导出${plMediaAspect < 1 ? "竖" : "横"}版</div>`;
@@ -787,6 +835,7 @@ async function uploadOne(it) {
       it.state = "rejected"; it.error = bad.reason;
     } else {
       it.name = it.label = arr(r.accepted)[0] || arr(r.transcoding)[0]; // 同名时服务端会改名
+      it.reused = arr(r.reused).includes(it.name);
       it.state = arr(r.accepted).length ? "ready" : "queued";
       if (it.thumb && it.state === "ready") thumbCache.set(dev + "/" + it.name, it.thumb);
     }

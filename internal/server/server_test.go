@@ -464,7 +464,7 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"device dev-001 online", "upload started: device dev-001, a.jpg", "upload done: device dev-001, a.jpg",
-		"queued for transcoding as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4", "transcoding: device dev-001, b.mp4 50%",
+		"queued for processing as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4", "transcoding: device dev-001, b.mp4 50%",
 		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 200",
 	} {
 		if !strings.Contains(out, want) {

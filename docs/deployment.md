@@ -75,6 +75,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   display-server      二进制
   server.json         配置
   media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
+  media/.store/       文件缓存区：处理好的内容各存一份，设备目录里是指向它的硬链接（见 5 节"文件缓存区"）
   fonts/              渲染用字体
   data/               服务端状态：state.json、firmware/、rendered/、incoming/（首次启动自动创建）
 ```
@@ -382,12 +383,19 @@ PDF 同样在后台逐页渲染，列表里显示"转换中 3/12 页"；有密�
 （未完成前不会下发给设备）；失败会显示原因，可删除重传。转码是串行的，同时上传多个视频会排队。
 服务端控制台每 30 秒报一次转码进度。
 
+**文件缓存区**（后台"存储"页）：处理好的图片、视频、PDF 在服务端各存一份（`media/.store/`），设备目录里的文件
+是指向它的硬链接，不占额外空间。在设备上删除文件、删除设备，内容不会立即删掉，而是留在缓存区里；之后再上传
+同一个原片（不论哪台设备）会**直接复用**，立即就绪、不再转码，列表里标"已复用"。缓存区默认 16GB：超过配额时
+从最久没用的内容开始自动清理，设备正在播放的内容永远不清；配额不能设得比设备在用文件的总大小还小（页面上
+显示最小值）。设备在用的文件已经占满配额时，新上传会被拒收，需要先调大配额或删除不用的内容。
+媒体目录所在的文件系统不支持硬链接（如 exFAT 移动硬盘）时自动改为复制，功能不变，只是多占一份空间。
+
 服务端控制台（`journalctl -u display-server -f`）记录的是**服务端自己在做什么**，不刷设备心跳。
 服务端与设备端的日志一律是英文；后台界面上给运营方看的提示（如拒收原因）是中文：
 
 ```
 upload started: device scr-0017, promo.mov (about 186.4MB)
-upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for transcoding as promo.mp4
+upload done: device scr-0017, promo.mov (186.4MB in 21.3s), queued for processing as promo.mp4
 transcode started: device scr-0017, promo.mp4 (source 186.4MB, 62s)
 transcoding: device scr-0017, promo.mp4 37% (30s elapsed)
 transcoding: device scr-0017, promo.mp4 74% (1m0s elapsed)
@@ -500,7 +508,8 @@ tar czf display-backup.tar.gz -C /srv display
 tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/data/rendered'
 ```
 
-排除 `rendered/` 可以显著减小体积，它会按需重新生成。
+排除 `rendered/` 可以显著减小体积，它会按需重新生成。`media/` 里的设备文件与 `media/.store/` 是硬链接，
+`tar` 会原样保留（只存一份）；改用 rsync 时要加 `-H`，否则恢复后每份内容会变成两份。
 
 ## 7. 验机清单（每台设备交付前）
 

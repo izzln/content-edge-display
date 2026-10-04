@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
 	"github.com/izzln/content-edge-display/internal/web"
@@ -50,6 +51,8 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/firmware", s.adminWrite(s.handleUploadFirmware))
 	mux.HandleFunc("DELETE /api/v1/admin/firmware/{version}", s.adminWrite(s.handleDeleteFirmware))
 	mux.HandleFunc("PUT /api/v1/admin/rollout", s.adminWrite(s.handleRollout))
+	mux.HandleFunc("GET /api/v1/admin/cache", s.adminRead(s.handleGetCache))
+	mux.HandleFunc("PUT /api/v1/admin/cache", s.adminWrite(s.handlePutCache))
 }
 
 // handleInfo 返回服务端能力，后台据此提示（例如没装 ffmpeg 时不能上传视频）。
@@ -252,7 +255,16 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	s.jobs.removeDevice(dev.ID)
 	os.RemoveAll(filepath.Join(s.renderedDir(), dev.ID))
+	// 设备的媒体文件只是缓存区里的链接：记下它们"刚刚还在用"，删掉链接，内容留在缓存区里
+	if names, err := manifest.ListMedia(s.deviceMediaDir(dev.ID)); err == nil {
+		paths := make([]string, len(names))
+		for i, n := range names {
+			paths[i] = filepath.Join(s.deviceMediaDir(dev.ID), n)
+		}
+		s.cacheTouch(paths...)
+	}
 	os.RemoveAll(s.deviceMediaDir(dev.ID))
+	s.kickCache()
 	w.WriteHeader(http.StatusNoContent)
 }
 
