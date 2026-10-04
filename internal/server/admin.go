@@ -63,7 +63,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"transcode":   false,
 		"video_spec": map[string]int{
 			"max_w": spec.MaxW, "max_h": spec.MaxH, "max_fps": spec.MaxFPS,
-			"bitrate_k": spec.BitrateK, "max_bitrate_k": spec.MaxBitrateK,
+			"crf": spec.CRF, "max_bitrate_k": spec.MaxBitrateK,
 		},
 	}
 	if enc := s.videoEncoder(); enc != nil {

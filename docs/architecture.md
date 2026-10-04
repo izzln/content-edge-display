@@ -245,7 +245,8 @@ NotoSansCJK），未配置时退回内嵌拉丁字体，中文会显示为方框
 
 **视频**一律在服务端转码（`internal/transcode`，调用 ffmpeg）：H.264 High@4.0、x264 `fastdecode`
 （关掉 CABAC 与环路滤波，解码 CPU 省三四成，文件大 10~20%）、等比缩到 1440×900 以内（只缩不放）、
-≤ 30fps、码率约 2.5Mbps（上限 4Mbps）、去音轨、faststart。
+≤ 30fps、按画质编码（CRF 22，码率随内容走：静态画面一两百 kbps，复杂画面封顶 4Mbps）、去音轨、faststart。
+不用固定码率：那会把简单素材也撑到目标码率（原片 75kbps 的动画转出来 2.5Mbps，文件大十倍、画质没变好）。
 
 设备用 H3 的硬件解码器（cedrus）放视频。它是无状态解码器，需要 V4L2 Request API：FFmpeg 上游
 至今没有合入这部分支持（所以 mpv 只能软解，这是改用 GStreamer 的原因），GStreamer 的 v4l2codecs
