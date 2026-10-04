@@ -55,13 +55,16 @@ FOURCC_ARGB8888 = 0x34325241
 IMAGE_OUTPUT = ("videoconvert ! videocrop name=crop ! videoscale method=4-tap ! "
                 "video/x-raw,width={w},height={h},pixel-aspect-ratio=1/1 ! videoconvert ! {sink}")
 # 视频：按顺序尝试，第一个真正放起来的就一直用（本进程内）。只有前一种在这台设备上放不出来时才往后退。
-# 开头的 video/x-raw 把解码器输出限定为"系统内存"caps：不加的话 v4l2slh264dec 与 kmssink 会协商成
-# DMA_DRM caps，而这条路上的分配查询拿不到 VideoMeta，解码器直接判协商失败（not-negotiated）。
-# 限定之后帧仍是解码器自己的 dmabuf，kmssink 照样直接导入显示，不拷贝。
+# 开头的 capsfilter 限定解码器输出两件事：
+#   - 系统内存 caps：不加的话 v4l2slh264dec 与 kmssink 会协商成 DMA_DRM caps，而这条路上的分配查询
+#     拿不到 VideoMeta，解码器直接判协商失败。限定之后帧仍是解码器自己的 dmabuf，kmssink 照样直接导入。
+#   - 线性格式（NV12；软解时是 I420）：kmssink 也声明能吃 Allwinner 分块格式 NV12_32L32，解码器会优先选它，
+#     结果显示不了，只能退到软件转格式——逐帧解分块，卡顿，而且没有裁剪。
+VIDEO_CAPS = 'capsfilter caps="video/x-raw,format=(string){{NV12,I420}}"'
 VIDEO_OUTPUTS = (
-    ("cover", "capsfilter caps=video/x-raw ! videocrop name=crop ! {sink}"),  # 裁剪标记 → 图层取源矩形，撑满媒体区
-    ("fit", "capsfilter caps=video/x-raw ! {sink}"),                     # 不裁：按比例缩放居中，留黑边
-    ("convert", "capsfilter caps=video/x-raw ! videoconvert ! {sink}"),  # 再加软件转格式（解码器只给得出图层不吃的格式时）
+    ("cover", VIDEO_CAPS + " ! videocrop name=crop ! {sink}"),  # 裁剪标记 → 图层取源矩形，撑满媒体区
+    ("fit", VIDEO_CAPS + " ! {sink}"),                          # 不裁：按比例缩放居中，留黑边
+    ("convert", "capsfilter caps=video/x-raw ! videoconvert ! videocrop name=crop ! {sink}"),  # 任意格式软件转换后再裁
 )
 PLAYBIN_VIDEO, PLAYBIN_NATIVE_VIDEO = 0x1, 0x40  # 只要视频（屏幕一律静音，不开声卡）；不让 playbin 自己插转换
 
@@ -397,6 +400,7 @@ class Player:
         self.index = -1
         self.shown = set()        # 本次 load 以来已经显示过的项（只为第一次显示记日志）
         self.pipe = None          # 当前播放项的管线
+        self.bus_handler = 0      # 当前管线总线上的消息回调
         self.started = False      # 当前项是否已开始显示
         self.source = ""          # 当前项的画面尺寸与裁剪（日志用）
         self.timer = 0            # 图片到点淡出 / 视频剩余时间巡检
@@ -537,7 +541,9 @@ class Player:
         pipe.set_property("video-sink", bin_)
         pipe.set_property("flags", PLAYBIN_VIDEO | PLAYBIN_NATIVE_VIDEO)
         pipe.connect("deep-element-added", self._on_element)
-        self._watch(pipe, lambda _bus, msg: self._on_item_message(pipe, msg))
+        bus = pipe.get_bus()
+        bus.add_signal_watch()
+        self.bus_handler = bus.connect("message", lambda _bus, msg: self._on_item_message(pipe, msg))
         self.pipe, self.started, self.source = pipe, False, ""
         if pipe.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._item_failed("cannot start pipeline")
@@ -672,13 +678,11 @@ class Player:
             self.timer = 0
         if self.pipe:
             pipe, self.pipe = self.pipe, None
-            pipe.get_bus().remove_signal_watch()
+            bus = pipe.get_bus()
+            # 回调闭包引用着管线、管线又持有总线：不断开这个环，每一项的管线都释放不掉
+            bus.disconnect(self.bus_handler)
+            bus.remove_signal_watch()
             pipe.set_state(Gst.State.NULL)
-
-    def _watch(self, pipe, handler):
-        bus = pipe.get_bus()
-        bus.add_signal_watch()
-        bus.connect("message", handler)
 
 
 def main():

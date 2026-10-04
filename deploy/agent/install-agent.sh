@@ -5,6 +5,7 @@
 #   SERVER_URL=http://display.lan:9000 ./install-agent.sh
 # 注册口令默认取同目录的 enroll-token（make package 时写入），也可用 ENROLL_TOKEN= 覆盖。
 # 显示模式默认 1440x900@60，可用 HDMI_MODE= 改；EDID 里没有该模式时用 HDMI_FORCE=e 强制。
+# CMA 按内存大小自动定（1GB 板 256M，512MB 板 192M），可用 CMA= 改。
 #
 # 每次运行都会重写 /etc/display-agent/agent.json；安装后**不会** enable 服务，
 # 需要人工确认画面无误后再 systemctl enable display-agent。
@@ -27,6 +28,12 @@ HDMI_MODE="${HDMI_MODE:-1440x900@60}"
 # 有些 HDMI 驱动板的 EDID 里根本没有 1440x900 这个模式，内核会忽略 video= 退回 EDID 首选模式。
 # 这种情况下加 e（force）强制输出：HDMI_FORCE=e ./install-agent.sh
 HDMI_FORCE="${HDMI_FORCE:+,$HDMI_FORCE}"
+# CMA（连续物理内存）：硬解缓冲、模板叠加层与控制台的帧缓冲都从这里分。Armbian 默认 128MB，
+# 播放视频时只剩几 MB。按内存大小定：1GB 板 256M，512MB 板 192M；可用 CMA= 覆盖。
+# CMA 空闲时普通内存照样能借用，调大不浪费。
+MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+if [ "${MEM_MB:-0}" -ge 768 ]; then CMA_DEFAULT=256M; else CMA_DEFAULT=192M; fi
+CMA="${CMA:-$CMA_DEFAULT}"
 
 # 注册口令：优先用环境变量，否则取包内 enroll-token（make package 时写入）
 if [ -z "${ENROLL_TOKEN:-}" ] && [ -f "$HERE/enroll-token" ]; then
@@ -80,26 +87,27 @@ systemctl daemon-reload
 #   systemctl enable --now display-agent
 # 做母镜像时也应保持未 enable，烧完卡再按需开启。
 
-echo "== 固定 HDMI 输出 ${HDMI_MODE}、禁用息屏"
+echo "== 固定 HDMI 输出 ${HDMI_MODE}、禁用息屏、CMA ${CMA}"
 ENV=/boot/armbianEnv.txt
 if [ -f "$ENV" ]; then
-  # 先清掉我们以前写进去的 video=/consoleblank=，再写当前这份，避免反复安装越堆越多、
-  # 或者改了分辨率却被旧参数盖住。
-  sed -i -E 's/[[:space:]]*video=HDMI-A-1:[^[:space:]]*//g; s/[[:space:]]*consoleblank=0//g' "$ENV"
-  sed -i -E '/^extraargs=[[:space:]]*$/d' "$ENV"
+  # 先清掉以前写进去的 video=/consoleblank=/cma=，再写当前这份，避免反复安装越堆越多、
+  # 或者改了参数却被旧值盖住。
+  sed -i -E 's/[[:space:]]*video=HDMI-A-1:[^[:space:]]*//g; s/[[:space:]]*consoleblank=0//g; s/[[:space:]]*cma=[^[:space:]]*//g' "$ENV"
+  sed -i -E 's/^extraargs=[[:space:]]+/extraargs=/; /^extraargs=$/d' "$ENV"
   if grep -q '^extraargs=' "$ENV"; then
-    sed -i "s|^extraargs=\(.*\)$|extraargs=\1 video=HDMI-A-1:${HDMI_MODE}${HDMI_FORCE} consoleblank=0|" "$ENV"
+    sed -i "s|^extraargs=\(.*\)$|extraargs=\1 video=HDMI-A-1:${HDMI_MODE}${HDMI_FORCE} consoleblank=0 cma=${CMA}|" "$ENV"
   else
-    echo "extraargs=video=HDMI-A-1:${HDMI_MODE}${HDMI_FORCE} consoleblank=0" >> "$ENV"
+    echo "extraargs=video=HDMI-A-1:${HDMI_MODE}${HDMI_FORCE} consoleblank=0 cma=${CMA}" >> "$ENV"
   fi
   echo "   $(grep '^extraargs=' "$ENV")"
-  echo "   提示：这项要重启才生效。重启后用下面这条确认实际输出模式："
+  echo "   提示：这些要重启才生效。重启后用下面两条确认实际输出模式与 CMA 大小："
   echo "     cat /sys/class/drm/card*-HDMI-A-1/modes | head -1"
+  echo "     grep Cma /proc/meminfo"
 fi
 
 echo
 echo "== 完成。接下来："
-echo "   1) reboot                                   # 让 HDMI 模式生效"
+echo "   1) reboot                                   # 让 HDMI 模式与 CMA 生效"
 echo "   2) systemctl start display-agent            # 先手工起一次看效果"
 echo "   3) /usr/local/lib/display-agent/check-display.sh   # 确认分辨率、硬解与温度"
 echo "   4) systemctl enable display-agent           # 确认无误后再设为开机自启"
