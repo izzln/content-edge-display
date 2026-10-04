@@ -339,6 +339,40 @@ func testMedia(t *testing.T, dir string) (img1, img2, video string) {
 	return
 }
 
+// 让解码器白解第一帧（绕开 cedrus 每个会话第一帧解坏的问题）不能改变输出：帧数、时间戳都与不加时一致，
+// 第一帧也不能出现两次。
+func TestPlayerScriptPrimeDecoder(t *testing.T) {
+	py := gstPython(t)
+	scriptPath(t)
+	_, _, video := testMedia(t, t.TempDir())
+	if video == "" {
+		t.Skip("没有 ffmpeg，造不了测试视频")
+	}
+	out, err := exec.Command(py, "-c", `
+import sys
+import gstplayer as g
+from gi.repository import Gst
+Gst.init(None)
+def run(prime):
+    p = Gst.parse_launch(g.VIDEO_OUTPUTS[0][1].format(decoder="avdec_h264", sink="fakesink name=sink signal-handoffs=true sync=false"))
+    p.get_by_name("src").set_property("location", sys.argv[1])
+    pts = []
+    p.get_by_name("sink").connect("handoff", lambda s, b, pad: pts.append(b.pts))
+    if prime:
+        g.prime_decoder(p)
+    p.set_state(Gst.State.PLAYING)
+    msg = p.get_bus().timed_pop_filtered(10 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+    p.set_state(Gst.State.NULL)
+    assert msg and msg.type == Gst.MessageType.EOS, msg and msg.parse_error()
+    return pts
+plain, primed = run(False), run(True)
+assert plain and primed == plain, (len(plain), len(primed), primed[:3])
+`, video).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
 // 播放脚本按顺序循环播放：图片按时长、视频播完即切，坏文件跳过，单张图片一直显示。
 func TestPlayerScriptSequencing(t *testing.T) {
 	py := gstPython(t)
