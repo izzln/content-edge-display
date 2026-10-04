@@ -210,7 +210,7 @@ systemctl enable display-agent        # 确认无误后再设为开机自启
 | 项 | 怎么判断 | 不对时的现场表现 |
 |---|---|---|
 | 内核输出模式 | `/sys/class/drm/card*-HDMI-A-1/modes` 里有没有 1440×900 | 播放时退回首选模式，画面按比例缩放 |
-| 硬件解码条件 | cedrus 已加载、`gst-inspect-1.0 v4l2slh264dec` 存在、`kmssink` 与 Python 绑定可用、CMA ≥ 160MB（建议 `cma=192M`） | 视频退化成软解：发热、卡顿，严重时过热关机；CMA 太小时视频放不出来 |
+| 硬件解码条件 | cedrus 已加载、`gst-inspect-1.0 v4l2slh264dec` 存在、`kmssink` 与 Python 绑定可用、CMA 达到建议值（1GB 板 256MB、512MB 板 192MB，`install-agent.sh` 自动写入 `cma=`） | 视频退化成软解：发热、卡顿，严重时过热关机；CMA 太小时视频放不出来 |
 | 实际播放状态 | 代理每次心跳写的 `/var/lib/display-agent/status.json`：解码器、输出分辨率 | — |
 | SoC 温度 | `/sys/class/thermal/thermal_zone0/temp` | 85°C 起降频，再高关机 |
 

@@ -61,12 +61,15 @@ fi
 # 都从 CMA（连续物理内存）里分；实测 128MB 在播放时只剩约 5MB，不够时视频直接放不出来。
 CMA_T=$(awk '/^CmaTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 CMA_F=$(awk '/^CmaFree:/ {print int($2 / 1024)}' /proc/meminfo)
+MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+# 与 install-agent.sh 一致：1GB 板 256M，512MB 板 192M
+if [ "${MEM_MB:-0}" -ge 768 ]; then CMA_WANT=256; else CMA_WANT=192; fi
 if [ -z "$CMA_T" ]; then
 	say "CMA" "读不到（/proc/meminfo 里没有 CmaTotal）"
-elif [ "$CMA_T" -lt 160 ]; then
-	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 偏小，播放视频时余量只剩几 MB，换片时可能分不到缓冲"
-	echo "               编辑 /boot/armbianEnv.txt，在 extraargs 里加上 cma=192M"
-	echo "               （已有 extraargs 就用空格追加在后面），然后 reboot。"
+elif [ "$CMA_T" -lt "$CMA_WANT" ]; then
+	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 偏小（${MEM_MB}MB 内存的板子建议 ${CMA_WANT}MB），换片时可能分不到缓冲"
+	echo "               重跑 install-agent.sh（会自动写入），或手工编辑 /boot/armbianEnv.txt，"
+	echo "               在 extraargs 里加上 cma=${CMA_WANT}M，然后 reboot。"
 	echo "               CMA 空闲时仍可被普通内存借用，调大不浪费内存。"
 else
 	say "CMA" "共 ${CMA_T}MB，空闲 ${CMA_F}MB ✓"
