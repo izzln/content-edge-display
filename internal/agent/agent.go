@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/izzln/content-edge-display/internal/fsutil"
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/player"
 	"github.com/izzln/content-edge-display/internal/sign"
@@ -25,54 +26,51 @@ import (
 // Version 是代理程序版本，构建时经 -ldflags -X 注入；随心跳上报并用于 OTA 判断。
 var Version = "dev"
 
-// maxPollBackoff 是轮询失败指数退避的上限。
-const maxPollBackoff = 5 * time.Minute
+// maxBackoff 是请求失败后重试间隔的上限。
+const maxBackoff = 5 * time.Minute
 
 type Agent struct {
-	cfg       *Config
-	player    player.Player
-	api       *http.Client // 清单/心跳/注册：短超时
-	dl        *http.Client // 文件下载：不设总超时，靠停滞检测（见 download.go）
-	identity  Identity
-	hw        HardwareInfo
-	version   string // 当前已应用的 manifest 版本
-	startedAt time.Time
-	failures  int
+	cfg      *Config
+	player   player.Player
+	api      *http.Client // 清单/心跳/注册：短超时
+	dl       *http.Client // 文件下载：不设总超时，靠停滞检测（见 download.go）
+	clock    *serverClock // 签名用的时间以服务端为准，见 clock.go
+	sched    *schedule    // 轮询/心跳间隔由服务端规定，见 schedule.go
+	install  installLayout
+	identity Identity
+	hw       HardwareInfo
 
-	updateFailedAt map[string]time.Time
-	updateErr      string       // 最近一次 OTA 失败的原因（随心跳上报）；成功或换了版本后清空
-	verified       bool         // 本次运行是否已确认过版本（首个成功心跳后）
-	link           linkStatus   // 与服务端的最近一次成功/失败（救援控制台显示，见 rescue.go）
-	clock          *serverClock // 签名用的时间以服务端为准，见 clock.go
-	sched          *schedule    // 轮询/心跳间隔由服务端规定，见 schedule.go
+	registered  bool
+	manifestVer string // 当前已应用的清单版本
+	failures    int    // 连续失败次数（决定重试退避）
+	link        linkStatus
+
+	update         *manifest.Update // 清单里待执行的程序更新
+	updateFailedAt time.Time        // 上次更新失败的时间（按间隔重试）
+	updateErr      string           // 上次更新失败的原因（随心跳上报）
+	verified       bool             // 本次运行是否已确认过版本（首个成功心跳后）
+	status         []byte           // 上次写进 status.json 的内容
 }
 
-// New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
+// New 创建代理；设备身份在 Run 中解析。
 func New(cfg *Config, p player.Player) *Agent {
 	clock, sched := newServerClock(), newSchedule()
 	tr := newTransport(cfg.CacheDir, cfg.TLSFingerprint, clock, sched)
 	return &Agent{
-		cfg:            cfg,
-		player:         p,
-		api:            &http.Client{Timeout: apiTimeout, Transport: tr},
-		dl:             &http.Client{Transport: tr},
-		startedAt:      time.Now(),
-		updateFailedAt: map[string]time.Time{},
-		clock:          clock,
-		sched:          sched,
+		cfg:     cfg,
+		player:  p,
+		api:     &http.Client{Timeout: apiTimeout, Transport: tr},
+		dl:      &http.Client{Transport: tr},
+		clock:   clock,
+		sched:   sched,
+		install: detectInstallLayout(),
 	}
 }
 
 func (a *Agent) mediaDir() string    { return filepath.Join(a.cfg.CacheDir, "media") }
 func (a *Agent) currentPath() string { return filepath.Join(a.cfg.CacheDir, "current.json") }
 
-// Version 返回当前已应用的 manifest 版本（测试用）。
-func (a *Agent) Version() string { return a.version }
-
-// DeviceID 返回解析后的设备编号。
-func (a *Agent) DeviceID() string { return a.identity.DeviceID }
-
-// Run 是代理主循环：身份 → 注册 → 启动播放器 → 恢复本地缓存 → 轮询 + 心跳，直到 ctx 取消。
+// Run 是代理主循环：身份 → 启动播放器 → 恢复本地缓存 → 注册 + 轮询 + 心跳，直到 ctx 取消。
 // 返回 ErrRestartForUpdate 表示应退出进程以切换到新版本。
 func (a *Agent) Run(ctx context.Context) error {
 	if err := os.MkdirAll(a.mediaDir(), 0o755); err != nil {
@@ -83,7 +81,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
-	if err := a.ResolveIdentity(); err != nil {
+	if err := a.resolveIdentity(); err != nil {
 		return err
 	}
 	a.clock.setSystem = setSystemClock // 以服务方式运行时才校准系统时钟（见 clock.go）
@@ -92,72 +90,52 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.player.Start(ctx); err != nil {
 		return err
 	}
-	if a.cfg.Player == "gst" { // 只有真正占着显示屏时才需要：插键盘按任意键交还控制台
-		go a.rescueLoop(ctx, watchKeyboards(ctx), vtConsole{}, rescueIdle)
-	}
 	// 断网兜底：先恢复播放本地已缓存内容，再联网。
-	if err := a.LoadCurrent(); err != nil {
+	if err := a.loadCurrent(); err != nil {
 		log.Printf("agent: no local playlist to restore (%v)", err)
 	}
 	sdNotify("READY=1")
-
-	// 自注册（幂等）：成功前不进入正常轮询，但已在播放缓存内容且持续喂狗。
-	if err := a.registerLoop(ctx); err != nil {
-		return err
+	if a.cfg.Player == "gst" { // 只有真正占着显示屏时才需要：插键盘按任意键交还控制台
+		go a.rescueLoop(ctx, watchKeyboards(ctx), vtConsole{}, rescueIdle)
 	}
 
 	pollTimer := time.NewTimer(0)
-	hbTimer := time.NewTimer(0)
 	hbEvery := a.sched.Heartbeat()
-	wdTicker := time.NewTicker(watchdogInterval) // 不依赖轮询/心跳间隔的配置值
+	hbTimer := time.NewTimer(hbEvery)
+	firstBeat := true
+	wd := time.NewTicker(watchdogInterval) // 等待期间（含失败退避的几分钟）持续喂狗
 	defer pollTimer.Stop()
 	defer hbTimer.Stop()
-	defer wdTicker.Stop()
-
+	defer wd.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wd.C:
+			sdNotify("WATCHDOG=1")
 		case <-pollTimer.C:
 			sdNotify("WATCHDOG=1")
-			changed, err := retrySkew(func() (bool, error) { return a.PollOnce(ctx) })
-			if !errors.Is(err, ErrRestartForUpdate) {
-				a.link.record(err)
-			}
-			switch {
-			case errors.Is(err, ErrRestartForUpdate):
+			err := a.step(ctx)
+			if errors.Is(err, ErrRestartForUpdate) {
 				return err
-			case errors.Is(err, errUnknownDevice):
-				// 服务端没有这台设备了（运营方在后台删了它）：重新注册，而不是一直 401 下去
-				log.Printf("agent: %v; re-registering", err)
-				if err := a.registerLoop(ctx); err != nil {
-					return err
-				}
-			case err != nil:
-				a.failures++
-				a.dropConnections()
-				log.Printf("agent: poll failed (attempt %d): %v", a.failures, err)
-			default:
-				a.failures = 0
-				if changed {
-					log.Printf("agent: applied manifest version %s", a.version)
-				}
 			}
-			pollTimer.Reset(a.pollDelay())
-			// 服务端改了心跳间隔：立即按新间隔重排，不等旧间隔走完（旧的可能长达一小时）
-			if every := a.sched.Heartbeat(); every != hbEvery {
-				hbEvery = every
+			pollTimer.Reset(a.retryDelay(err))
+			if firstBeat && a.registered { // 刚注册上：立刻心跳，确认新版本、让后台尽快看到健康数据
+				firstBeat = false
+				hbTimer.Reset(0)
+			} else if every := a.sched.Heartbeat(); every != hbEvery {
+				hbEvery = every // 服务端改了心跳间隔：立即按新间隔重排，不等旧间隔（可能长达一小时）走完
 				hbTimer.Reset(every)
 			}
-		case <-wdTicker.C:
-			sdNotify("WATCHDOG=1")
 		case <-hbTimer.C:
 			sdNotify("WATCHDOG=1")
-			_, err := retrySkew(func() (bool, error) { return false, a.Heartbeat(ctx) })
-			a.link.record(err)
-			if err != nil {
-				a.dropConnections()
-				log.Printf("agent: heartbeat failed: %v", err)
+			if a.registered {
+				err := retrySkew(func() error { return a.heartbeat(ctx) })
+				a.link.record(err)
+				if err != nil {
+					a.api.CloseIdleConnections()
+					log.Printf("agent: heartbeat failed: %v", err)
+				}
 			}
 			hbEvery = a.sched.Heartbeat()
 			hbTimer.Reset(hbEvery)
@@ -165,16 +143,51 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-// dropConnections 丢掉连接池里的空闲连接：请求失败（尤其 connection reset / EOF）多半是复用了
-// 一条已被对端或中间设备断掉的长连接，下次重试要用新连接，而不是再撞同一条死连接。
-func (a *Agent) dropConnections() {
-	a.api.CloseIdleConnections()
+// step 是一轮联系服务端：没注册就先注册，然后拉清单、执行待执行的程序更新。
+func (a *Agent) step(ctx context.Context) error {
+	err := func() error {
+		if !a.registered {
+			if err := a.register(ctx); err != nil {
+				return fmt.Errorf("register: %w", err)
+			}
+			a.registered = true
+		}
+		err := retrySkew(func() error { return a.poll(ctx) })
+		if errors.Is(err, errUnknownDevice) {
+			a.registered = false // 运营方在后台删了这台设备：下一轮重新注册，而不是一直 401 下去
+		}
+		return err
+	}()
+	a.link.record(err)
+	if err != nil {
+		a.failures++
+		// 失败多半是复用了一条已被对端断掉的长连接（connection reset / EOF）：下次用新连接
+		a.api.CloseIdleConnections()
+		log.Printf("agent: %v (attempt %d, retry in %s)", err, a.failures, a.retryDelay(err))
+		return err
+	}
+	a.failures = 0
+	return a.applyPendingUpdate(ctx)
 }
 
-// ResolveIdentity 采集硬件信息并确定设备编号/密钥（可单独调用，便于测试）。
-func (a *Agent) ResolveIdentity() error {
+// retryDelay 返回下一轮的间隔：正常按服务端规定的轮询间隔，失败时指数退避。
+func (a *Agent) retryDelay(err error) time.Duration {
+	d := a.sched.Poll()
+	for i := 0; i < a.failures && d < maxBackoff; i++ {
+		d *= 2
+	}
+	d = min(d, maxBackoff)
+	if errors.Is(err, errKeyConflict) {
+		// 密钥冲突要等运营方在后台点「接受新密钥」，点完应尽快生效
+		d = min(d, time.Minute)
+	}
+	return d
+}
+
+// resolveIdentity 采集硬件信息并确定设备编号/密钥。
+func (a *Agent) resolveIdentity() error {
 	a.hw = collectHardwareInfo()
-	id, err := loadOrCreateIdentity(a.cfg, a.hw)
+	id, err := loadOrCreateIdentity(a.cfg.CacheDir, a.hw)
 	if err != nil {
 		return fmt.Errorf("identity: %w", err)
 	}
@@ -182,123 +195,37 @@ func (a *Agent) ResolveIdentity() error {
 	return nil
 }
 
-// registerLoop 向服务端自注册，失败指数退避重试直到成功或 ctx 取消。
-// 期间一直在播放本地缓存，并持续喂狗。
-func (a *Agent) registerLoop(ctx context.Context) error {
-	delay := 5 * time.Second
-	for {
-		err := a.Register(ctx)
-		a.link.record(err)
-		if err == nil {
-			return nil
-		}
-		// 密钥冲突要等运营方在后台点「接受新密钥」，点完应尽快生效，所以最多 1 分钟重试一次
-		if errors.Is(err, errKeyConflict) && delay > time.Minute {
-			delay = time.Minute
-		}
-		log.Printf("agent: register failed: %v (retry in %s)", err, delay)
-		sdNotify("WATCHDOG=1")
-		if !sleepFeeding(ctx, delay) {
-			return nil
-		}
-		if delay < maxPollBackoff {
-			delay *= 2
-		}
-	}
-}
-
-// errClockSkew 表示服务端因时钟偏差拒绝了签名。
-var errClockSkew = errors.New("clock skew")
+var (
+	errClockSkew     = errors.New("clock skew")                       // 服务端因时钟偏差拒绝了签名
+	errUnknownDevice = errors.New("server does not know this device") // 被后台删除了，需要重新注册
+	errKeyConflict   = errors.New("key conflict")                     // 服务端已有同编号、不同密钥的设备
+)
 
 // retrySkew 执行一次签名请求；因时钟偏差被拒时立即再试一次——偏差已从这次响应的 Date 头学到
 // （clock.go），第二次就按服务端时间签名了。没有 RTC 的设备断电重启后时间回退，不这样做就要白等一个
 // 轮询周期（还会被计入失败退避）。
-func retrySkew(do func() (bool, error)) (bool, error) {
-	changed, err := do()
+func retrySkew(do func() error) error {
+	err := do()
 	if errors.Is(err, errClockSkew) {
 		log.Printf("agent: request rejected for clock skew, retrying with the server's time")
-		changed, err = do()
+		err = do()
 	}
-	return changed, err
+	return err
 }
-
-// errUnknownDevice 表示服务端没有这台设备的记录（被后台删除了），需要重新注册。
-var errUnknownDevice = errors.New("server does not know this device")
 
 // statusError 把非预期的响应变成错误，带上服务端给出的原因（401 时说明是时钟、密钥还是设备已删除）。
 func statusError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	msg := strings.TrimSpace(string(body))
-	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "unknown device") {
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "unknown device"):
 		return fmt.Errorf("%w (%s)", errUnknownDevice, msg)
-	}
-	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "clock skew") {
+	case resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "clock skew"):
 		return fmt.Errorf("%w (%s)", errClockSkew, msg)
-	}
-	if msg == "" {
+	case msg == "":
 		return fmt.Errorf("unexpected status %s", resp.Status)
 	}
 	return fmt.Errorf("unexpected status %s: %s", resp.Status, msg)
-}
-
-// errKeyConflict 表示服务端已有同编号、不同密钥的设备记录。
-var errKeyConflict = errors.New("key conflict")
-
-// Register 发送一次注册请求（幂等）。
-func (a *Agent) Register(ctx context.Context) error {
-	body, err := json.Marshal(manifest.RegisterRequest{
-		DeviceID:     a.identity.DeviceID,
-		Secret:       a.identity.Secret,
-		EnrollToken:  a.cfg.EnrollToken,
-		Hostname:     a.hw.Hostname,
-		HWSerial:     a.hw.HWSerial,
-		MAC:          a.hw.MAC,
-		IP:           localIP(a.cfg.ServerURL),
-		AgentVersion: Version,
-	})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.ServerURL+"/api/v1/device/register", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.api.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	switch resp.StatusCode {
-	case http.StatusCreated:
-		log.Printf("agent: registered as new device %s", a.identity.DeviceID)
-		return nil
-	case http.StatusOK:
-		log.Printf("agent: registration confirmed for device %s", a.identity.DeviceID)
-		return nil
-	case http.StatusConflict:
-		// 本机密钥与服务端记录不符：要么 identity.json 丢过（重装系统、换卡、手工删除），
-		// 要么另一台机器用了同一个编号。设备已把新密钥报给服务端，后台会显示待确认。
-		return fmt.Errorf("%w: device_id=%s is registered on the server with a different key (local key=%s, identity file %s). "+
-			"If this really is this device (reinstalled, new SD card, identity file lost), accept the new key in the admin UI; "+
-			"if another machine uses the same ID, change the hostname of one of them", errKeyConflict,
-			a.identity.DeviceID, sign.Fingerprint(a.identity.Secret), identityPath(a.cfg))
-	default:
-		return fmt.Errorf("register: %s: %s", resp.Status, bytes.TrimSpace(msg))
-	}
-}
-
-// pollDelay 返回下一次轮询间隔（失败时指数退避）。
-func (a *Agent) pollDelay() time.Duration {
-	d := a.sched.Poll()
-	for i := 0; i < a.failures && d < maxPollBackoff; i++ {
-		d *= 2
-	}
-	if d > maxPollBackoff {
-		d = maxPollBackoff
-	}
-	return d
 }
 
 // newRequest 构造带设备签名的请求；签名基于解码后的 URL path。
@@ -314,44 +241,85 @@ func (a *Agent) newRequest(ctx context.Context, method, urlPath string, body io.
 	return req, nil
 }
 
-// PollOnce 拉取一次 manifest；有更新则同步并应用，返回是否发生了变更。
-// 清单附带的指令在内容同步完成后执行；更新指令会返回 ErrRestartForUpdate。
-func (a *Agent) PollOnce(ctx context.Context) (bool, error) {
+// postJSON 把 v 以 JSON POST 到 urlPath；signed 为 false 时不带设备签名（注册）。
+func (a *Agent) postJSON(ctx context.Context, urlPath string, v any, signed bool) (*http.Response, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var req *http.Request
+	if signed {
+		req, err = a.newRequest(ctx, http.MethodPost, urlPath, bytes.NewReader(body))
+	} else {
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.ServerURL+urlPath, bytes.NewReader(body))
+	}
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return a.api.Do(req)
+}
+
+// register 发送一次注册请求（幂等）。
+func (a *Agent) register(ctx context.Context) error {
+	resp, err := a.postJSON(ctx, "/api/v1/device/register", manifest.RegisterRequest{
+		DeviceID:     a.identity.DeviceID,
+		Secret:       a.identity.Secret,
+		EnrollToken:  a.cfg.EnrollToken,
+		Hostname:     a.hw.Hostname,
+		HWSerial:     a.hw.HWSerial,
+		MAC:          a.hw.MAC,
+		AgentVersion: Version,
+	}, false)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusCreated, http.StatusOK:
+		log.Printf("agent: registered as device %s", a.identity.DeviceID)
+		return nil
+	case http.StatusConflict:
+		// 本机密钥与服务端记录不符：要么 identity.json 丢过（重装系统、换卡、手工删除），
+		// 要么另一台机器用了同一个编号。设备已把新密钥报给服务端，后台会显示待确认。
+		return fmt.Errorf("%w: device_id=%s is registered on the server with a different key (local key=%s). "+
+			"If this really is this device (reinstalled, new SD card, identity file lost), accept the new key in the admin UI; "+
+			"if another machine uses the same ID, change the hostname of one of them",
+			errKeyConflict, a.identity.DeviceID, sign.Fingerprint(a.identity.Secret))
+	}
+	return statusError(resp)
+}
+
+// poll 拉取一次清单；有更新则同步内容并应用。
+func (a *Agent) poll(ctx context.Context) error {
 	req, err := a.newRequest(ctx, http.MethodGet, "/api/v1/device/manifest", nil)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if a.version != "" {
-		req.Header.Set("If-None-Match", `"`+a.version+`"`)
+	if a.manifestVer != "" {
+		req.Header.Set("If-None-Match", `"`+a.manifestVer+`"`)
 	}
 	resp, err := a.api.Do(req)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer resp.Body.Close()
-
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		return false, nil
+		return nil
 	case http.StatusOK:
 	default:
-		return false, fmt.Errorf("manifest: %w", statusError(resp))
+		return fmt.Errorf("manifest: %w", statusError(resp))
 	}
-
 	var m manifest.Manifest
 	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
-		return false, fmt.Errorf("manifest: decode: %w", err)
-	}
-	if m.Version == a.version {
-		return false, nil
+		return fmt.Errorf("manifest: decode: %w", err)
 	}
 	if err := a.syncManifest(ctx, &m); err != nil {
-		return false, err
+		return err
 	}
-	if err := a.handleCommands(ctx, m.Commands); err != nil {
-		return true, err
-	}
-	return true, nil
+	log.Printf("agent: applied manifest version %s", m.Version)
+	return nil
 }
 
 // syncManifest 下载缺失文件、校验、原子落盘 current.json 并切换播放列表。
@@ -365,20 +333,14 @@ func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
 			return fmt.Errorf("download %s: %w", item.Name, err)
 		}
 	}
-
-	// 全部就绪后才落盘并切换（原子性：中途失败保持旧列表继续播放）。
+	// 全部就绪后才落盘并切换（中途失败保持旧列表继续播放）。
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := a.currentPath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := fsutil.WriteFile(a.currentPath(), data, 0o644); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, a.currentPath()); err != nil {
-		return err
-	}
-
 	if err := a.apply(m); err != nil {
 		return err
 	}
@@ -386,8 +348,8 @@ func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
 	return nil
 }
 
-// LoadCurrent 从本地 current.json 恢复播放（启动时断网兜底）。
-func (a *Agent) LoadCurrent() error {
+// loadCurrent 从本地 current.json 恢复播放（启动时断网兜底）。
+func (a *Agent) loadCurrent() error {
 	data, err := os.ReadFile(a.currentPath())
 	if err != nil {
 		return err
@@ -407,22 +369,18 @@ func (a *Agent) LoadCurrent() error {
 func (a *Agent) apply(m *manifest.Manifest) error {
 	scene := player.Scene{Items: make([]player.Item, 0, len(m.Items))}
 	for _, it := range m.Items {
-		scene.Items = append(scene.Items, player.Item{
-			Path:     a.localPath(it),
-			Type:     it.Type,
-			Duration: it.Duration,
-		})
+		scene.Items = append(scene.Items, player.Item{Path: a.localPath(it), Type: it.Type, Duration: it.Duration})
 	}
 	if l := m.Layout; l != nil {
 		// 叠加图只给路径：真正贴图时要按显示屏的实际输出分辨率光栅化，那是播放器的事。
-		scene.Overlay = &player.Overlay{PNG: a.localPath(l.Overlay)}
-		scene.Media = player.Rect{X: l.Media.X, Y: l.Media.Y, W: l.Media.W, H: l.Media.H}
-		scene.CanvasW, scene.CanvasH = l.CanvasW, l.CanvasH
+		scene.OverlayPNG = a.localPath(l.Overlay)
+		scene.Media, scene.CanvasW, scene.CanvasH = l.Media, l.CanvasW, l.CanvasH
 	}
 	if err := a.player.Load(scene); err != nil {
 		return err
 	}
-	a.version = m.Version
+	a.manifestVer = m.Version
+	a.setUpdate(m.Update)
 	return nil
 }
 
@@ -433,9 +391,8 @@ func (a *Agent) localPath(item manifest.Item) string {
 
 // cleanup 删除不再被当前清单引用的缓存文件。
 func (a *Agent) cleanup(m *manifest.Manifest) {
-	downloads := m.Downloads()
-	referenced := make(map[string]bool, len(downloads))
-	for _, it := range downloads {
+	referenced := map[string]bool{}
+	for _, it := range m.Downloads() {
 		referenced[filepath.Base(a.localPath(it))] = true
 	}
 	entries, err := os.ReadDir(a.mediaDir())
@@ -443,19 +400,15 @@ func (a *Agent) cleanup(m *manifest.Manifest) {
 		return
 	}
 	for _, e := range entries {
-		name := e.Name()
 		// 保留：被引用的文件本身、它正在续传的 .part、以及由它派生出来的文件
 		// （叠加图按输出分辨率光栅化出的 <名字>.<宽>x<高>.bgra）。
-		if referenced[name] || derivedFromReferenced(name, referenced) {
-			continue
+		if name := e.Name(); !referenced[name] && !derivedFromReferenced(name, referenced) {
+			os.Remove(filepath.Join(a.mediaDir(), name))
 		}
-		_ = os.Remove(filepath.Join(a.mediaDir(), name))
 	}
 }
 
-// derivedFromReferenced 判断 name 是否由某个仍被引用的文件派生而来。
-// 派生文件一律是“源文件名 + . + 后缀”：续传中的 a.png.part、
-// 叠加图按输出分辨率光栅化出的 a.png.1920x1080.bgra。
+// derivedFromReferenced 判断 name 是否由某个仍被引用的文件派生而来（"源文件名.后缀"）。
 func derivedFromReferenced(name string, referenced map[string]bool) bool {
 	for i := len(name) - 1; i > 0; i-- {
 		if name[i] == '.' && referenced[name[:i]] {
@@ -465,39 +418,27 @@ func derivedFromReferenced(name string, referenced map[string]bool) bool {
 	return false
 }
 
-// Heartbeat 上报一次心跳；本次运行首个成功心跳会确认当前版本（清除 pending-verify）。
-func (a *Agent) Heartbeat(ctx context.Context) error {
-	stats := a.player.Stats()
-	body, err := json.Marshal(manifest.Heartbeat{
+// heartbeat 上报一次心跳；本次运行首个成功心跳会确认当前版本（清除 pending-verify）。
+func (a *Agent) heartbeat(ctx context.Context) error {
+	st := a.player.Stats()
+	resp, err := a.postJSON(ctx, "/api/v1/device/heartbeat", manifest.Heartbeat{
 		AgentVersion: Version,
-		IP:           localIP(a.cfg.ServerURL),
-		UptimeS:      uptimeSeconds(a.startedAt),
+		UptimeS:      uptimeSeconds(),
 		DiskFreeMB:   diskFreeMB(a.cfg.CacheDir),
 		TempC:        socTempC(),
-		HWDec:        stats.HWDec,
-		OutputW:      stats.OutputW,
-		OutputH:      stats.OutputH,
+		HWDec:        st.HWDec,
+		OutputW:      st.OutputW,
+		OutputH:      st.OutputH,
 		UpdateError:  a.updateErr,
-	})
-	if err != nil {
-		return err
-	}
-	// 同一份内容留在本地，现场自检脚本（check-display.sh）据此报告解码方式与输出分辨率
-	_ = os.WriteFile(filepath.Join(a.cfg.CacheDir, "status.json"), body, 0o644)
-	req, err := a.newRequest(ctx, http.MethodPost, "/api/v1/device/heartbeat", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.api.Do(req)
+	}, true)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("heartbeat: %w", statusError(resp))
 	}
-	io.Copy(io.Discard, resp.Body)
+	a.writeStatus(st)
 	if !a.verified {
 		a.verified = true
 		a.commitUpdate()
@@ -505,39 +446,36 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 	return nil
 }
 
-// uptimeSeconds 优先读系统 /proc/uptime，失败则退化为进程运行时长。
-func uptimeSeconds(startedAt time.Time) int64 {
-	if data, err := os.ReadFile("/proc/uptime"); err == nil {
-		var up float64
-		if _, err := fmt.Sscanf(string(data), "%f", &up); err == nil {
-			return int64(up)
-		}
+// writeStatus 把播放状态留一份在本地（仅变化时写盘），现场自检脚本 check-display.sh 据此报告
+// 解码方式与输出分辨率。
+func (a *Agent) writeStatus(st player.Stats) {
+	data, _ := json.Marshal(map[string]any{"hwdec": st.HWDec, "output_w": st.OutputW, "output_h": st.OutputH})
+	if bytes.Equal(data, a.status) {
+		return
 	}
-	return int64(time.Since(startedAt).Seconds())
+	if fsutil.WriteFile(filepath.Join(a.cfg.CacheDir, "status.json"), data, 0o644) == nil {
+		a.status = data
+	}
+}
+
+// uptimeSeconds 读系统运行时长（/proc/uptime）。
+func uptimeSeconds() int64 {
+	var up float64
+	if data, err := os.ReadFile("/proc/uptime"); err == nil {
+		fmt.Sscanf(string(data), "%f", &up)
+	}
+	return int64(up)
 }
 
 // socTempC 读取 SoC 温度（摄氏度），读不到返回 0。
 // H3 在软解或高码率视频下很容易过热——Armbian 默认 85°C 触发降频、更高会直接关机，
 // 所以温度要能在后台看到，而不是等现场发现屏幕黑了。
 func socTempC() int {
-	for _, p := range []string{
-		"/sys/class/thermal/thermal_zone0/temp",
-		"/sys/devices/virtual/thermal/thermal_zone0/temp",
-	} {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var milli int
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &milli); err != nil {
-			continue
-		}
-		if milli > 1000 { // 多数平台是毫摄氏度
-			return milli / 1000
-		}
-		return milli
+	var milli int
+	if data, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
+		fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &milli)
 	}
-	return 0
+	return milli / 1000
 }
 
 func diskFreeMB(dir string) int64 {

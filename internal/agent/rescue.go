@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,7 +32,7 @@ type console interface {
 func (a *Agent) rescueLoop(ctx context.Context, keys <-chan struct{}, con console, idle time.Duration) {
 	timer := time.NewTimer(idle)
 	timer.Stop()
-	active := false
+	active := false // Go 1.23 起 Stop/Reset 不再需要手工排空通道
 	for {
 		select {
 		case <-ctx.Done():
@@ -47,12 +46,6 @@ func (a *Agent) rescueLoop(ctx context.Context, keys <-chan struct{}, con consol
 				log.Printf("agent: keyboard input: pausing playback and showing the rescue console on tty1 (resumes after %s without input)", idle)
 				a.player.SetPaused(true)
 				con.show(a.rescueInfo(time.Now(), localInterfaces(), idle))
-			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
 			}
 			timer.Reset(idle)
 		case <-timer.C:
@@ -141,18 +134,11 @@ func (a *Agent) rescueInfo(now time.Time, ifaces []netIface, idle time.Duration)
 		row("Last error", fmt.Sprintf("%s (%s)", errMsg, errAt.Format("15:04:05")))
 	}
 	row("Agent", Version)
-	fmt.Fprintf(&b, "\n  Playback is paused. It resumes after %s without keyboard input\n", humanDuration(idle))
+	fmt.Fprintf(&b, "\n  Playback is paused. It resumes after %.0f minutes without keyboard input\n", idle.Minutes())
 	b.WriteString("  (any session left open here is logged out then).\n")
 	b.WriteString("  To keep playback stopped: systemctl stop display-agent\n")
-	b.WriteString("  Diagnostics: journalctl -u display-agent -n 50 ; /usr/local/lib/display-agent/check-display.sh\n\n")
+	b.WriteString("  Diagnostics: journalctl -u display-agent -n 50 ; check-display.sh (in the install directory)\n\n")
 	return b.String()
-}
-
-func humanDuration(d time.Duration) string {
-	if d >= time.Minute && d%time.Minute == 0 {
-		return fmt.Sprintf("%d minutes", int(d/time.Minute))
-	}
-	return d.String()
 }
 
 // linkStatus 记录与服务端的最近一次成功与失败，供救援信息显示。主循环写、救援协程读。
@@ -211,12 +197,3 @@ func isKeyboard(keyBits []byte) bool {
 
 // escapeIssue 转义 agetty issue 文件里的反斜杠（agetty 把 \x 当作转义序列）。
 func escapeIssue(s string) string { return strings.ReplaceAll(s, `\`, `\\`) }
-
-// writeFileAtomic 先写临时文件再改名。
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}

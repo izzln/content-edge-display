@@ -2,10 +2,10 @@
 # display-agent 的播放进程：用 GStreamer 在 DRM/KMS 上直接出画面，视频走 H3 的硬件解码器（cedrus）。
 #
 # 由 display-agent 拉起并守护（程序内嵌，每次启动重写，随 OTA 更新），stdin/stdout 上逐行收发 JSON：
-#   请求  {"id": 1, "cmd": "config", "width": 1440, "height": 900, "fade": 0.6}
+#   请求  {"id": 1, "cmd": "config", "width": 1440, "height": 900}   （测试可加 "fade": 秒 缩短过渡）
 #         {"id": 2, "cmd": "load", "items": [{"path": "...", "type": "image|video", "duration": 10}],
 #          "overlay": "/path/x.bgra" | null, "canvas": [1440, 900], "media": [x, y, w, h]}
-#         {"id": 3, "cmd": "stats"}   {"id": 4, "cmd": "ping"}
+#         {"id": 3, "cmd": "stats"}   （代理的看门狗定时发它：回不来就重启本进程）
 #   回复  {"id": 1, "ok": true, ...} 或 {"id": 1, "error": "..."}
 #   事件  {"event": "playing", "index": 0, "path": "..."}  {"event": "error", "index": 0, "message": "..."}
 #         {"event": "crop", "size": [w, h], "crop": [左, 右, 上, 下]}
@@ -47,6 +47,7 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 from gi.repository import GLib, Gst, GstVideo  # noqa: E402
 
+FADE = 0.6          # 切换时淡出、淡入各自的时长（秒）
 FADE_STEP_MS = 33
 FOURCC_NV12 = 0x3231564E
 FOURCC_ARGB8888 = 0x34325241
@@ -416,7 +417,8 @@ class Player:
         self.test = os.environ.get("DISPLAY_PLAYER_SINK") == "fakesink"
         self.display = None
         self.width = self.height = 0
-        self.fade = 0.6
+        self.fade = FADE
+        self.hw_decoder = "avdec_h264"  # 有 cedrus 时是 v4l2slh264dec，见 configure
         self.base = b""          # 上层叠加图（BGRA，预乘 alpha）；没有模板时全透明
         self.hole = (0, 0, 0, 0)  # 媒体区在显示坐标里的位置
         self.scene = None
@@ -446,20 +448,20 @@ class Player:
             hw = ""
             if self.decoder:
                 hw = self.decoder if self.decoder.startswith("v4l2sl") else "no"
-            return {"hwdec": hw, "output_w": self.width, "output_h": self.height}
-        if cmd == "ping":
-            return {}
+            return {"hwdec": hw}
         raise ValueError("unknown command %r" % cmd)
 
     def configure(self, req):
         if self.width:
             return {}  # 显示模式只在启动时定一次
         width, height = int(req["width"]), int(req["height"])
-        self.fade = float(req.get("fade", 0.6))
+        self.fade = float(req.get("fade", FADE))
+        if Gst.ElementFactory.find("v4l2slh264dec"):
+            self.hw_decoder = "v4l2slh264dec"
         if not self.test:
             self.display = Display(width, height)
             log("display " + self.display.describe())
-            if not Gst.ElementFactory.find("v4l2slh264dec"):
+            if self.hw_decoder != "v4l2slh264dec":
                 log("WARNING: hardware decoder v4l2slh264dec is not available "
                     "(cedrus missing or gstreamer1.0-plugins-bad not installed); videos will be decoded in software")
         self.width, self.height = width, height
@@ -555,8 +557,7 @@ class Player:
         if item.get("type") == "video":
             mode = self.video_mode.get(item["path"], 0)
             name, desc = VIDEO_OUTPUTS[mode]
-            decoder = "v4l2slh264dec" if Gst.ElementFactory.find("v4l2slh264dec") else "avdec_h264"
-            desc = desc.format(decoder=decoder, sink=sink)
+            desc = desc.format(decoder=self.hw_decoder, sink=sink)
         else:
             name, desc = "playbin", IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
 
@@ -570,7 +571,7 @@ class Player:
         else:
             out = pipe = Gst.parse_launch(desc)
             pipe.get_by_name("src").set_property("location", item["path"])
-            self._note_decoder(decoder)
+            self.decoder = self.hw_decoder
             prime_decoder(pipe)
         if d:
             GstVideo.VideoOverlay.set_render_rectangle(out.get_by_name("sink"), x, y, w, h)
@@ -610,10 +611,7 @@ class Player:
     def _on_element(self, _bin, _sub, element):
         f = element.get_factory()
         if f and "Decoder/Video" in (f.get_metadata("klass") or ""):
-            self._note_decoder(f.get_name())
-
-    def _note_decoder(self, name):
-        self.decoder = name  # 写进 showing 日志，也供 stats 上报硬解/软解
+            self.decoder = f.get_name()  # 写进 showing 日志，也供 stats 上报硬解/软解
 
     def _on_item_message(self, pipe, msg):
         if pipe is not self.pipe:

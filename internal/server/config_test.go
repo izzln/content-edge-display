@@ -15,7 +15,7 @@ import (
 func TestLoadConfigResolvesRelativePathsAgainstConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "server.json")
-	body := `{"media_root":"media","data_dir":"data","font_path":"fonts/cjk.ttc","enroll_token":"tok"}`
+	body := `{"media_root":"media","data_dir":"data","font_path":"fonts/cjk.ttc","admin_token":"adm","enroll_token":"tok"}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestLoadConfigKeepsAbsolutePathsAndDefaults(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "server.json")
 	// media_root 绝对路径；data_dir/font_path 留空
-	body := `{"media_root":"/srv/media","enroll_token":"tok"}`
+	body := `{"media_root":"/srv/media","admin_token":"adm","enroll_token":"tok"}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

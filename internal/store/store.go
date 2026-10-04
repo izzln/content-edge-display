@@ -1,19 +1,23 @@
-// Package store 持久化服务端可变状态：设备属性、显示模板、显示配置、测试屏截止时间。
-// 规模小（几十台设备），用单个 JSON 文件 + 内存镜像 + 原子写，避免引入数据库依赖。
+// Package store 持久化服务端可变状态：设备、属性、模板、显示配置、时段计划、测试屏、程序包与更新目标、
+// 缓存区配额。规模小（几十台设备），用单个 JSON 文件 + 内存镜像 + 原子写，避免引入数据库依赖。
 package store
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/fsutil"
+	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
 // DefaultImageDurationS 是模板未指定时图片在媒体区的停留秒数。
@@ -64,8 +68,7 @@ type Region struct {
 
 // DisplayConfig 是一台设备的显示配置。
 type DisplayConfig struct {
-	Mode       string   `json:"mode"`                  // "global" 跟随全局模板 | "template" 用本设备专属模板
-	TemplateID string   `json:"template_id,omitempty"` // Mode=template 时指向专属模板
+	TemplateID string   `json:"template_id,omitempty"` // 本设备专属模板；空 = 跟随全局（时段计划 / 全局默认模板）
 	Mirror     bool     `json:"mirror,omitempty"`      // 左右对调：属性在左还是在右，一个全局模板即可覆盖两种设备
 	Playlist   []string `json:"playlist,omitempty"`    // 媒体区播放顺序，文件位于 media_root/<设备>/
 }
@@ -96,8 +99,8 @@ type RekeyRequest struct {
 	MAC         string    `json:"mac,omitempty"`
 }
 
-// Firmware 是已上传的设备端程序版本。
-type Firmware struct {
+// Package 是已上传的设备端程序包（make package 产出的 tar.gz，装机与 OTA 共用）。
+type Package struct {
 	Version    string    `json:"version"`
 	File       string    `json:"file"`
 	SHA256     string    `json:"sha256"`
@@ -129,17 +132,16 @@ type Schedule struct {
 
 // State 是全部可变状态；字段直接序列化到 state.json。
 type State struct {
-	DeviceAttrs map[string]map[string]string `json:"device_attrs"`
-	Templates   map[string]Template          `json:"templates"`
-	Displays    map[string]DisplayConfig     `json:"displays"`
-	TestUntil   map[string]time.Time         `json:"test_until"`
-	Devices     map[string]Device            `json:"devices"`
-	Firmware    map[string]Firmware          `json:"firmware"`
-	Updates     map[string]UpdateTarget      `json:"updates"`
-	Global      GlobalConfig                 `json:"global"`
-	Schedules   []Schedule                   `json:"schedules"`
-	// CacheQuotaGB 是服务端文件缓存区的配额（GB）；0 表示用 DefaultCacheQuotaGB。
-	CacheQuotaGB int `json:"cache_quota_gb,omitempty"`
+	DeviceAttrs  map[string]map[string]string `json:"device_attrs"`
+	Templates    map[string]Template          `json:"templates"`
+	Displays     map[string]DisplayConfig     `json:"displays"`
+	TestUntil    map[string]time.Time         `json:"test_until"`
+	Devices      map[string]Device            `json:"devices"`
+	Packages     map[string]Package           `json:"packages"`
+	Updates      map[string]UpdateTarget      `json:"updates"`
+	Global       GlobalConfig                 `json:"global"`
+	Schedules    []Schedule                   `json:"schedules"`
+	CacheQuotaGB int                          `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
 }
 
 // DefaultCacheQuotaGB 是文件缓存区的默认配额。
@@ -161,8 +163,8 @@ func (s *State) init() {
 	if s.Devices == nil {
 		s.Devices = map[string]Device{}
 	}
-	if s.Firmware == nil {
-		s.Firmware = map[string]Firmware{}
+	if s.Packages == nil {
+		s.Packages = map[string]Package{}
 	}
 	if s.Updates == nil {
 		s.Updates = map[string]UpdateTarget{}
@@ -170,6 +172,20 @@ func (s *State) init() {
 	if s.Schedules == nil {
 		s.Schedules = []Schedule{}
 	}
+	if s.CacheQuotaGB <= 0 {
+		s.CacheQuotaGB = DefaultCacheQuotaGB
+	}
+}
+
+// LatestPackage 返回最近上传的程序包（新设备装机时下载它）。
+func (s *State) LatestPackage() (Package, bool) {
+	var latest Package
+	for _, p := range s.Packages {
+		if p.UploadedAt.After(latest.UploadedAt) {
+			latest = p
+		}
+	}
+	return latest, latest.File != ""
 }
 
 // Store 是 State 的持久化容器，方法并发安全。
@@ -203,18 +219,11 @@ func (st *Store) View(fn func(*State)) {
 	fn(&st.s)
 }
 
-// Update 在写锁下修改状态并原子持久化；fn 返回错误则不落盘（内存修改不回滚，
-// 因此 fn 应先校验后修改）。
-func (st *Store) Update(fn func(*State) error) error {
+// Update 在写锁下修改状态并原子持久化。
+func (st *Store) Update(fn func(*State)) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if err := fn(&st.s); err != nil {
-		return err
-	}
-	return st.persistLocked()
-}
-
-func (st *Store) persistLocked() error {
+	fn(&st.s)
 	data, err := json.MarshalIndent(&st.s, "", "  ")
 	if err != nil {
 		return err
@@ -222,47 +231,15 @@ func (st *Store) persistLocked() error {
 	if err := os.MkdirAll(filepath.Dir(st.path), 0o755); err != nil {
 		return err
 	}
-	tmp := st.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, st.path)
+	return fsutil.WriteFile(st.path, data, 0o644)
 }
 
-// ---- 便捷读取 ----
-
-// CacheQuotaGB 返回文件缓存区配额（GB）。
-func (st *Store) CacheQuotaGB() int {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	if st.s.CacheQuotaGB > 0 {
-		return st.s.CacheQuotaGB
-	}
-	return DefaultCacheQuotaGB
-}
-
-// Attrs 返回设备属性的副本。
-func (st *Store) Attrs(deviceID string) map[string]string {
-	out := map[string]string{}
-	st.View(func(s *State) {
-		for k, v := range s.DeviceAttrs[deviceID] {
-			out[k] = v
-		}
-	})
-	return out
-}
-
-// Display 返回设备显示配置的副本（未配置时跟随全局模板）。
-func (st *Store) Display(deviceID string) DisplayConfig {
-	var d DisplayConfig
-	st.View(func(s *State) {
-		d = s.Displays[deviceID]
-		d.Playlist = append([]string(nil), d.Playlist...)
-	})
-	if d.Mode != ModeTemplate {
-		d.Mode = ModeGlobal
-	}
-	return d
+// Device 返回已注册的设备。
+func (st *Store) Device(id string) (Device, bool) {
+	var d Device
+	var ok bool
+	st.View(func(s *State) { d, ok = s.Devices[id] })
+	return d, ok
 }
 
 // Template 按 ID 取模板。
@@ -271,52 +248,6 @@ func (st *Store) Template(id string) (Template, bool) {
 	var ok bool
 	st.View(func(s *State) { t, ok = s.Templates[id] })
 	return t, ok
-}
-
-// TestUntil 返回设备测试屏截止时间（零值表示未在测试）。
-func (st *Store) TestUntil(deviceID string) time.Time {
-	var t time.Time
-	st.View(func(s *State) { t = s.TestUntil[deviceID] })
-	return t
-}
-
-// Device 返回自注册设备。
-func (st *Store) Device(id string) (Device, bool) {
-	var d Device
-	var ok bool
-	st.View(func(s *State) { d, ok = s.Devices[id] })
-	return d, ok
-}
-
-// Global 返回全局显示设置。
-func (st *Store) Global() GlobalConfig {
-	var g GlobalConfig
-	st.View(func(s *State) { g = s.Global })
-	return g
-}
-
-// Schedules 返回时段计划副本；无计划时返回空切片而非 nil，
-// 使其经 JSON 序列化后是 []（返回 null 会让管理后台的渲染整体抛异常）。
-func (st *Store) Schedules() []Schedule {
-	out := []Schedule{}
-	st.View(func(s *State) { out = append(out, s.Schedules...) })
-	return out
-}
-
-// Update 返回设备的更新目标。
-func (st *Store) UpdateTarget(deviceID string) (UpdateTarget, bool) {
-	var u UpdateTarget
-	var ok bool
-	st.View(func(s *State) { u, ok = s.Updates[deviceID] })
-	return u, ok
-}
-
-// FirmwareByVersion 返回固件元数据。
-func (st *Store) FirmwareByVersion(version string) (Firmware, bool) {
-	var f Firmware
-	var ok bool
-	st.View(func(s *State) { f, ok = s.Firmware[version] })
-	return f, ok
 }
 
 // ---- 时段计划 ----
@@ -414,10 +345,10 @@ func ValidateTemplate(t *Template) error {
 		t.Name = t.ID
 	}
 	if t.W <= 0 {
-		t.W = 1440
+		t.W = manifest.CanvasW
 	}
 	if t.H <= 0 {
-		t.H = 900
+		t.H = manifest.CanvasH
 	}
 	if t.Background == "" {
 		t.Background = "#000000"
@@ -485,24 +416,9 @@ func ValidateTemplate(t *Template) error {
 	return nil
 }
 
-// 设备的显示模式。
-const (
-	ModeGlobal   = "global"   // 跟随全局默认模板
-	ModeTemplate = "template" // 用本设备专属模板
-)
-
-// ValidateDisplay 校验显示配置引用的模板。
-func ValidateDisplay(d *DisplayConfig, getTemplate func(string) (Template, bool)) error {
-	switch d.Mode {
-	case "", ModeGlobal:
-		d.Mode = ModeGlobal
-		d.TemplateID = ""
-		return nil
-	case ModeTemplate:
-	default:
-		return fmt.Errorf("display: 未知模式 %q", d.Mode)
-	}
-	if _, ok := getTemplate(d.TemplateID); !ok {
+// ValidateDisplay 校验显示配置引用的专属模板。
+func ValidateDisplay(d DisplayConfig, getTemplate func(string) (Template, bool)) error {
+	if _, ok := getTemplate(d.TemplateID); d.TemplateID != "" && !ok {
 		return fmt.Errorf("display: 模板 %q 不存在", d.TemplateID)
 	}
 	return nil
@@ -522,36 +438,23 @@ func Mirrored(r Region, canvasW int) Region {
 }
 
 // NewTemplateID 生成模板 ID。使用者不需要关心它，管理后台也不暴露。
-func NewTemplateID() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("tpl-%d", time.Now().UnixNano())
-	}
-	return "tpl-" + hex.EncodeToString(b)
-}
+func NewTemplateID() string { return "tpl-" + strings.ToLower(rand.Text()[:8]) }
 
-// DefaultTemplate 是首次启动时播种的左右分屏模板：左显示房间号，右放图片/视频。
-func DefaultTemplate() Template {
-	return Template{
-		ID: NewTemplateID(), Name: "左右分屏", W: 1440, H: 900,
-		Background: "#000000", ImageDurationS: DefaultImageDurationS,
-		Regions: []Region{
-			{ID: "left", X: 0, Y: 0, W: 720, H: 900, Type: RegionAttribute,
-				Key: "room", FontSize: 160, Color: "#FFFFFF", Bg: "#1E3A8A", Align: "center"},
-			{ID: "right", X: 720, Y: 0, W: 720, H: 900, Type: RegionMedia},
-		},
-	}
-}
-
-// SeedDefaultTemplate 在还没有任何模板时播种一个左右分屏模板，返回是否播种了。
-// 运营方开箱就有能用的版式，不必先自己建模板。
+// SeedDefaultTemplate 在还没有任何模板时播种一个左右分屏模板（左显示房间号，右放图片/视频），
+// 返回是否播种了。运营方开箱就有能用的版式，不必先自己建模板。
 func SeedDefaultTemplate(st *State) (Template, bool) {
 	if len(st.Templates) > 0 {
 		return Template{}, false
 	}
-	t := DefaultTemplate()
-	if err := ValidateTemplate(&t); err != nil {
-		return Template{}, false // DefaultTemplate 由代码给出，不可能不合法
+	w, h := manifest.CanvasW, manifest.CanvasH
+	t := Template{
+		ID: NewTemplateID(), Name: "左右分屏", W: w, H: h,
+		Background: "#000000", ImageDurationS: DefaultImageDurationS,
+		Regions: []Region{
+			{ID: "left", X: 0, Y: 0, W: w / 2, H: h, Type: RegionAttribute,
+				Key: "room", FontSize: 160, Color: "#FFFFFF", Bg: "#1E3A8A", Align: "center"},
+			{ID: "right", X: w / 2, Y: 0, W: w / 2, H: h, Type: RegionMedia, FontSize: 48, Color: "#FFFFFF", Align: "center"},
+		},
 	}
 	st.Templates[t.ID] = t
 	return t, true
@@ -563,14 +466,10 @@ func EnsureGlobalTemplate(st *State) bool {
 	if _, ok := st.Templates[st.Global.TemplateID]; ok {
 		return false
 	}
-	ids := make([]string, 0, len(st.Templates))
-	for id := range st.Templates {
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
+	if len(st.Templates) == 0 {
 		return false
 	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(st.Templates))
 	st.Global.TemplateID = ids[0]
 	return true
 }

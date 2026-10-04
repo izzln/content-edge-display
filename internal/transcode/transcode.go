@@ -3,7 +3,7 @@
 // 为什么非转码不可：设备用 H3 的硬件解码器（cedrus，经 GStreamer 的 v4l2slh264dec）放视频，
 // 它只认 H.264/H.265 的常规档次、1080p 以内；原片的编码、分辨率、码率千奇百怪，
 // 而且持续高码率（10~20Mbps）即使硬解也会让芯片发热，到 85°C 开始降频、再高直接关机。
-// 所以上传时统一压成 H.264：1440×900 以内、30fps 以内、码率 4Mbps 以内；
+// 所以上传时统一压成 H.264：画布尺寸（1440×900）以内、30fps 以内、码率 4Mbps 以内；
 // 用 x264 的 fastdecode 调优，万一硬解失效退化成软解（后台会标红），也还放得动。
 // 顺带把声音去掉（屏幕一律静音）并把 moov 放到文件头（faststart）。
 //
@@ -12,6 +12,7 @@ package transcode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,14 +29,18 @@ import (
 	"time"
 
 	xdraw "golang.org/x/image/draw"
+
+	"github.com/izzln/content-edge-display/internal/fsutil"
+	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
 // Spec 是转码目标，取值见 DefaultSpec。
 type Spec struct {
-	MaxW, MaxH  int // 输出不超过这个尺寸（等比缩小，不放大）
-	MaxFPS      int // 帧率上限
-	CRF         int // 画质（x264 CRF，越小越清晰）：码率随内容走，静态画面只用很少的码率
-	MaxBitrateK int // 码率上限（kbps）：复杂画面也不超过它
+	MaxW        int `json:"max_w"` // 输出不超过这个尺寸（等比缩小，不放大）
+	MaxH        int `json:"max_h"`
+	MaxFPS      int `json:"max_fps"`       // 帧率上限
+	CRF         int `json:"crf"`           // 画质（x264 CRF，越小越清晰）：码率随内容走，静态画面只用很少的码率
+	MaxBitrateK int `json:"max_bitrate_k"` // 码率上限（kbps）：复杂画面也不超过它
 }
 
 // DefaultSpec 针对 Orange Pi One + 1440×900 的取值。
@@ -45,7 +50,7 @@ type Spec struct {
 // CRF 22 在 1440×900 上已看不出压缩痕迹；4Mbps 的上限对宣传片绰绰有余（蓝光 1080p 也就
 // 20~40Mbps，而这里分辨率更低），同时把解码与发热压在 H3 吃得消的范围内。
 func DefaultSpec() Spec {
-	return Spec{MaxW: 1440, MaxH: 900, MaxFPS: 30, CRF: 22, MaxBitrateK: 4000}
+	return Spec{MaxW: manifest.CanvasW, MaxH: manifest.CanvasH, MaxFPS: 30, CRF: 22, MaxBitrateK: 4000}
 }
 
 // Encoder 封装一个可用的 ffmpeg。
@@ -65,12 +70,9 @@ func Find(bin string) (*Encoder, error) {
 	if bin == "" {
 		bin = "ffmpeg"
 	}
-	path, err := exec.LookPath(bin)
+	path, err := lookTool(bin)
 	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) && !strings.ContainsRune(bin, os.PathSeparator) {
-			return nil, fmt.Errorf("%s not found in PATH (service PATH=%s, user %s)", bin, os.Getenv("PATH"), currentUser())
-		}
-		return nil, fmt.Errorf("%s is not usable (user %s): %v", bin, currentUser(), err)
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -81,6 +83,19 @@ func Find(bin string) (*Encoder, error) {
 	e := &Encoder{bin: path, version: firstLine(out)}
 	e.fpsMax = e.supportsFPSMax()
 	return e, nil
+}
+
+// lookTool 定位一个外部程序；找不到时错误里带上服务进程实际的 PATH 与运行用户
+// （"明明装了却找不到"几乎都是 systemd 下的 PATH、用户与登录 shell 不同）。
+func lookTool(bin string) (string, error) {
+	path, err := exec.LookPath(bin)
+	switch {
+	case err == nil:
+		return path, nil
+	case errors.Is(err, exec.ErrNotFound) && !strings.ContainsRune(bin, os.PathSeparator):
+		return "", fmt.Errorf("%s not found in PATH (service PATH=%s, user %s)", bin, os.Getenv("PATH"), currentUser())
+	}
+	return "", fmt.Errorf("%s is not usable (user %s): %v", bin, currentUser(), err)
 }
 
 func firstLine(b []byte) string {
@@ -106,13 +121,8 @@ func (e *Encoder) supportsFPSMax() bool {
 	return cmd.Run() == nil
 }
 
-// Version 返回 ffmpeg 的版本行，用于在管理后台显示。
-func (e *Encoder) Version() string {
-	if e == nil {
-		return ""
-	}
-	return e.version
-}
+// Version 返回 ffmpeg 的版本行（启动日志用）。
+func (e *Encoder) Version() string { return e.version }
 
 // Video 把 src 转成设备能稳定播放的 H.264 MP4 写到 dst。
 // onProgress 以已处理的秒数回调（可为 nil），用于在后台显示进度。
@@ -218,49 +228,36 @@ func readProgress(r io.Reader, onProgress func(float64)) {
 }
 
 // ShrinkImage 把过大的图片等比缩到 maxW×maxH 以内，原地覆盖；本来就够小则原样保留。
-// 返回是否真的缩了。
 //
 // 设备只有 1GB 内存，而解码后的位图是 宽×高×4 字节——一张 4000×3000 的图就是 48MB，
-// 屏幕上却只显示 1440×900。在服务端缩一次，所有设备都省。
-func ShrinkImage(path string, maxW, maxH int) (bool, error) {
+// 屏幕上却只显示画布那么大。在服务端缩一次，所有设备都省。
+func ShrinkImage(path string, maxW, maxH int) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return err
 	}
 	src, format, err := image.Decode(f)
 	f.Close()
 	if err != nil {
-		return false, err
+		return err
 	}
 	b := src.Bounds()
 	if b.Dx() <= maxW && b.Dy() <= maxH {
-		return false, nil
+		return nil
 	}
 	w, h := fitWithin(b.Dx(), b.Dy(), maxW, maxH)
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
 	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, b, xdraw.Src, nil)
-
-	tmp := path + ".tmp"
-	out, err := os.Create(tmp)
+	var buf bytes.Buffer
+	if format == "png" {
+		err = png.Encode(&buf, dst)
+	} else {
+		err = jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 88})
+	}
 	if err != nil {
-		return false, err
+		return err
 	}
-	switch format {
-	case "png":
-		err = png.Encode(out, dst)
-	default:
-		err = jpeg.Encode(out, dst, &jpeg.Options{Quality: 88})
-	}
-	out.Close()
-	if err != nil {
-		os.Remove(tmp)
-		return false, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return false, err
-	}
-	return true, nil
+	return fsutil.WriteFile(path, buf.Bytes(), 0o644)
 }
 
 // Thumbnail 把图片等比缩到 maxW×maxH 以内，以 JPEG 写出（后台列表的缩略图）。

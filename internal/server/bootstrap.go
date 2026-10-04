@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/subtle"
 	_ "embed"
 	"log"
 	"net"
@@ -39,26 +38,20 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 
 // handleBootstrapPackage 给装机脚本下载最新上传的设备程序包，凭注册口令（X-Enroll-Token）。
 func (s *Server) handleBootstrapPackage(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.EnrollToken == "" ||
-		subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Enroll-Token")), []byte(s.cfg.EnrollToken)) != 1 {
+	if !tokenOK(r.Header.Get("X-Enroll-Token"), s.cfg.EnrollToken) {
 		http.Error(w, "bad enroll token", http.StatusUnauthorized)
 		return
 	}
-	var latest store.Firmware
-	s.store.View(func(st *store.State) {
-		for _, fw := range st.Firmware {
-			if fw.UploadedAt.After(latest.UploadedAt) {
-				latest = fw
-			}
-		}
-	})
-	if latest.File == "" {
+	var latest store.Package
+	var ok bool
+	s.store.View(func(st *store.State) { latest, ok = st.LatestPackage() })
+	if !ok {
 		http.Error(w, "no agent package uploaded yet", http.StatusNotFound)
 		return
 	}
 	log.Printf("install: agent package %s downloaded by %s", latest.Version, r.RemoteAddr)
 	w.Header().Set("Content-Type", "application/gzip")
-	http.ServeFile(w, r, filepath.Join(s.firmwareDir(), latest.File))
+	http.ServeFile(w, r, filepath.Join(s.packagesDir(), latest.File))
 }
 
 // redirectToHTTPS 把请求原样跳到 HTTPS 端口（主机名沿用请求里的）。
@@ -72,9 +65,6 @@ func (s *Server) httpsBase(r *http.Request) string {
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
 		host = h
 	}
-	_, port, err := net.SplitHostPort(s.cfg.Listen)
-	if err != nil || port == "" {
-		port = "9001"
-	}
+	_, port, _ := net.SplitHostPort(s.cfg.Listen)
 	return "https://" + net.JoinHostPort(host, port)
 }

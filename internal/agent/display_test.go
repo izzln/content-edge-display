@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,7 +27,7 @@ func TestOutputModeUsesConfiguredModeWhenAvailable(t *testing.T) {
 	fakeDRM(t, map[string][2]string{
 		"card0-HDMI-A-1": {"connected", "1920x1080\n1440x900\n1280x720\n"},
 	})
-	if w, h := OutputMode("1440x900@60"); w != 1440 || h != 900 {
+	if w, h := OutputMode("1440x900"); w != 1440 || h != 900 {
 		t.Fatalf("got %dx%d", w, h)
 	}
 	if w, h := OutputMode(""); w != 1920 || h != 1080 {
@@ -40,7 +41,7 @@ func TestOutputModeFallsBackToPreferred(t *testing.T) {
 		"card0-HDMI-A-1": {"connected", "1920x1080\n1280x720\n"},
 		"card0-HDMI-A-2": {"disconnected", "1440x900\n"}, // 没接的口不算
 	})
-	if w, h := OutputMode("1440x900@60"); w != 1920 || h != 1080 {
+	if w, h := OutputMode("1440x900"); w != 1920 || h != 1080 {
 		t.Fatalf("模式不可用时应退回首选模式，得到 %dx%d", w, h)
 	}
 }
@@ -60,10 +61,10 @@ func TestOutputModeWithoutSysfs(t *testing.T) {
 // 格式不对的 display_mode 配置加载时就要挡住，装机时就能发现。
 func TestDisplayModeValidated(t *testing.T) {
 	for mode, ok := range map[string]bool{
-		"1440x900": true, "1440x900@60": true, "1920x1080@59.94": true, "": true,
-		"1440*900": false, "big": false, "1440x900@": false, "0x0": false,
+		"1440x900": true, "1920x1080": true, "": true,
+		"1440x900@60": false, "1440*900": false, "big": false, "0x0": false,
 	} {
-		c := &Config{ServerURL: "http://x", EnrollToken: "t", DisplayMode: mode}
+		c := &Config{ServerURL: "https://x", TLSFingerprint: strings.Repeat("0", 64), EnrollToken: "t", DisplayMode: mode}
 		if err := c.fillDefaults(); (err == nil) != ok {
 			t.Errorf("display_mode %q: err=%v，期望 ok=%v", mode, err, ok)
 		}

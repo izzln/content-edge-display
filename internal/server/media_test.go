@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
 // ---- 测试素材 ----
@@ -382,7 +384,7 @@ func TestManifestLayoutAndMirror(t *testing.T) {
 		got.Y != want.Y || got.W != want.W || got.H != want.H {
 		t.Fatalf("媒体区矩形 = %+v，期望右半屏 %+v", got, want)
 	}
-	if m.Layout.CanvasW != canvasW || m.Layout.CanvasH != canvasH {
+	if m.Layout.CanvasW != manifest.CanvasW || m.Layout.CanvasH != manifest.CanvasH {
 		t.Fatalf("画布尺寸错误：%dx%d", m.Layout.CanvasW, m.Layout.CanvasH)
 	}
 	if !strings.HasPrefix(m.Layout.Overlay.Name, "ovl_") || m.Layout.Overlay.Size == 0 {
@@ -396,7 +398,7 @@ func TestManifestLayoutAndMirror(t *testing.T) {
 
 	// 左右对调：一个模板覆盖两种设备
 	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/display",
-		map[string]any{"mode": "global", "mirror": true}), http.StatusOK)
+		map[string]any{"mirror": true}), http.StatusNoContent)
 	flipped := deviceManifest(t, h)
 	if flipped.Layout == nil || flipped.Layout.Media.X != 0 || flipped.Layout.Media.W != 720 {
 		t.Fatalf("对调后媒体区应在左半屏：%+v", flipped.Layout)
@@ -410,7 +412,7 @@ func TestManifestLayoutAndMirror(t *testing.T) {
 
 	// 属性变化只换叠加图，媒体文件不变（视频不用重新下载，更不用重新编码）
 	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes",
-		map[string]string{"room": "302"}), http.StatusOK)
+		map[string]string{"room": "302"}), http.StatusNoContent)
 	withAttr := deviceManifest(t, h)
 	if withAttr.Layout.Overlay.SHA256 == flipped.Layout.Overlay.SHA256 {
 		t.Fatal("属性变化应当改变叠加图")
@@ -422,7 +424,7 @@ func TestManifestLayoutAndMirror(t *testing.T) {
 	// 模板没有媒体区时回到整屏图
 	noMedia := splitTemplate()
 	do(t, h, adminReq("POST", "/api/v1/admin/templates", noMedia), http.StatusOK)
-	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]string{"template_id": "split"}), http.StatusOK)
+	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]string{"template_id": "split"}), http.StatusNoContent)
 	if m := deviceManifest(t, h); m.Layout != nil || len(m.Items) != 1 ||
 		!strings.HasPrefix(m.Items[0].Name, "tpl_") {
 		t.Fatalf("无媒体区的模板应渲染成整屏图：%+v", m)
@@ -435,7 +437,7 @@ func TestRenderedFilesPruned(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	for _, room := range []string{"301", "302", "303"} {
 		do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes",
-			map[string]string{"room": room}), http.StatusOK)
+			map[string]string{"room": room}), http.StatusNoContent)
 		deviceManifest(t, h)
 	}
 	m := deviceManifest(t, h)
@@ -462,8 +464,8 @@ func TestLastTemplateProtectedAndGlobalRepoints(t *testing.T) {
 
 	// 再建一个，然后删掉当前的全局模板 → 全局自动指向剩下的那个
 	do(t, h, adminReq("POST", "/api/v1/admin/templates", mediaTemplate("second")), http.StatusOK)
-	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/"+seeded, nil), http.StatusOK)
-	if got := s.store.Global().TemplateID; got != "second" {
+	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/"+seeded, nil), http.StatusNoContent)
+	if got := state(s).Global.TemplateID; got != "second" {
 		t.Fatalf("删掉全局模板后应自动改指向剩下的模板，得到 %q", got)
 	}
 	// 设备照样有内容可显示

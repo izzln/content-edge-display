@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/izzln/content-edge-display/internal/fsutil"
 )
 
 const (
@@ -61,7 +64,7 @@ func watchKeyboards(ctx context.Context) <-chan struct{} {
 					continue
 				}
 				bits := make([]byte, keyBitsLength)
-				if !ioctl(f.Fd(), evIOCGBitKey, unsafe.Pointer(&bits[0])) || !isKeyboard(bits) {
+				if !ioctl(f.Fd(), evIOCGBitKey, uintptr(unsafe.Pointer(&bits[0]))) || !isKeyboard(bits) {
 					f.Close()
 					mu.Lock()
 					skip[p] = st.Ino
@@ -110,14 +113,18 @@ func readKeys(f *os.File, keys chan<- struct{}) {
 	}
 }
 
-func ioctl(fd uintptr, req uintptr, arg unsafe.Pointer) bool {
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(arg))
+func ioctl(fd, req, arg uintptr) bool {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, req, arg)
 	return errno == 0
 }
 
-func ioctlInt(fd uintptr, req uintptr, arg uintptr) bool {
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, req, arg)
-	return errno == 0
+// restartGetty 重启 tty1 的登录程序：重新显示 issue（含救援信息），并注销留在上面的会话。
+func restartGetty() error {
+	out, err := exec.Command("systemctl", "restart", rescueGetty).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("restart %s: %v %s", rescueGetty, err, out)
+	}
+	return nil
 }
 
 // vtConsole 用 tty1 显示救援信息：信息写进 agetty 的 issue 文件，重启 tty1 的 getty 让它显示在登录提示上方。
@@ -125,20 +132,20 @@ type vtConsole struct{}
 
 func (vtConsole) show(info string) {
 	if err := os.MkdirAll(filepath.Dir(rescueIssue), 0o755); err == nil {
-		if err := writeFileAtomic(rescueIssue, []byte(escapeIssue(info)), 0o644); err != nil {
+		if err := fsutil.WriteFile(rescueIssue, []byte(escapeIssue(info)), 0o644); err != nil {
 			log.Printf("agent: rescue console: %v", err)
 		}
 	}
 	// 切到 tty1（播放时前台通常就是它；以防万一），清屏后重启 getty，登录提示上方就是最新信息
 	if f, err := os.OpenFile("/dev/tty0", os.O_WRONLY, 0); err == nil {
-		ioctlInt(f.Fd(), vtActivate, 1)
-		ioctlInt(f.Fd(), vtWaitActive, 1)
+		ioctl(f.Fd(), vtActivate, 1)
+		ioctl(f.Fd(), vtWaitActive, 1)
 		f.Close()
 	}
 	writeTTY("\033[H\033[2J")
-	if out, err := exec.Command("systemctl", "restart", rescueGetty).CombinedOutput(); err != nil {
+	if err := restartGetty(); err != nil {
 		// 没有 getty（极简系统）时直接把信息写到控制台上
-		log.Printf("agent: rescue console: restart %s: %v %s; writing the info to %s directly", rescueGetty, err, out, rescueTTY)
+		log.Printf("agent: rescue console: %v; writing the info to %s directly", err, rescueTTY)
 		writeTTY(info)
 	}
 }
@@ -146,8 +153,8 @@ func (vtConsole) show(info string) {
 func (vtConsole) hide() {
 	os.Remove(rescueIssue)
 	// 播放画面会盖住控制台：注销留在 tty1 上的会话，免得有人对着播放画面盲打进一个已登录的 root shell
-	if out, err := exec.Command("systemctl", "restart", rescueGetty).CombinedOutput(); err != nil {
-		log.Printf("agent: rescue console: restart %s: %v %s", rescueGetty, err, out)
+	if err := restartGetty(); err != nil {
+		log.Printf("agent: rescue console: %v", err)
 	}
 }
 

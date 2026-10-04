@@ -182,21 +182,16 @@ func TestDeleteWhileTranscodingCancels(t *testing.T) {
 // 没装 ffmpeg 时后台要知道（会醒目提示），装了要显示版本。
 func TestInfoReportsTranscodeCapability(t *testing.T) {
 	s, h := newAdminTestServer(t)
-	var info struct {
-		Transcode bool   `json:"transcode"`
-		FFmpeg    string `json:"ffmpeg"`
-		Spec      struct {
-			MaxBitrateK int `json:"max_bitrate_k"`
-		} `json:"video_spec"`
-	}
+	var info serverInfo
 	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
-	if info.Transcode || info.FFmpeg != "" {
-		t.Fatalf("未装 ffmpeg 时应报告不可转码：%+v", info)
+	if info.Transcode || info.FFmpegError == "" {
+		t.Fatalf("未装 ffmpeg 时应报告不可转码及原因：%+v", info)
 	}
 	s.setEncoder(&fakeEncoder{})
+	info = serverInfo{}
 	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/info", nil), http.StatusOK).Body.Bytes(), &info)
-	if !info.Transcode || info.FFmpeg != "fake ffmpeg" || info.Spec.MaxBitrateK <= 0 {
-		t.Fatalf("装了 ffmpeg 时应报告版本与转码参数：%+v", info)
+	if !info.Transcode || info.Video.MaxBitrateK <= 0 || info.Limits.VideoMB != maxVideoUploadBytes>>20 {
+		t.Fatalf("装了 ffmpeg 时应报告转码参数与上传限制：%+v", info)
 	}
 }
 
@@ -252,9 +247,7 @@ func TestRealFFmpegEndToEnd(t *testing.T) {
 // ffmpeg 不可用的原因要能在后台看到（原因在启动时检测一次）。
 func TestInfoReportsFFmpegError(t *testing.T) {
 	s, h := newAdminTestServer(t)
-	s.encMu.Lock()
-	s.encoder, s.encoderErr = nil, "在 PATH 里找不到 ffmpeg（服务进程的 PATH=/usr/bin，运行用户 display）"
-	s.encMu.Unlock()
+	s.tools.encErr = "在 PATH 里找不到 ffmpeg（服务进程的 PATH=/usr/bin，运行用户 display）"
 	var info struct {
 		Transcode bool   `json:"transcode"`
 		Err       string `json:"ffmpeg_error"`

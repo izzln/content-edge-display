@@ -28,17 +28,15 @@ type RegisterRequest struct {
 	Hostname     string `json:"hostname"`
 	HWSerial     string `json:"hw_serial"`
 	MAC          string `json:"mac"`
-	IP           string `json:"ip"`
 	AgentVersion string `json:"agent_version"`
 }
 
 // Heartbeat 是设备心跳上报体（POST /api/v1/device/heartbeat）：健康数据与 OTA 确认。
-// 设备正在显示哪个版本不在这里——每次轮询的 If-None-Match 已经带着了。
+// 设备正在显示哪个版本不在这里——每次轮询的 If-None-Match 已经带着了；设备 IP 服务端从连接上取。
 type Heartbeat struct {
 	AgentVersion string `json:"agent_version"` // 设备端程序版本
-	IP           string `json:"ip,omitempty"`
-	UptimeS      int64  `json:"uptime"`       // 系统运行时长：突然变小说明重启过（如过热关机）
-	DiskFreeMB   int64  `json:"disk_free_mb"` // 缓存目录所在分区的剩余空间
+	UptimeS      int64  `json:"uptime"`        // 系统运行时长：突然变小说明重启过（如过热关机）
+	DiskFreeMB   int64  `json:"disk_free_mb"`  // 缓存目录所在分区的剩余空间
 	TempC        int    `json:"temp_c,omitempty"`
 	// HWDec 是最近一次播放视频用的硬件解码器（如 v4l2slh264dec）；"no" = 退化成了软解
 	// （会发热、卡顿，后台标红），空串 = 还没放过视频或问不到。

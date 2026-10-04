@@ -21,7 +21,7 @@ func (p *Null) Load(scene Scene) error {
 	p.mu.Lock()
 	p.scene = scene
 	p.mu.Unlock()
-	if scene.Overlay != nil {
+	if scene.OverlayPNG != "" {
 		log.Printf("player(null): loaded %d item(s) + overlay in %dx%d at (%d,%d)",
 			len(scene.Items), scene.Media.W, scene.Media.H, scene.Media.X, scene.Media.Y)
 	} else {

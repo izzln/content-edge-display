@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
@@ -16,105 +14,19 @@ import (
 	"github.com/izzln/content-edge-display/internal/server"
 )
 
-const (
-	testDeviceID = "dev-001"
-	testEnroll   = "enroll-me"
-)
-
-// rangeRecorder 记录媒体请求携带的 Range 头，用于断言续传确实发生。
-type rangeRecorder struct {
-	http.Handler
-	mu     sync.Mutex
-	ranges []string
-}
-
-func (rr *rangeRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/media/") {
-		rr.mu.Lock()
-		rr.ranges = append(rr.ranges, r.Header.Get("Range"))
-		rr.mu.Unlock()
-	}
-	rr.Handler.ServeHTTP(w, r)
-}
-
-// newTestEnv 启动真实服务端(httptest) + null 播放器的代理，返回两端与媒体目录。
-func newTestEnv(t *testing.T) (*Agent, *player.Null, *server.Server, *rangeRecorder, string) {
-	t.Helper()
-	mediaRoot := t.TempDir()
-	srvCfg := &server.Config{
-		MediaRoot:   mediaRoot,
-		DataDir:     t.TempDir(),
-		EnrollToken: testEnroll,
-	}
-	srv, err := server.New(srvCfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(srv.Close)
-	rr := &rangeRecorder{Handler: srv.Handler()}
-	ts := httptest.NewServer(rr)
-	t.Cleanup(ts.Close)
-
-	cfg := &Config{
-		ServerURL:   ts.URL,
-		DeviceID:    testDeviceID,
-		EnrollToken: testEnroll,
-		CacheDir:    t.TempDir(),
-		Player:      "null",
-	}
-	if err := cfg.fillDefaults(); err != nil {
-		t.Fatal(err)
-	}
-	p := player.NewNull()
-	a := New(cfg, p)
-	if err := os.MkdirAll(a.mediaDir(), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// 设备只有自注册这一条路径：走真实的注册接口
-	if err := a.ResolveIdentity(); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Register(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	devDir := filepath.Join(mediaRoot, testDeviceID)
-	if err := os.MkdirAll(devDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return a, p, srv, rr, devDir
-}
-
-// mediaItem 为设备媒体目录里的一个文件构建清单条目。
-func mediaItem(t *testing.T, devDir, name string) manifest.Item {
-	t.Helper()
-	items, err := manifest.BuildItems(devDir, testDeviceID, []string{name}, 10, manifest.NewHashCache())
-	if err != nil || len(items) != 1 {
-		t.Fatalf("build item %s: %v %+v", name, err, items)
-	}
-	return items[0]
-}
-
 func TestEndToEnd(t *testing.T) {
-	a, p, _, _, devDir := newTestEnv(t)
-	ctx := context.Background()
+	e := newEnv(t, true)
+	a, p, ctx := e.a, e.p, context.Background()
 
-	// 1. 空目录：拿到空清单
-	changed, err := a.PollOnce(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed || a.Version() == "" {
-		t.Fatalf("expected initial apply, changed=%v version=%q", changed, a.Version())
+	// 1. 空目录：拿到整屏模板图
+	if err := a.poll(ctx); err != nil || a.manifestVer == "" {
+		t.Fatalf("expected initial apply: %v %q", err, a.manifestVer)
 	}
 
 	// 2. 运营方放入文件 → 版本变化 → 下载并切换
-	os.WriteFile(filepath.Join(devDir, "01_intro.jpg"), []byte("image-content"), 0o644)
-	changed, err = a.PollOnce(ctx)
-	if err != nil {
+	os.WriteFile(filepath.Join(e.devDir, "01_intro.jpg"), []byte("image-content"), 0o644)
+	if err := a.poll(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("expected manifest change after adding file")
 	}
 	if got := nowPlaying(p); !strings.HasSuffix(got, "_01_intro.jpg") {
 		t.Fatalf("player not loaded: now playing %q", got)
@@ -123,30 +35,31 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("cached file wrong: %v %q", err, data)
 	}
 
-	// 3. 无变化 → 304 → changed=false
-	changed, err = a.PollOnce(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed {
-		t.Fatal("expected 304/no change")
+	// 3. 无变化 → 304，版本不变
+	ver := a.manifestVer
+	if err := a.poll(ctx); err != nil || a.manifestVer != ver {
+		t.Fatalf("expected 304/no change: %v", err)
 	}
 
 	// 4. 心跳 → 服务端管理接口可见
-	if err := a.Heartbeat(ctx); err != nil {
+	if err := a.heartbeat(ctx); err != nil {
 		t.Fatal(err)
+	}
+	var statuses []server.DeviceStatus
+	json.Unmarshal(e.admin(t, "GET", "/api/v1/admin/devices", "").Body.Bytes(), &statuses)
+	if len(statuses) != 1 || !statuses[0].Online || statuses[0].Heartbeat == nil || statuses[0].Heartbeat.AgentVersion != Version {
+		t.Fatalf("device not online with heartbeat in admin view: %+v", statuses)
+	}
+	if statuses[0].HW.IP == "" {
+		t.Fatal("服务端应从连接上取到设备 IP")
 	}
 
 	// 5. 内容替换 → 旧缓存被清理
 	oldCached := nowPlaying(p)
-	os.Remove(filepath.Join(devDir, "01_intro.jpg"))
-	os.WriteFile(filepath.Join(devDir, "02_video.mp4"), []byte("video-content"), 0o644)
-	changed, err = a.PollOnce(ctx)
-	if err != nil {
+	os.Remove(filepath.Join(e.devDir, "01_intro.jpg"))
+	os.WriteFile(filepath.Join(e.devDir, "02_video.mp4"), []byte("video-content"), 0o644)
+	if err := a.poll(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if !changed {
-		t.Fatal("expected change after replacing content")
 	}
 	if _, err := os.Stat(oldCached); !os.IsNotExist(err) {
 		t.Fatalf("old cache not cleaned up: %v", err)
@@ -156,190 +69,142 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
-func TestHeartbeatVisibleInAdmin(t *testing.T) {
-	a, _, srv, _, _ := newTestEnv(t)
-	ctx := context.Background()
-	if _, err := a.PollOnce(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Heartbeat(ctx); err != nil {
-		t.Fatal(err)
-	}
+func TestDownloadResume(t *testing.T) {
+	e := newEnv(t, true)
+	content := strings.Repeat("0123456789", 1000) // 10KB
+	os.WriteFile(filepath.Join(e.devDir, "big.mp4"), []byte(content), 0o644)
+	item := e.mediaItem(t, "big.mp4")
 
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/admin/devices", nil))
-	var statuses []server.DeviceStatus
-	if err := json.Unmarshal(w.Body.Bytes(), &statuses); err != nil {
+	// 预置半截 .part，模拟上次下载中断
+	dst := e.a.localPath(item)
+	os.WriteFile(dst+".part", []byte(content[:len(content)/2]), 0o644)
+	if err := e.a.downloadFile(context.Background(), item.URL, item.SHA256, item.Size, dst); err != nil {
 		t.Fatal(err)
 	}
-	if len(statuses) != 1 || !statuses[0].Online {
-		t.Fatalf("device not online in admin view: %+v", statuses)
+	if data, err := os.ReadFile(dst); err != nil || string(data) != content {
+		t.Fatalf("resumed file corrupt: err=%v len=%d", err, len(data))
 	}
-	if hb := statuses[0].Heartbeat; hb == nil || hb.AgentVersion != Version {
-		t.Fatalf("heartbeat not reported: %+v", hb)
+	e.ranges.mu.Lock()
+	defer e.ranges.mu.Unlock()
+	if len(e.ranges.ranges) == 0 || e.ranges.ranges[len(e.ranges.ranges)-1] == "" {
+		t.Fatalf("expected Range request, got %v", e.ranges.ranges)
 	}
 }
 
-func TestDownloadResume(t *testing.T) {
-	a, _, _, rr, devDir := newTestEnv(t)
-	ctx := context.Background()
-
-	content := strings.Repeat("0123456789", 1000) // 10KB
-	os.WriteFile(filepath.Join(devDir, "big.mp4"), []byte(content), 0o644)
-
-	item := mediaItem(t, devDir, "big.mp4")
-
-	// 预置半截 .part，模拟上次下载中断
-	dst := a.localPath(item)
-	half := len(content) / 2
-	if err := os.WriteFile(dst+".part", []byte(content[:half]), 0o644); err != nil {
-		t.Fatal(err)
+// 下载完、改名前断电：.part 已经是完整文件。不能再去请求 bytes=<大小>-（服务端回 416），直接校验改名。
+func TestDownloadCompletesFullPart(t *testing.T) {
+	e := newEnv(t, true)
+	os.WriteFile(filepath.Join(e.devDir, "a.jpg"), []byte("whole file"), 0o644)
+	item := e.mediaItem(t, "a.jpg")
+	dst := e.a.localPath(item)
+	os.WriteFile(dst+".part", []byte("whole file"), 0o644)
+	if err := e.a.downloadFile(context.Background(), item.URL, item.SHA256, item.Size, dst); err != nil {
+		t.Fatalf("完整的 .part 应直接完成：%v", err)
 	}
-
-	if err := a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(dst)
-	if err != nil || string(data) != content {
-		t.Fatalf("resumed file corrupt: err=%v len=%d", err, len(data))
-	}
-
-	rr.mu.Lock()
-	defer rr.mu.Unlock()
-	if len(rr.ranges) == 0 || rr.ranges[len(rr.ranges)-1] == "" {
-		t.Fatalf("expected Range request, got %v", rr.ranges)
+	if len(e.ranges.ranges) != 0 {
+		t.Fatalf("不应再发请求：%v", e.ranges.ranges)
 	}
 }
 
 func TestDownloadRejectsBadChecksum(t *testing.T) {
-	a, _, _, _, devDir := newTestEnv(t)
-	ctx := context.Background()
-
-	os.WriteFile(filepath.Join(devDir, "a.jpg"), []byte("real-content"), 0o644)
-	item := mediaItem(t, devDir, "a.jpg")
-	item.SHA256 = strings.Repeat("f", 64) // 篡改期望校验和
-
-	dst := filepath.Join(a.mediaDir(), "ffffffffffff_a.jpg")
-	if err := a.downloadFile(ctx, item.URL, item.SHA256, item.Size, dst); err == nil {
+	e := newEnv(t, true)
+	os.WriteFile(filepath.Join(e.devDir, "a.jpg"), []byte("real-content"), 0o644)
+	item := e.mediaItem(t, "a.jpg")
+	dst := filepath.Join(e.a.mediaDir(), "ffffffffffff_a.jpg")
+	if err := e.a.downloadFile(context.Background(), item.URL, strings.Repeat("f", 64), item.Size, dst); err == nil {
 		t.Fatal("expected checksum error")
 	}
-	if _, err := os.Stat(dst); !os.IsNotExist(err) {
-		t.Fatal("corrupt file must not be kept")
-	}
-	if _, err := os.Stat(dst + ".part"); !os.IsNotExist(err) {
-		t.Fatal("corrupt .part must be removed")
+	for _, p := range []string{dst, dst + ".part"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("corrupt download must not be kept: %s", p)
+		}
 	}
 }
 
 func TestRestoreFromLocalCache(t *testing.T) {
-	a, p, _, _, devDir := newTestEnv(t)
-	ctx := context.Background()
-
-	os.WriteFile(filepath.Join(devDir, "a.jpg"), []byte("cached"), 0o644)
-	if _, err := a.PollOnce(ctx); err != nil {
+	e := newEnv(t, true)
+	os.WriteFile(filepath.Join(e.devDir, "a.jpg"), []byte("cached"), 0o644)
+	if err := e.a.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	ver := a.Version()
-
 	// 模拟重启：同一缓存目录新建 agent + 新播放器，不联网恢复
 	p2 := player.NewNull()
-	a2 := New(a.cfg, p2)
-	if err := a2.LoadCurrent(); err != nil {
+	a2 := New(e.a.cfg, p2)
+	if err := a2.loadCurrent(); err != nil {
 		t.Fatalf("restore from cache failed: %v", err)
 	}
-	if a2.Version() != ver {
-		t.Fatalf("restored version mismatch: %q vs %q", a2.Version(), ver)
+	if a2.manifestVer != e.a.manifestVer || !strings.HasSuffix(nowPlaying(p2), "_a.jpg") {
+		t.Fatalf("player not restored: %q %q", a2.manifestVer, nowPlaying(p2))
 	}
-	if !strings.HasSuffix(nowPlaying(p2), "_a.jpg") {
-		t.Fatalf("player not restored: %q", nowPlaying(p2))
-	}
-	_ = p
 }
 
-// 模板承载视频：服务端下发 layout，设备端要把叠加图下载下来、解码成播放器能用的
-// BGRA，并把播放区限制在媒体区——而不是让视频铺满整屏盖掉属性。
+// 模板承载视频：服务端下发 layout，设备端要把叠加图下载下来，并把播放区限制在媒体区——
+// 而不是让视频铺满整屏盖掉属性。
 func TestLayoutBecomesOverlayScene(t *testing.T) {
-	a, p, _, _, devDir := newTestEnv(t)
-	ctx := context.Background()
+	e := newEnv(t, true)
+	a, p, ctx := e.a, e.p, context.Background()
 
 	// 媒体区还没内容：整屏图，没有叠加层
-	if _, err := a.PollOnce(ctx); err != nil {
+	if err := a.poll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if sc := p.Scene(); sc.Overlay != nil || len(sc.Items) != 1 {
+	if sc := p.Scene(); sc.OverlayPNG != "" || len(sc.Items) != 1 {
 		t.Fatalf("媒体区空时应整屏播放一张模板图：%+v", sc)
 	}
 
-	os.WriteFile(filepath.Join(devDir, "clip.mp4"), []byte("video-bytes"), 0o644)
-	if _, err := a.PollOnce(ctx); err != nil {
+	os.WriteFile(filepath.Join(e.devDir, "clip.mp4"), []byte("video-bytes"), 0o644)
+	if err := a.poll(ctx); err != nil {
 		t.Fatal(err)
 	}
 	sc := p.Scene()
-	if sc.Overlay == nil {
-		t.Fatal("清单带 layout 时必须合成叠加层")
+	if sc.OverlayPNG == "" || len(sc.Items) != 1 || !strings.HasSuffix(sc.Items[0].Path, "_clip.mp4") {
+		t.Fatalf("清单带 layout 时应是叠加层 + 媒体文件本身：%+v", sc)
 	}
-	if len(sc.Items) != 1 || !strings.HasSuffix(sc.Items[0].Path, "_clip.mp4") {
-		t.Fatalf("播放列表应是媒体文件本身：%+v", sc.Items)
+	if sc.CanvasW != 1440 || sc.CanvasH != 900 || sc.Media != (manifest.Rect{X: 720, Y: 0, W: 720, H: 900}) {
+		t.Fatalf("画布或媒体区错误：%+v", sc)
 	}
-	if sc.CanvasW != 1440 || sc.CanvasH != 900 {
-		t.Fatalf("画布尺寸错误：%dx%d", sc.CanvasW, sc.CanvasH)
-	}
-	if sc.Media != (player.Rect{X: 720, Y: 0, W: 720, H: 900}) {
-		t.Fatalf("媒体区应是右半屏，得到 %+v", sc.Media)
-	}
-	// 叠加图下载下来即可；按实际输出分辨率光栅化是播放器的事（屏幕未必按画布尺寸输出）
-	fi, err := os.Stat(sc.Overlay.PNG)
-	if err != nil {
+	if fi, err := os.Stat(sc.OverlayPNG); err != nil || fi.Size() == 0 {
 		t.Fatalf("叠加图没有下载下来：%v", err)
 	}
-	if fi.Size() == 0 {
-		t.Fatal("叠加图是空文件")
-	}
 
-	// 缓存清理不能顺手把叠加图和它的光栅化产物删掉，否则每次巡检都要重下重做
-	derived := sc.Overlay.PNG + ".1920x1080.bgra"
-	if err := os.WriteFile(derived, []byte("raw"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(a.currentPath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	// 缓存清理不能顺手把叠加图和它的光栅化产物删掉；不再被引用的派生文件要清掉
+	derived := sc.OverlayPNG + ".1920x1080.bgra"
+	stale := filepath.Join(a.mediaDir(), "deadbeef_old.png.1440x900.bgra")
+	os.WriteFile(derived, []byte("raw"), 0o644)
+	os.WriteFile(stale, []byte("raw"), 0o644)
 	var cur manifest.Manifest
-	if err := json.Unmarshal(data, &cur); err != nil {
-		t.Fatal(err)
-	}
+	data, _ := os.ReadFile(a.currentPath())
+	json.Unmarshal(data, &cur)
 	a.cleanup(&cur)
-	for _, path := range []string{sc.Overlay.PNG, derived} {
+	for _, path := range []string{sc.OverlayPNG, derived} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("清理时误删了仍被引用的文件 %s：%v", filepath.Base(path), err)
 		}
 	}
-	// 不再被引用的派生文件要清掉
-	stale := filepath.Join(a.mediaDir(), "deadbeef_old.png.1440x900.bgra")
-	if err := os.WriteFile(stale, []byte("raw"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a.cleanup(&cur)
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("不再被引用的派生文件应当被清理")
 	}
 
 	// 断网重启：从本地缓存恢复时叠加层也要一起恢复
 	p2 := player.NewNull()
-	a2 := New(a.cfg, p2)
-	if err := a2.LoadCurrent(); err != nil {
-		t.Fatalf("从缓存恢复失败：%v", err)
-	}
-	if p2.Scene().Overlay == nil {
-		t.Fatal("重启恢复后叠加层丢失，画面会变成整屏视频")
+	if err := New(a.cfg, p2).loadCurrent(); err != nil || p2.Scene().OverlayPNG == "" {
+		t.Fatalf("重启恢复后叠加层丢失：%v", err)
 	}
 }
 
-// nowPlaying 返回 null 播放器当前画面的第一个条目路径。
-func nowPlaying(p *player.Null) string {
-	if items := p.Scene().Items; len(items) > 0 {
-		return items[0].Path
+// 设备只能经 HTTPS 访问服务端（HTTP 端口只有装机入口）。
+func TestRequestsUseHTTPS(t *testing.T) {
+	e := newEnv(t, true)
+	if !strings.HasPrefix(e.a.cfg.ServerURL, "https://") {
+		t.Fatal("测试环境应走 HTTPS")
 	}
-	return ""
+	req, _ := e.a.newRequest(context.Background(), http.MethodGet, "/api/v1/device/manifest", nil)
+	resp, err := e.a.api.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.TLS == nil {
+		t.Fatal("应是 TLS 连接")
+	}
 }

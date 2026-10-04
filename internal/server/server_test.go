@@ -3,78 +3,21 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/sign"
 	"github.com/izzln/content-edge-display/internal/store"
 )
-
-const (
-	testDeviceID = "dev-001"
-	testSecret   = "test-secret"
-)
-
-func newTestServer(t *testing.T) (*Server, string) {
-	t.Helper()
-	mediaRoot := t.TempDir()
-	cfg := &Config{
-		Listen:      ":0",
-		MediaRoot:   mediaRoot,
-		DataDir:     t.TempDir(),
-		EnrollToken: "enroll-me",
-	}
-	s, err := New(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Close)
-	// 默认按"没装 ffmpeg、没装 poppler"跑，结果不依赖测试机环境；相关测试自己注入。
-	s.setEncoder(nil)
-	s.setPDFRenderer(nil)
-	// 设备只有自注册这一条路径，测试里直接写进 store，省去逐个走注册接口。
-	addTestDevice(t, s, testDeviceID, testSecret)
-	addTestDevice(t, s, "dev-002", "other-secret")
-	return s, mediaRoot
-}
-
-func addTestDevice(t *testing.T, s *Server, id, secret string) {
-	t.Helper()
-	err := s.store.Update(func(st *store.State) error {
-		st.Devices[id] = store.Device{ID: id, Secret: secret, RegisteredAt: s.now()}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func signedRequest(method, path string, body *strings.Reader) *http.Request {
-	return signedRequestAt(time.Now(), method, path, body)
-}
-
-// signedRequestAt 以指定时刻签名（配合注入的 s.now 使用，避免落出时间窗）。
-func signedRequestAt(now time.Time, method, path string, body *strings.Reader) *http.Request {
-	var r *http.Request
-	if body == nil {
-		r = httptest.NewRequest(method, path, nil)
-	} else {
-		r = httptest.NewRequest(method, path, body)
-	}
-	ts := strconv.FormatInt(now.Unix(), 10)
-	r.Header.Set(sign.HeaderDeviceID, testDeviceID)
-	r.Header.Set(sign.HeaderTimestamp, ts)
-	r.Header.Set(sign.HeaderSign, sign.Sign(testSecret, ts, method, r.URL.Path))
-	return r
-}
 
 func TestManifestRequiresAuth(t *testing.T) {
 	s, _ := newTestServer(t)
@@ -188,11 +131,7 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 		t.Fatalf("heartbeat expected 204, got %d: %s", w.Code, w.Body.String())
 	}
 
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/admin/devices", nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("admin expected 200, got %d", w.Code)
-	}
+	w = do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
 	var statuses []DeviceStatus
 	if err := json.Unmarshal(w.Body.Bytes(), &statuses); err != nil {
 		t.Fatal(err)
@@ -265,17 +204,16 @@ func TestAuthFailureExplainsWhy(t *testing.T) {
 
 // 测试卡渲染要用 server.json 配置的时区，而不是服务器操作系统的时区。
 func TestTestCardUsesConfiguredTimezone(t *testing.T) {
-	s, _ := newTestServer(t)
-	s.cfg.AdminToken = "tok"
-	h := s.Handler()
+	s, h := newAdminTestServer(t)
 	tokyo, _ := time.LoadLocation("Asia/Tokyo")
 	t.Setenv("TZ", "UTC")
 	fixed := time.Date(2026, 10, 2, 3, 0, 0, 0, time.UTC)
 	render := func(loc *time.Location) string {
 		s.loc = loc
-		r := httptest.NewRequest("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", strings.NewReader(`{"duration_s":60}`))
-		r.Header.Set("X-Admin-Token", "tok")
-		h.ServeHTTP(httptest.NewRecorder(), r)
+		s.mu.Lock()
+		clear(s.sync) // 运行中不会换时区：清掉按旧时区生成的清单缓存
+		s.mu.Unlock()
+		do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusNoContent)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, signedRequestAt(fixed, "GET", "/api/v1/device/manifest", nil))
 		var m struct {
@@ -335,7 +273,7 @@ func TestDeviceSyncState(t *testing.T) {
 		t.Fatalf("设备报告已应用最新版本时应为已显示最新内容，得到 %s", got)
 	}
 	// 运营方改了内容：设备下次轮询前是"等待刷新"，取到后"正在刷新"，应用后"最新"
-	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "999"}), http.StatusOK)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "999"}), http.StatusNoContent)
 	if got := state(); got != syncWaiting {
 		t.Fatalf("改了配置后应为等待刷新，得到 %s", got)
 	}
@@ -352,7 +290,7 @@ func TestDeviceSyncState(t *testing.T) {
 	}
 
 	// 只看这台设备自己的内容：改别的设备、新建一个没人用的模板，都不能让它变成"等待刷新"
-	do(t, h, adminReq("PUT", "/api/v1/admin/devices/dev-002/attributes", map[string]string{"room": "1"}), http.StatusOK)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/dev-002/attributes", map[string]string{"room": "1"}), http.StatusNoContent)
 	do(t, h, adminReq("POST", "/api/v1/admin/templates", mediaTemplate("")), http.StatusOK)
 	if got := state(); got != syncLatest {
 		t.Fatalf("别的设备/没用到的模板改动不应影响本设备，得到 %s", got)
@@ -382,7 +320,11 @@ func TestContentKeyCoversManifestInputs(t *testing.T) {
 		return m.Version, c.key()
 	}
 	gid := globalTemplateID(t, s)
-	put := func(path string, body any) { do(t, h, adminReq("PUT", path, body), http.StatusOK) }
+	put := func(path string, body any) {
+		if w := do2(t, h, adminReq("PUT", path, body)); w.Code >= 300 {
+			t.Fatalf("PUT %s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
 	steps := []struct {
 		desc   string
 		change func()
@@ -399,9 +341,9 @@ func TestContentKeyCoversManifestInputs(t *testing.T) {
 			os.Chtimes(filepath.Join(s.deviceMediaDir(testDeviceID), "a.png"), future, future)
 		}},
 		{"左右对调", func() {
-			put("/api/v1/admin/devices/"+testDeviceID+"/display", map[string]any{"mode": "global", "mirror": true})
+			put("/api/v1/admin/devices/"+testDeviceID+"/display", map[string]any{"mirror": true})
 			// 回归：后台"保存模板设置"不能冲掉排好的播放顺序
-			if got := s.store.Display(testDeviceID).Playlist; strings.Join(got, ",") != "b.png,a.png" {
+			if got := state(s).Displays[testDeviceID].Playlist; strings.Join(got, ",") != "b.png,a.png" {
 				t.Errorf("保存模板设置后播放顺序被改成了 %v", got)
 			}
 		}},
@@ -421,7 +363,7 @@ func TestContentKeyCoversManifestInputs(t *testing.T) {
 			now = now.Add(time.Hour + time.Minute) // 时间走到时段里：没有任何写入，清单也会变
 		}},
 		{"测试屏", func() {
-			do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusOK)
+			do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusNoContent)
 		}},
 		{"测试屏到期", func() { now = now.Add(2 * time.Minute) }},
 	}
@@ -459,13 +401,13 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 		return ok && f.Status == mediaReady
 	})
 	deviceManifest(t, h)
-	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "1"}), http.StatusOK)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "1"}), http.StatusNoContent)
 
 	out := buf.String()
 	for _, want := range []string{
 		"device dev-001 online", "upload started: device dev-001, a.jpg", "upload done: device dev-001, a.jpg",
 		"queued for processing as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4", "transcoding: device dev-001, b.mp4 50%",
-		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 200",
+		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 204",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("控制台应有 %q\n%s", want, out)
@@ -551,13 +493,72 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 }
 
 func TestIntervalConfigBounds(t *testing.T) {
-	for _, c := range []Config{{PollIntervalS: 301}, {HeartbeatIntervalS: 5}, {PollIntervalS: -1}} {
-		if err := c.fillDefaults(); err == nil {
+	ok := Config{MediaRoot: "m", DataDir: "d", AdminToken: "a", EnrollToken: "e"}
+	for _, bad := range []func(*Config){
+		func(c *Config) { c.PollIntervalS = 301 },
+		func(c *Config) { c.HeartbeatIntervalS = 5 },
+		func(c *Config) { c.PollIntervalS = -1 },
+	} {
+		c := ok
+		bad(&c)
+		if err := c.validate(); err == nil {
 			t.Errorf("%+v 应被拒绝", c)
 		}
 	}
-	c := Config{}
-	if err := c.fillDefaults(); err != nil || c.PollIntervalS != 10 || c.HeartbeatIntervalS != 60 {
+	c := ok
+	if err := c.validate(); err != nil || c.PollIntervalS != 10 || c.HeartbeatIntervalS != 60 {
 		t.Fatalf("默认值应为 10/60：%+v %v", c, err)
+	}
+}
+
+// 设备每 10 秒轮询一次：显示输入没变时直接复用上次生成的清单（不再渲染、编码、写盘），一变就重新生成。
+func TestManifestCachedUntilContentChanges(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	first := deviceManifest(t, h)
+	png := filepath.Join(s.renderedDir(), testDeviceID, first.Items[0].Name)
+	os.Remove(png) // 缓存命中时不会重新渲染，文件就不会回来
+	if again := deviceManifest(t, h); again.Version != first.Version {
+		t.Fatal("输入没变，清单版本应不变")
+	}
+	if _, err := os.Stat(png); !os.IsNotExist(err) {
+		t.Fatal("输入没变时不应重新渲染")
+	}
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/attributes", map[string]string{"room": "101"}), http.StatusNoContent)
+	if changed := deviceManifest(t, h); changed.Version == first.Version {
+		t.Fatal("属性变了，清单应重新生成")
+	}
+}
+
+// 上传完成与转码完成可能同时往播放列表末尾追加：读改写在同一把锁里，谁都不能丢。
+func TestConcurrentPlaylistAppends(t *testing.T) {
+	s, mediaRoot := newTestServer(t)
+	dir := filepath.Join(mediaRoot, testDeviceID)
+	os.MkdirAll(dir, 0o755)
+	var names []string
+	for i := range 20 {
+		n := fmt.Sprintf("f%02d.jpg", i)
+		os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644)
+		names = append(names, n)
+	}
+	var wg sync.WaitGroup
+	for i := len(names) - 1; i >= 0; i-- { // 倒序追加：结果应是追加顺序，而不是按文件名
+		wg.Add(1)
+		go func(n string) { defer wg.Done(); s.appendPlaylist(testDeviceID, n) }(names[i])
+	}
+	wg.Wait()
+	if got := state(s).Displays[testDeviceID].Playlist; len(got) != len(names) {
+		t.Fatalf("并发追加丢了条目：%d/%d %v", len(got), len(names), got)
+	}
+}
+
+// 两个口令都必填：缺了哪个都不启动（管理面不能裸奔，没有注册口令设备也接不进来）。
+func TestNewRequiresTokens(t *testing.T) {
+	for _, c := range []Config{
+		{MediaRoot: t.TempDir(), DataDir: t.TempDir(), EnrollToken: "e"},
+		{MediaRoot: t.TempDir(), DataDir: t.TempDir(), AdminToken: "a"},
+	} {
+		if _, err := New(&c); err == nil || !strings.Contains(err.Error(), "_token is empty") {
+			t.Errorf("%+v: 应拒绝启动，得到 %v", c, err)
+		}
 	}
 }

@@ -25,14 +25,16 @@ type Item struct {
 	Duration int    `json:"duration"` // 秒；仅图片有效，视频为 0 表示播放至结束
 }
 
-// Command 是随清单下发的运维指令。
-type Command struct {
-	Type    string `json:"type"` // "update"
-	Version string `json:"version,omitempty"`
-	URL     string `json:"url,omitempty"`
-	SHA256  string `json:"sha256,omitempty"`
-	Size    int64  `json:"size,omitempty"`
+// Update 是随清单下发的程序更新：设备下载这个程序包、执行包内 update.sh 后切换到 Version。
+type Update struct {
+	Version string `json:"version"`
+	URL     string `json:"url"`
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
 }
+
+// CanvasW/H 是模板画布与内容处理的基准尺寸：模板按它排版，上传的图片、视频、PDF 页面都缩到它以内。
+const CanvasW, CanvasH = 1440, 900
 
 // Rect 是画布上的一个矩形（像素）。
 type Rect struct {
@@ -56,10 +58,10 @@ type Layout struct {
 
 // Manifest 是设备的播放清单。
 type Manifest struct {
-	Version  string    `json:"version"`
-	Items    []Item    `json:"items"`
-	Layout   *Layout   `json:"layout,omitempty"`
-	Commands []Command `json:"commands"`
+	Version string  `json:"version"`
+	Items   []Item  `json:"items"`
+	Layout  *Layout `json:"layout,omitempty"`
+	Update  *Update `json:"update,omitempty"`
 }
 
 // Downloads 返回本份清单需要设备端下载校验的全部文件（播放条目 + 叠加图）。
@@ -82,6 +84,9 @@ var videoExts = map[string]bool{
 // PagesDir 是媒体目录下存放文档逐页渲染图的隐藏目录：<媒体目录>/.pages/<文档名>/p001.jpg …
 // 隐藏目录不会被 ListMedia 当成媒体；清单生成时文档展开成这些页面。
 const PagesDir = ".pages"
+
+// PagesPath 是文档 doc 的逐页图片目录。
+func PagesPath(dir, doc string) string { return filepath.Join(dir, PagesDir, doc) }
 
 // SafeFileName 判断 name 是不是可以直接拼进目录的单个文件名：不含路径成分、不是隐藏文件。
 // 设备下载、后台删除/缩略图、构建清单都要过这一关。
@@ -135,37 +140,41 @@ func FileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// FileSHA256 返回文件内容的 sha256（hex），带缓存。
-func (c *HashCache) FileSHA256(path string, size, mtime int64) (string, error) {
+// Sum 返回文件的 sha256（hex）与大小；大小与修改时间没变时用缓存，不重读文件。
+func (c *HashCache) Sum(path string) (sum string, size int64, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", 0, err
+	}
+	size, mtime := info.Size(), info.ModTime().UnixNano()
 	c.mu.Lock()
 	e, ok := c.m[path]
 	c.mu.Unlock()
 	if ok && e.size == size && e.mtime == mtime {
-		return e.sum, nil
+		return e.sum, size, nil
 	}
-	sum, err := FileSHA256(path)
-	if err != nil {
-		return "", err
+	if sum, err = FileSHA256(path); err != nil {
+		return "", 0, err
 	}
 	c.mu.Lock()
 	c.m[path] = hashEntry{size: size, mtime: mtime, sum: sum}
 	c.mu.Unlock()
-	return sum, nil
+	return sum, size, nil
 }
 
-// Version 由条目、指令与叠加布局计算清单版本号：内容不变则版本稳定（设备收到 304），
+// Version 由条目、程序更新与叠加布局计算清单版本号：内容不变则版本稳定（设备收到 304），
 // 任何一项出现/消失/变化都会让版本号变，触发设备刷新。
 //
 // 参与计算的不只是文件本身，还有影响播放行为的字段（类型、停留时长、媒体区位置）：
 // 只改停留时长或只改模板属性文字而媒体文件不变时版本号也必须变，
 // 否则设备一直收到 304，新设置永远到不了现场。
-func Version(items []Item, cmds []Command, layout *Layout) string {
+func Version(items []Item, update *Update, layout *Layout) string {
 	h := sha256.New()
 	for _, it := range items {
 		fmt.Fprintf(h, "%s|%s|%s|%d\n", it.Name, it.SHA256, it.Type, it.Duration)
 	}
-	for _, c := range cmds {
-		fmt.Fprintf(h, "cmd|%s|%s|%s\n", c.Type, c.Version, c.SHA256)
+	if update != nil {
+		fmt.Fprintf(h, "update|%s|%s\n", update.Version, update.SHA256)
 	}
 	if layout != nil {
 		fmt.Fprintf(h, "layout|%d|%d|%d|%d|%d|%d|%s\n",
@@ -177,7 +186,7 @@ func Version(items []Item, cmds []Command, layout *Layout) string {
 }
 
 // ListMedia 返回 dir 下受支持的媒体文件名，按文件名排序。
-// 目录不存在视为空目录。隐藏文件、下载临时文件与不支持的类型会被跳过。
+// 目录不存在视为空目录。隐藏文件（含各种临时文件）与不支持的类型会被跳过。
 func ListMedia(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -191,14 +200,9 @@ func ListMedia(dir string) ([]string, error) {
 		if e.IsDir() {
 			continue
 		}
-		name := e.Name()
-		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".part") {
-			continue
+		if name := e.Name(); !strings.HasPrefix(name, ".") && TypeOf(name) != "" {
+			out = append(out, name)
 		}
-		if TypeOf(name) == "" {
-			continue
-		}
-		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out, nil
@@ -210,18 +214,14 @@ func ListMedia(dir string) ([]string, error) {
 func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *HashCache) ([]Item, error) {
 	items := []Item{}
 	add := func(path, name, rawURL, typ string) error {
-		info, err := os.Stat(path)
+		sum, size, err := cache.Sum(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
 			}
 			return err
 		}
-		sum, err := cache.FileSHA256(path, info.Size(), info.ModTime().Unix())
-		if err != nil {
-			return err
-		}
-		item := Item{Type: typ, Name: name, URL: rawURL, SHA256: sum, Size: info.Size()}
+		item := Item{Type: typ, Name: name, URL: rawURL, SHA256: sum, Size: size}
 		if typ == "image" {
 			item.Duration = imageDuration
 		}
@@ -240,7 +240,7 @@ func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *
 		case "document":
 			stem := strings.TrimSuffix(name, filepath.Ext(name))
 			for _, page := range Pages(dir, name) {
-				err = add(filepath.Join(dir, PagesDir, name, page), stem+"-"+page,
+				err = add(filepath.Join(PagesPath(dir, name), page), stem+"-"+page,
 					base+url.PathEscape(name)+"/"+url.PathEscape(page), "image")
 				if err != nil {
 					break
@@ -256,7 +256,7 @@ func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *
 
 // Pages 返回文档已渲染好的页面文件名（按页序）；还没渲染或目录不存在时为空。
 func Pages(dir, doc string) []string {
-	entries, err := os.ReadDir(filepath.Join(dir, PagesDir, doc))
+	entries, err := os.ReadDir(PagesPath(dir, doc))
 	if err != nil {
 		return nil
 	}

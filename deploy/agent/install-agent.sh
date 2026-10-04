@@ -61,10 +61,7 @@ cat > /etc/display-agent/agent.json <<JSON
   "server_url": "$SERVER_URL",
   "tls_fingerprint": "$TLS_FINGERPRINT",
   "enroll_token": "$ENROLL_TOKEN",
-  "cache_dir": "/var/lib/display-agent",
-  "install_dir": "$INSTALL_DIR",
-  "player": "gst",
-  "display_mode": "$HDMI_MODE"
+  "display_mode": "${HDMI_MODE%@*}"
 }
 JSON
 chmod 0600 /etc/display-agent/agent.json

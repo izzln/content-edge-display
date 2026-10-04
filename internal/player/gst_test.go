@@ -16,6 +16,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/manifest"
+	"github.com/izzln/content-edge-display/internal/testutil"
 )
 
 // 测试二进制兼任"假播放进程"：GST 启动的子进程就是它自己（见 fakePlayer）。
@@ -29,7 +32,7 @@ func TestMain(m *testing.M) {
 
 // fakePlayer 按 gstplayer.py 的协议应答，并把收到的请求逐行记进 GST_FAKE_LOG。
 //   - GST_FAKE_EXIT_ONCE=<标记文件>：第一次收到 load 后退出（模拟崩溃），之后正常；
-//   - GST_FAKE_HANG_ONCE=<标记文件>：第一次运行时不回 ping（模拟卡死）。
+//   - GST_FAKE_HANG_ONCE=<标记文件>：第一次运行时不回状态查询（模拟卡死）。
 func fakePlayer() {
 	logPath := os.Getenv("GST_FAKE_LOG")
 	once := func(env string) bool {
@@ -57,12 +60,11 @@ func fakePlayer() {
 		}
 		reply := map[string]any{"id": req["id"], "ok": true}
 		switch req["cmd"] {
-		case "ping":
+		case "stats":
 			if hang {
 				continue
 			}
-		case "stats":
-			reply["hwdec"], reply["output_w"], reply["output_h"] = "v4l2slh264dec", 1440, 900
+			reply["hwdec"] = "v4l2slh264dec"
 		}
 		out, _ := json.Marshal(reply)
 		os.Stdout.Write(append(out, '\n'))
@@ -78,7 +80,7 @@ func startFake(t *testing.T, w, h int, env ...string) (*GST, string) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "requests.log")
 	p := NewGST(dir, w, h)
-	p.callTimeout, p.pingInterval, p.restartDelay = time.Second, 200*time.Millisecond, 50*time.Millisecond
+	p.callTimeout, p.watchInterval, p.restartDelay = time.Second, 200*time.Millisecond, 50*time.Millisecond
 	p.python = os.Args[0]
 	p.env = append([]string{"GST_FAKE_PLAYER=1", "GST_FAKE_LOG=" + logPath}, env...)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,17 +111,6 @@ func cmds(path string, which string) []map[string]any {
 		}
 	}
 	return out
-}
-
-func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout: %s", desc)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }
 
 // overlayPNG 造一张 w×h 的叠加图：左半不透明、右半（媒体区）全透明。
@@ -155,10 +146,10 @@ func TestConfigThenSceneAndResendAfterRestart(t *testing.T) {
 	if err := p.Load(scene); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 5*time.Second, "重启后重新下发画面", func() bool { return len(cmds(logPath, "load")) >= 2 })
+	testutil.WaitFor(t, 5*time.Second, "重启后重新下发画面", func() bool { return len(cmds(logPath, "load")) >= 2 })
 
 	reqs := requests(logPath)
-	if reqs[0]["cmd"] != "config" || reqs[0]["width"] != 1440.0 || reqs[0]["height"] != 900.0 || reqs[0]["fade"] != FadeSeconds {
+	if reqs[0]["cmd"] != "config" || reqs[0]["width"] != 1440.0 || reqs[0]["height"] != 900.0 {
 		t.Fatalf("第一个请求应是显示配置：%v", reqs[0])
 	}
 	if len(cmds(logPath, "config")) < 2 {
@@ -179,14 +170,14 @@ func TestOverlayRasterizedToOutputSize(t *testing.T) {
 	p, logPath := startFake(t, 1920, 1080)
 	pngPath := overlayPNG(t, t.TempDir(), 1440, 900)
 	err := p.Load(Scene{
-		Items:   []Item{{Path: "/m/a.mp4", Type: "video"}},
-		Overlay: &Overlay{PNG: pngPath},
-		Media:   Rect{720, 0, 720, 900}, CanvasW: 1440, CanvasH: 900,
+		Items:      []Item{{Path: "/m/a.mp4", Type: "video"}},
+		OverlayPNG: pngPath,
+		Media:      manifest.Rect{X: 720, Y: 0, W: 720, H: 900}, CanvasW: 1440, CanvasH: 900,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 3*time.Second, "下发画面", func() bool { return len(cmds(logPath, "load")) >= 1 })
+	testutil.WaitFor(t, 3*time.Second, "下发画面", func() bool { return len(cmds(logPath, "load")) >= 1 })
 	l := cmds(logPath, "load")[0]
 	if l["overlay"] != pngPath+".1920x1080.bgra" {
 		t.Fatalf("叠加图应光栅化到输出分辨率，得到 %v", l["overlay"])
@@ -214,8 +205,8 @@ func jsonEq(got any, want []int) bool {
 
 func TestStatsFromPlayer(t *testing.T) {
 	p, logPath := startFake(t, 1440, 900)
-	waitFor(t, 3*time.Second, "配置显示", func() bool { return len(cmds(logPath, "config")) >= 1 })
-	waitFor(t, 3*time.Second, "问到状态", func() bool { return p.Stats().HWDec != "" })
+	testutil.WaitFor(t, 3*time.Second, "配置显示", func() bool { return len(cmds(logPath, "config")) >= 1 })
+	testutil.WaitFor(t, 3*time.Second, "问到状态", func() bool { return p.Stats().HWDec != "" })
 	if st := p.Stats(); st.HWDec != "v4l2slh264dec" || st.OutputW != 1440 || st.OutputH != 900 {
 		t.Fatalf("got %+v", st)
 	}
@@ -226,8 +217,8 @@ func TestHungPlayerIsRestarted(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "hung")
 	p, logPath := startFake(t, 1440, 900, "GST_FAKE_HANG_ONCE="+marker)
 	p.Load(Scene{Items: []Item{{Path: "/m/a.jpg", Type: "image"}}})
-	waitFor(t, 8*time.Second, "卡死后重启", func() bool { return len(cmds(logPath, "config")) >= 2 })
-	waitFor(t, 3*time.Second, "重启后重新下发画面", func() bool { return len(cmds(logPath, "load")) >= 2 })
+	testutil.WaitFor(t, 8*time.Second, "卡死后重启", func() bool { return len(cmds(logPath, "config")) >= 2 })
+	testutil.WaitFor(t, 3*time.Second, "重启后重新下发画面", func() bool { return len(cmds(logPath, "load")) >= 2 })
 }
 
 // ---- 真实播放脚本（需要 Python + GStreamer，没有就跳过）----
@@ -440,7 +431,7 @@ func TestPlayerScriptSequencing(t *testing.T) {
 
 	send(map[string]any{"id": 1, "cmd": "config", "width": 1440, "height": 900, "fade": 0.2})
 	send(map[string]any{"id": 2, "cmd": "load", "items": items, "overlay": nil})
-	waitFor(t, 15*time.Second, "按顺序播一轮", func() bool { return len(played()) >= len(want) })
+	testutil.WaitFor(t, 15*time.Second, "按顺序播一轮", func() bool { return len(played()) >= len(want) })
 	if got := played()[:len(want)]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("播放顺序 %v，期望 %v\n%s", got, want, stderr.String())
 	}
@@ -455,19 +446,19 @@ func TestPlayerScriptSequencing(t *testing.T) {
 	}
 	if video != "" {
 		send(map[string]any{"id": 3, "cmd": "stats"})
-		waitFor(t, 3*time.Second, "状态", func() bool { mu.Lock(); defer mu.Unlock(); return replies[3] != nil })
+		testutil.WaitFor(t, 3*time.Second, "状态", func() bool { mu.Lock(); defer mu.Unlock(); return replies[3] != nil })
 		mu.Lock()
 		st := replies[3]
 		mu.Unlock()
-		if st["hwdec"] == "" || st["output_w"] != 1440.0 {
-			t.Fatalf("放过视频后应报告解码方式与输出分辨率：%v", st)
+		if st["hwdec"] == "" {
+			t.Fatalf("放过视频后应报告解码方式：%v", st)
 		}
 	}
 
 	// 换成单张图片：一直显示，不再切换
 	send(map[string]any{"id": 4, "cmd": "load", "items": []map[string]any{{"path": img2, "type": "image", "duration": 1}}, "overlay": nil})
 	n := len(played())
-	waitFor(t, 3*time.Second, "切到新画面", func() bool { return len(played()) > n })
+	testutil.WaitFor(t, 3*time.Second, "切到新画面", func() bool { return len(played()) > n })
 	n = len(played())
 	time.Sleep(2500 * time.Millisecond)
 	if len(played()) != n {
@@ -536,10 +527,10 @@ func TestPauseStopsPlayerAndResumeReloads(t *testing.T) {
 	if err := p.Load(Scene{Items: []Item{{Path: "/m/a.jpg", Type: "image", Duration: 5}}}); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 5*time.Second, "首次下发画面", func() bool { return len(cmds(logPath, "load")) == 1 })
+	testutil.WaitFor(t, 5*time.Second, "首次下发画面", func() bool { return len(cmds(logPath, "load")) == 1 })
 
 	p.SetPaused(true)
-	waitFor(t, 5*time.Second, "暂停后播放进程退出", func() bool {
+	testutil.WaitFor(t, 5*time.Second, "暂停后播放进程退出", func() bool {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.proc == nil
@@ -553,7 +544,7 @@ func TestPauseStopsPlayerAndResumeReloads(t *testing.T) {
 	}
 
 	p.SetPaused(false)
-	waitFor(t, 5*time.Second, "恢复后重新下发画面", func() bool { return len(cmds(logPath, "load")) == 2 })
+	testutil.WaitFor(t, 5*time.Second, "恢复后重新下发画面", func() bool { return len(cmds(logPath, "load")) == 2 })
 	loads := cmds(logPath, "load")
 	if got := loads[1]["items"].([]any)[0].(map[string]any)["path"]; got != "/m/b.jpg" {
 		t.Fatalf("恢复后应播放暂停期间收到的最新画面，得到 %v", got)

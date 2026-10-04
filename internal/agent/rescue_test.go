@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/player"
+	"github.com/izzln/content-edge-display/internal/testutil"
 )
 
 // inputEvent 按给定的 struct input_event 大小（16 或 24 字节）编码一个事件。
@@ -89,7 +90,7 @@ func TestRescueLoop(t *testing.T) {
 	go func() { a.rescueLoop(ctx, keys, con, idle); close(done) }()
 
 	keys <- struct{}{}
-	waitUntil(t, time.Second, func() bool { s, _, _ := con.counts(); return s == 1 && p.Paused() })
+	testutil.WaitFor(t, time.Second, "rescue", func() bool { s, _, _ := con.counts(); return s == 1 && p.Paused() })
 	for i := 0; i < 3; i++ { // 一直有按键：不恢复
 		time.Sleep(idle / 2)
 		keys <- struct{}{}
@@ -97,7 +98,7 @@ func TestRescueLoop(t *testing.T) {
 	if s, h, _ := con.counts(); s != 1 || h != 0 || !p.Paused() {
 		t.Fatalf("持续按键时应保持救援模式：shows=%d hides=%d", s, h)
 	}
-	waitUntil(t, time.Second, func() bool { _, h, _ := con.counts(); return h == 1 })
+	testutil.WaitFor(t, time.Second, "rescue", func() bool { _, h, _ := con.counts(); return h == 1 })
 	if p.Paused() {
 		t.Fatal("空闲到时应恢复播放")
 	}
@@ -106,22 +107,11 @@ func TestRescueLoop(t *testing.T) {
 	}
 
 	keys <- struct{}{}
-	waitUntil(t, time.Second, func() bool { s, _, _ := con.counts(); return s == 2 && p.Paused() })
+	testutil.WaitFor(t, time.Second, "rescue", func() bool { s, _, _ := con.counts(); return s == 2 && p.Paused() })
 	cancel() // 代理退出（如在控制台里 systemctl stop）：只清信息，不注销会话
 	<-done
 	if _, h, c := con.counts(); h != 1 || c != 1 {
 		t.Fatalf("退出时应 close 而不是 hide：hides=%d close=%d", h, c)
-	}
-}
-
-func waitUntil(t *testing.T, d time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("timeout")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

@@ -441,7 +441,7 @@ async function refresh() {
   try {
     const [d, t, g, s, f, i] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
-      api("/api/v1/admin/schedules"), api("/api/v1/admin/firmware"), api("/api/v1/admin/info")]);
+      api("/api/v1/admin/schedules"), api("/api/v1/admin/packages"), api("/api/v1/admin/info")]);
     // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
     [devices, templates, global, schedules, firmware, info] =
       [arr(d), arr(t), g || {}, arr(s), arr(f), i || {}];
@@ -694,14 +694,14 @@ async function saveAttrs(id) {
 // 模板与左右对调要点"保存"。
 const mediaRegionOf = tid => (tplById(tid)?.regions || []).find(r => r.type === "media");
 // 设备实际会用到的模板：专属优先，否则全局默认。
-const effectiveTplID = d => (d.display.mode === "template" && d.display.template_id) || global.template_id;
+const effectiveTplID = d => d.display.template_id || global.template_id;
 
 async function contentDialog(id) {
   const d = devices.find(x => x.id === id);
   let list = [];
   try { list = await api(`/api/v1/admin/devices/${id}/media`); } catch { /* 显示空列表 */ }
   plOpen(id, list);
-  const own = d.display.mode === "template";
+  const own = !!d.display.template_id;
   const opts = templates.map(t => `<option value="${esc(t.id)}" ${d.display.template_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
   modal(`<h2>内容 — ${esc(d.id)}</h2>
     <div class="row"><label><input type="radio" name="mode" value="global" ${own ? "" : "checked"} onchange="onModeChange()">
@@ -782,17 +782,17 @@ function plAccept() {
 }
 
 function uploadHint() {
-  let h = "图片 png/jpg，单张不超过 20MB，过大的会自动缩到屏幕尺寸。";
+  let h = `图片 png/jpg，单张不超过 ${info.limits.image_mb}MB，过大的会自动缩到屏幕尺寸。`;
   if (info.transcode) {
-    const v = info.video_spec || {};
-    h += ` 视频不超过 500MB，上传后<b>自动转码</b>为设备吃得消的 H.264
+    const v = info.video || {};
+    h += ` 视频不超过 ${info.limits.video_mb}MB，上传后<b>自动转码</b>为设备吃得消的 H.264
       （${v.max_w}×${v.max_h} 以内、${v.max_fps}fps、码率 ≤ ${(v.max_bitrate_k / 1000).toFixed(0)}Mbps、静音）。`;
   } else {
     h += ` <b>暂不能上传视频</b>：服务端 ffmpeg 不可用（见页面顶部提示）。`;
   }
   if (info.pdf) {
-    const l = info.pdf_limits || {};
-    h += ` PDF 不超过 ${l.max_mb}MB、${l.max_pages} 页，逐页当图片轮播（与图片一样撑满媒体区）。`;
+    const l = info.limits || {};
+    h += ` PDF 不超过 ${l.pdf_mb}MB、${l.pdf_pages} 页，逐页当图片轮播（与图片一样撑满媒体区）。`;
   }
   return h + " 上传、处理过程中可以随时拖动调整顺序。";
 }
@@ -1009,11 +1009,11 @@ function dropThumb(it) {
 // ---- 上传：选中即入列，逐个上传，各自显示进度 ----
 function plPrecheck(f, type) {
   if (!type) return "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等，PDF）";
-  if (type === "image" && f.size > 20 << 20) return "图片超过 20MB";
+  if (type === "image" && f.size > info.limits.image_mb << 20) return `图片超过 ${info.limits.image_mb}MB`;
   if (type === "video" && !info.transcode) return "服务端 ffmpeg 不可用，暂不能上传视频";
-  if (type === "video" && f.size > 500 << 20) return "视频超过 500MB";
+  if (type === "video" && f.size > info.limits.video_mb << 20) return `视频超过 ${info.limits.video_mb}MB`;
   if (type === "document" && !info.pdf) return "服务端没装 poppler-utils，暂不能上传 PDF";
-  if (type === "document" && f.size > (info.pdf_limits?.max_mb || 50) << 20) return `PDF 超过 ${info.pdf_limits?.max_mb || 50}MB`;
+  if (type === "document" && f.size > info.limits.pdf_mb << 20) return `PDF 超过 ${info.limits.pdf_mb}MB`;
   return "";
 }
 
@@ -1346,12 +1346,9 @@ function startDrag(li, pointerId, startY, curY) {
 }
 
 async function saveContent(id) {
-  const mode = document.querySelector('input[name=mode]:checked').value;
-  const body = { mode, mirror: $("#mirrorChk").checked };
-  if (mode === "template") {
-    body.template_id = $("#ovSel").value;
-    if (!body.template_id) { toast("请选择模板"); return; }
-  }
+  const own = document.querySelector('input[name=mode]:checked').value === "template";
+  const body = { template_id: own ? $("#ovSel").value : "", mirror: $("#mirrorChk").checked };
+  if (own && !body.template_id) { toast("请选择模板"); return; }
   await api(`/api/v1/admin/devices/${id}/display`, { method: "PUT", ...J(body) });
   const d = devices.find(x => x.id === id);
   if (d) Object.assign(d.display, body); // 对话框不关时，再次保存/预览用的是新设置
@@ -1510,12 +1507,12 @@ async function uploadFirmware() {
   if (!f) { toast("请选择程序包"); return; }
   const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#fwNotes").value);
   let fw;
-  try { fw = await api("/api/v1/admin/firmware", { method: "POST", body: fd }); } catch { return; }
+  try { fw = await api("/api/v1/admin/packages", { method: "POST", body: fd }); } catch { return; }
   toast("已上传 " + fw.version); $("#fwFile").value = ""; $("#fwNotes").value = ""; refresh();
 }
 async function deleteFirmware(v) {
   if (!await confirmDialog(`删除程序版本 ${v}？`, "", { ok: "删除", danger: true })) return;
-  await api(`/api/v1/admin/firmware/${v}`, { method: "DELETE" }); toast("已删除"); refresh();
+  await api(`/api/v1/admin/packages/${encodeURIComponent(v)}`, { method: "DELETE" }); toast("已删除"); refresh();
 }
 function rolloutDialog(version) {
   const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.hw?.agent_version || "?")}</span></span></label>`).join("");

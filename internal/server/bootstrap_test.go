@@ -40,7 +40,7 @@ func TestBootstrapEndpoints(t *testing.T) {
 		t.Fatalf("还没上传程序包应 404：%d", w.Code)
 	}
 	pkg := agentPackage(t, testAgentVersion, agentBinaryFixture(t), true)
-	uploadFirmware(t, h, pkg)
+	uploadPackage(t, h, pkg)
 	if w := get("/bootstrap/agent.tar.gz", s.cfg.EnrollToken); w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), pkg) {
 		t.Fatalf("应下载到最新上传的程序包：%d，%d 字节", w.Code, w.Body.Len())
 	}

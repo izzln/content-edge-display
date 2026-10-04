@@ -2,35 +2,57 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
-
-	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
-// downloadFile 经 .part 临时文件断点续传下载 urlPath 到 dst，完成后校验 sha256 再改名。
-// 媒体、渲染图、固件共用此路径。
+// downloadFile 经 .part 临时文件断点续传下载 urlPath 到 dst，边写边算 sha256，校验通过才改名。
+// 媒体、渲染图、程序包共用此路径。
 func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size int64, dst string) error {
 	part := dst + ".part"
-
-	var offset int64
-	if fi, err := os.Stat(part); err == nil {
-		offset = fi.Size()
+	h := sha256.New()
+	offset, err := hashExisting(part, size, h)
+	if err != nil {
+		return err
 	}
-	if offset > size {
-		// 残留的 .part 比目标还大，只能重来。
-		if err := os.Remove(part); err != nil {
+	if offset < size {
+		if err := a.fetch(ctx, urlPath, part, offset, h); err != nil {
 			return err
 		}
-		offset = 0
 	}
+	if sum := hex.EncodeToString(h.Sum(nil)); sum != wantSHA {
+		os.Remove(part) // 等下次重下
+		return fmt.Errorf("sha256 mismatch: got %s want %s", sum, wantSHA)
+	}
+	return os.Rename(part, dst)
+}
 
-	// manifest 中的 URL 是转义后的相对路径；签名须基于解码后的 path，
-	// newRequest 内部已按 req.URL.Path（解码形式）签名，这里直接透传。
+// hashExisting 把上次下载中断留下的 .part 喂进 h，返回续传起点；比目标还大的残留只能重来。
+func hashExisting(part string, size int64, h hash.Hash) (int64, error) {
+	f, err := os.Open(part)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || fi.Size() > size {
+		return 0, os.Remove(part)
+	}
+	return io.Copy(h, f)
+}
+
+// fetch 从 offset 处续传到 part（服务端不认续传时从头下载），写入的数据同时进 h。
+func (a *Agent) fetch(ctx context.Context, urlPath, part string, offset int64, h hash.Hash) error {
+	// manifest 中的 URL 是转义后的相对路径；newRequest 按解码后的 path 签名。
 	u, err := url.Parse(urlPath)
 	if err != nil {
 		return err
@@ -51,37 +73,24 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 		return err
 	}
 	defer resp.Body.Close()
-
-	var f *os.File
+	flag := os.O_WRONLY | os.O_CREATE | os.O_APPEND
 	switch resp.StatusCode {
-	case http.StatusPartialContent: // 断点续传
-		f, err = os.OpenFile(part, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
-	case http.StatusOK: // 服务器不认续传或从头下载
-		f, err = os.Create(part)
+	case http.StatusPartialContent:
+	case http.StatusOK:
+		flag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		h.Reset()
 	default:
 		return statusError(resp)
 	}
+	f, err := os.OpenFile(part, flag, 0o644)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, newProgressReader(resp.Body, cancel)); err != nil {
-		f.Close()
-		return err
+	_, err = io.Copy(io.MultiWriter(f, h), newProgressReader(resp.Body, cancel))
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-
-	// 完整性校验：不符则删除，等下次重下。
-	sum, err := manifest.FileSHA256(part)
-	if err != nil {
-		return err
-	}
-	if sum != wantSHA {
-		os.Remove(part)
-		return fmt.Errorf("sha256 mismatch: got %s want %s", sum, wantSHA)
-	}
-	return os.Rename(part, dst)
+	return err
 }
 
 // stallTimeout 是下载停滞多久算失败；必须小于 systemd 看门狗的 90 秒。

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/izzln/content-edge-display/internal/fsutil"
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/transcode"
 )
@@ -35,18 +37,12 @@ const (
 	jobFailed  = "failed"
 )
 
-// 任务种类。
-const (
-	jobVideo = "video" // 视频转码
-	jobPDF   = "pdf"   // PDF 逐页渲染
-)
-
 // mediaJob 是一个排队中的媒体处理任务：视频转码或 PDF 逐页渲染。
 //
 // 放在后台做：一段几百 MB 的原片转码可能要几分钟，同步做会让上传请求超时。
 // 运营方上传后立刻看到进度，完成后自动出现在播放列表末尾。
 type mediaJob struct {
-	kind     string
+	kind     string // 媒体类型（manifest.TypeOf）：video 转码，document 逐页渲染
 	deviceID string
 	name     string // 最终文件名（视频容器统一为 .mp4；PDF 保持原名）
 	key      string // 缓存区的处理键（原片 sha256 + 处理参数），完成后登记，供同一原片复用
@@ -168,9 +164,6 @@ func (q *jobQueue) drop(j *mediaJob) {
 // progressLogInterval 是转码进度写进控制台的间隔（测试会调小）。
 var progressLogInterval = 30 * time.Second
 
-// incomingDir 存放待转码的原片。
-func (s *Server) incomingDir() string { return filepath.Join(s.cfg.DataDir, "incoming") }
-
 // runJobs 是媒体处理工作协程，随服务端生命周期运行。
 func (s *Server) runJobs(ctx context.Context) {
 	for {
@@ -183,165 +176,119 @@ func (s *Server) runJobs(ctx context.Context) {
 				continue
 			}
 		}
-		if j.kind == jobPDF {
-			s.renderPDF(ctx, j)
+		if j.kind == "document" {
+			s.runJob(ctx, j, "pdf rendering", s.renderPDF)
 		} else {
-			s.transcodeOne(ctx, j)
+			s.runJob(ctx, j, "transcode", s.transcode)
 		}
 	}
 }
 
-func (s *Server) transcodeOne(ctx context.Context, j *mediaJob) {
-	jctx, cancel := context.WithCancel(ctx)
+// jobWork 处理一个任务，产物写进设备目录 dir；返回日志里的结果摘要，或给运营方看的失败原因（中文，可空）与错误。
+type jobWork func(ctx context.Context, j *mediaJob, dir string) (summary, uiErr string, err error)
+
+// runJob 是任务的公共部分：可取消、原片用完即删；运营方中途删掉了任务就丢弃产物；失败显示在列表里；
+// 成功则纳入缓存区、追加到播放列表末尾、从队列里摘掉。
+func (s *Server) runJob(ctx context.Context, j *mediaJob, what string, work jobWork) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.jobs.update(j, func(j *mediaJob) { j.cancel = cancel })
 	defer os.Remove(j.src)
 
 	start := time.Now()
-	enc := s.videoEncoder() // 任务只在有转码器时入队
-	total := enc.Duration(jctx, j.src)
-	var srcSize int64
-	if fi, err := os.Stat(j.src); err == nil {
-		srcSize = fi.Size()
-	}
-	log.Printf("transcode started: device %s, %s (source %s, %.0fs)", j.deviceID, j.name, humanBytes(srcSize), total)
 	dir := s.deviceMediaDir(j.deviceID)
-	dst := filepath.Join(dir, j.name)
-	lastLog := start
-	err := os.MkdirAll(dir, 0o755)
+	summary, uiErr, err := "", "", os.MkdirAll(dir, 0o755)
 	if err == nil {
-		err = enc.Video(jctx, j.src, dst, transcode.DefaultSpec(), func(sec float64) {
-			p := 0
-			if total > 0 {
-				p = min(int(sec*100/total), 99)
-				s.jobs.update(j, func(j *mediaJob) { j.progress = p })
-			}
-			// 每 progressLogInterval 报一次进度：长视频要转好几分钟，控制台不能一直没动静
-			if time.Since(lastLog) >= progressLogInterval {
-				lastLog = time.Now()
-				if total > 0 {
-					log.Printf("transcoding: device %s, %s %d%% (%s elapsed)", j.deviceID, j.name, p, time.Since(start).Round(time.Second))
-				} else {
-					log.Printf("transcoding: device %s, %s %.0fs done (%s elapsed)", j.deviceID, j.name, sec, time.Since(start).Round(time.Second))
-				}
-			}
+		summary, uiErr, err = work(ctx, j, dir)
+	}
+	if !s.jobs.alive(j) {
+		os.Remove(filepath.Join(dir, j.name))
+		os.RemoveAll(manifest.PagesPath(dir, j.name))
+		return
+	}
+	if err != nil {
+		log.Printf("%s failed: device %s, %s (after %s): %v", what, j.deviceID, j.name, time.Since(start).Round(time.Second), err)
+		s.jobs.update(j, func(j *mediaJob) { j.status, j.err, j.cancel = jobFailed, cmp.Or(uiErr, err.Error()), nil })
+		return
+	}
+	if _, err := s.cacheAdopt(dir, j.name, j.key); err != nil {
+		log.Printf("cache: cannot add %s to the cache: %v", j.name, err)
+	}
+	s.kickCache()
+	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
+		log.Printf("%s done but adding to playlist failed: device %s, %s: %v", what, j.deviceID, j.name, err)
+	}
+	s.jobs.drop(j)
+	log.Printf("%s done: device %s, %s (%s in %s), added to playlist", what, j.deviceID, j.name, summary, time.Since(start).Round(time.Second))
+}
+
+// transcode 把原片转成设备能稳定播放的 H.264 MP4。
+func (s *Server) transcode(ctx context.Context, j *mediaJob, dir string) (string, string, error) {
+	enc := s.tools.enc // 任务只在有转码器时入队
+	start, lastLog := time.Now(), time.Now()
+	total := enc.Duration(ctx, j.src)
+	srcSize := fileSize(j.src)
+	log.Printf("transcode started: device %s, %s (source %s, %.0fs)", j.deviceID, j.name, humanBytes(srcSize), total)
+	dst := filepath.Join(dir, j.name)
+	err := enc.Video(ctx, j.src, dst, transcode.DefaultSpec(), func(sec float64) {
+		p := 0
+		if total > 0 {
+			p = min(int(sec*100/total), 99)
+			s.jobs.update(j, func(j *mediaJob) { j.progress = p })
+		}
+		// 每 progressLogInterval 报一次进度：长视频要转好几分钟，控制台不能一直没动静
+		if time.Since(lastLog) >= progressLogInterval {
+			lastLog = time.Now()
+			log.Printf("transcoding: device %s, %s %d%% / %.0fs done (%s elapsed)", j.deviceID, j.name, p, sec, time.Since(start).Round(time.Second))
+		}
+	})
+	return humanBytes(srcSize) + " -> " + humanBytes(fileSize(dst)), "", err
+}
+
+// renderPDF 把 PDF 逐页渲染成图片：页面先写进临时目录，全部完成后放到 <媒体目录>/.pages/<文件名>/，
+// 最后才把 PDF 本身移进媒体目录——它一出现，播放列表与清单就把它当成就绪的文档。
+func (s *Server) renderPDF(ctx context.Context, j *mediaJob, dir string) (string, string, error) {
+	r := s.tools.pdf // 任务只在有渲染器时入队
+	pages, err := r.Pages(ctx, j.src)
+	switch {
+	case errors.Is(err, transcode.ErrPDFEncrypted):
+		return "", "PDF 有密码保护，请导出不带密码的版本再上传", err
+	case err != nil:
+		return "", "无法解析 PDF（文件损坏或不是 PDF）", err
+	case pages < 1:
+		return "", "PDF 没有页面", errors.New("no pages")
+	case pages > maxPDFPages:
+		return "", fmt.Sprintf("PDF 有 %d 页，超过上限 %d 页，请拆分后再上传", pages, maxPDFPages),
+			fmt.Errorf("%d pages exceeds the %d page limit", pages, maxPDFPages)
+	}
+	log.Printf("pdf rendering started: device %s, %s (%d pages)", j.deviceID, j.name, pages)
+	s.jobs.update(j, func(j *mediaJob) { j.pages = pages })
+	final := manifest.PagesPath(dir, j.name)
+	tmp := manifest.PagesPath(dir, "."+j.name+".tmp")
+	os.RemoveAll(tmp)
+	defer os.RemoveAll(tmp)
+	err = os.MkdirAll(tmp, 0o755)
+	if err == nil {
+		err = r.Render(ctx, j.src, tmp, pages, func(done int) {
+			s.jobs.update(j, func(j *mediaJob) { j.progress = min(done*100/pages, 99) })
 		})
 	}
-	if !s.jobs.alive(j) {
-		// 运营方在转码期间删掉了它：产物（若已生成）也不要
-		os.Remove(dst)
-		return
-	}
-	if err != nil {
-		log.Printf("transcode failed: device %s, %s (after %s): %v", j.deviceID, j.name, time.Since(start).Round(time.Second), err)
-		s.jobs.update(j, func(j *mediaJob) { j.status, j.err, j.cancel = jobFailed, err.Error(), nil })
-		return
-	}
-	// 完成：纳入缓存区、追加到播放列表末尾，然后从队列里摘掉
-	if err := s.cacheAdopt(dir, j.name, j.key); err != nil {
-		log.Printf("cache: cannot add %s to the cache: %v", j.name, err)
-	}
-	s.kickCache()
-	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
-		log.Printf("transcoded but adding to playlist failed: device %s, %s: %v", j.deviceID, j.name, err)
-	}
-	s.jobs.drop(j)
-	var outSize int64
-	if fi, err := os.Stat(dst); err == nil {
-		outSize = fi.Size()
-	}
-	log.Printf("transcode done: device %s, %s (%s -> %s in %s), added to playlist",
-		j.deviceID, j.name, humanBytes(srcSize), humanBytes(outSize), time.Since(start).Round(time.Second))
-}
-
-// PDF 上传限制：页数多了渲染慢、清单长，轮播一圈也没人看得完。
-const (
-	maxPDFUploadBytes = 50 << 20
-	maxPDFPages       = 100
-)
-
-// renderPDF 把一个 PDF 逐页渲染成图片：页面写进 <媒体目录>/.pages/<文件名>/，
-// 全部完成后原 PDF 才放进媒体目录——它一出现，播放列表与清单就把它当成就绪的文档。
-func (s *Server) renderPDF(ctx context.Context, j *mediaJob) {
-	jctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	s.jobs.update(j, func(j *mediaJob) { j.cancel = cancel })
-	defer os.Remove(j.src)
-
-	start := time.Now()
-	dir := s.deviceMediaDir(j.deviceID)
-	dst := filepath.Join(dir, j.name)
-	pagesDir := filepath.Join(dir, manifest.PagesDir, j.name)
-	tmp := filepath.Join(dir, manifest.PagesDir, "."+j.name+".tmp")
-	defer os.RemoveAll(tmp)
-
-	pages, uiErr, err := 0, "", error(nil)
-	r := s.pdfRenderer() // 任务只在有渲染器时入队
-	if pages, err = r.Pages(jctx, j.src); err != nil {
-		uiErr = "无法解析 PDF（文件损坏或不是 PDF）"
-		if errors.Is(err, transcode.ErrPDFEncrypted) {
-			uiErr = "PDF 有密码保护，请导出不带密码的版本再上传"
-		}
-	} else if pages < 1 {
-		uiErr, err = "PDF 没有页面", errors.New("no pages")
-	} else if pages > maxPDFPages {
-		uiErr = fmt.Sprintf("PDF 有 %d 页，超过上限 %d 页，请拆分后再上传", pages, maxPDFPages)
-		err = fmt.Errorf("%d pages exceeds the %d page limit", pages, maxPDFPages)
-	}
 	if err == nil {
-		log.Printf("pdf rendering started: device %s, %s (%d pages)", j.deviceID, j.name, pages)
-		s.jobs.update(j, func(j *mediaJob) { j.pages = pages })
-		uiErr = "页面渲染失败"
-		os.RemoveAll(tmp)
-		if err = os.MkdirAll(tmp, 0o755); err == nil {
-			err = r.Render(jctx, j.src, tmp, pages, func(done int) {
-				s.jobs.update(j, func(j *mediaJob) { j.progress = min(done*100/pages, 99) })
-			})
+		os.RemoveAll(final)
+		if err = os.Rename(tmp, final); err == nil {
+			err = fsutil.MoveFile(j.src, filepath.Join(dir, j.name)) // 暂存区与媒体目录可能不在同一个文件系统
 		}
-		if err == nil {
-			os.RemoveAll(pagesDir)
-			if err = os.Rename(tmp, pagesDir); err == nil {
-				err = moveFile(j.src, dst)
-			}
-		}
-	}
-	if !s.jobs.alive(j) {
-		// 运营方在渲染期间删掉了它
-		os.RemoveAll(pagesDir)
-		os.Remove(dst)
-		return
 	}
 	if err != nil {
-		os.RemoveAll(pagesDir)
-		log.Printf("pdf rendering failed: device %s, %s: %v", j.deviceID, j.name, err)
-		s.jobs.update(j, func(j *mediaJob) { j.status, j.err, j.cancel = jobFailed, uiErr, nil })
-		return
+		os.RemoveAll(final)
+		return "", "页面渲染失败", err
 	}
-	if err := s.cacheAdopt(dir, j.name, j.key); err != nil {
-		log.Printf("cache: cannot add %s to the cache: %v", j.name, err)
-	}
-	s.kickCache()
-	if err := s.appendPlaylist(j.deviceID, j.name); err != nil {
-		log.Printf("pdf rendered but adding to playlist failed: device %s, %s: %v", j.deviceID, j.name, err)
-	}
-	s.jobs.drop(j)
-	log.Printf("pdf rendering done: device %s, %s (%d pages in %s), added to playlist",
-		j.deviceID, j.name, pages, time.Since(start).Round(time.Second))
+	return fmt.Sprintf("%d pages", pages), "", nil
 }
 
-// moveFile 把文件移到 dst：暂存区（data_dir）与媒体目录（media_root）可能不在同一个文件系统，
-// 改名不行时退回复制。
-func moveFile(src, dst string) error {
-	if os.Rename(src, dst) == nil {
-		return nil
+func fileSize(path string) int64 {
+	if fi, err := os.Stat(path); err == nil {
+		return fi.Size()
 	}
-	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
-	if err := copyFile(src, tmp); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Remove(src)
+	return 0
 }
