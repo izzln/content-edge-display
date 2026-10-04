@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/sign"
 )
 
 // 设备与服务端都在局域网里，系统必须在**没有外网**时照常工作。传输层为此做了三件事：
@@ -26,10 +31,11 @@ const (
 	connectTimeout = 10 * time.Second
 )
 
-// newTransport 构造设备端共用的 HTTP 传输层。
-func newTransport(cacheDir string, clock *serverClock, sched *schedule) http.RoundTripper {
+// newTransport 构造设备端共用的 HTTP 传输层。pin 非空时只接受公钥指纹等于它的服务端证书。
+func newTransport(cacheDir, pin string, clock *serverClock, sched *schedule) http.RoundTripper {
 	r := &fallbackResolver{path: filepath.Join(cacheDir, "server-addr")}
 	t := &http.Transport{
+		TLSClientConfig:       pinnedTLS(pin),
 		Proxy:                 nil, // 永远直连
 		DialContext:           r.dial,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -38,6 +44,25 @@ func newTransport(cacheDir string, clock *serverClock, sched *schedule) http.Rou
 		MaxIdleConnsPerHost:   2,
 	}
 	return clockTransport{base: t, clock: clock, sched: sched}
+}
+
+// pinnedTLS 固定服务端证书：不走 CA 链，也不看有效期与主机名（设备时钟可能不准、服务器 IP 会变），
+// 只要求对端证书的公钥指纹等于装机时记下的那个。服务端证书是自签的，见 server/tls.go。
+func pinnedTLS(pin string) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true, // 由下面的 VerifyConnection 按指纹校验
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("server presented no certificate")
+			}
+			if got := sign.CertFingerprint(cs.PeerCertificates[0]); got != pin {
+				return fmt.Errorf("server certificate fingerprint %s does not match tls_fingerprint %s "+
+					"(someone may be impersonating the server, or the server was reinstalled without its data_dir/tls)", got, pin)
+			}
+			return nil
+		},
+		MinVersion: tls.VersionTLS12,
+	}
 }
 
 // fallbackResolver 解析服务端地址，失败时退回上次成功解析的地址。

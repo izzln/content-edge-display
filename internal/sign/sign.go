@@ -7,6 +7,7 @@ package sign
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -58,4 +59,11 @@ func Verify(secret, timestamp, method, path, gotSign string, now time.Time) erro
 		return ErrMismatch
 	}
 	return nil
+}
+
+// CertFingerprint 返回证书公钥（SubjectPublicKeyInfo）的 sha256（hex）。
+// 设备用它固定服务端证书：只认这把公钥，不看证书有效期、主机名，也就不依赖设备时间和服务器 IP。
+func CertFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(sum[:])
 }

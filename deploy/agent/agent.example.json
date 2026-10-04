@@ -1,5 +1,6 @@
 {
-  "server_url": "http://192.168.1.10:9000",
+  "server_url": "https://192.168.1.10:9001",
+  "tls_fingerprint": "服务端证书指纹（64 位十六进制，服务端启动日志与后台「程序更新」页可见）",
   "enroll_token": "与服务端 server.json 的 enroll_token 一致",
   "cache_dir": "/var/lib/display-agent",
   "install_dir": "/usr/local/lib/display-agent",

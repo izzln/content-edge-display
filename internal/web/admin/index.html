@@ -90,6 +90,7 @@
   .cachebar .cached { background:#9ec0f5; }
   .legend span { display:inline-block; margin-right:14px; }
   .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
+  pre.cmd { background:#1e1e1e; color:#e8e8e8; padding:10px 12px; border-radius:6px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; user-select:all; }
   .bad-note { margin-top:8px; padding:8px 10px; border:1px solid var(--bad); border-radius:4px; background:#fff4f4; color:#a00; }
 </style>
 </head>
@@ -124,17 +125,22 @@
   </div>
   <div id="tab-firmware" style="display:none">
     <div class="bar">
+      <b>新设备装机</b>
+      <p class="muted">在刚刷好公版 Armbian、设好 root 密码的设备上，以 root 运行下面这一行（先在下方上传一个程序包）。
+        它会下载程序包、安装、设置开机自启并重启；之后的程序更新都通过本页下发。</p>
+      <pre class="cmd" id="installCmd"></pre>
+      <div class="muted">服务端证书指纹（设备只认这张证书，装机脚本已自动填好）：<code id="tlsFP"></code></div>
+    </div>
+    <div class="bar">
       <div class="row">
-        <input type="file" id="fwFile">
-        版本号 <input type="text" id="fwVersion" placeholder="如 1.2.0 或 git 短哈希">
+        <input type="file" id="fwFile" accept=".tar.gz,.tgz,application/gzip">
         备注 <input type="text" id="fwNotes" placeholder="可选">
-        <button class="primary" onclick="uploadFirmware()">上传程序</button>
+        <button class="primary" onclick="uploadFirmware()">上传程序包</button>
       </div>
       <span class="muted">
-        选择 <b><code>display-agent-armv7</code> 这个二进制文件</b>——<b>不是</b> <code>.tar.gz</code> 成品包
-        （成品包解开后里面就有它；也可用 <code>make agent-arm</code> 单独构建）。<br>
-        版本号必须与二进制内置版本一致，可用 <code>./display-agent-armv7 -version</code> 核对。
-        传错文件或版本号对不上会被服务端当场拒绝，不会下发到设备。
+        上传 <code>make package</code> 产出的 <b><code>display-agent-&lt;版本&gt;-armv7.tar.gz</code></b> 整包，版本号自动从包里读取。
+        设备收到下发后下载整包、执行包内 <code>update.sh</code> 再切换到新版本；新版本连续 3 次启动失败自动回滚到上一个版本。
+        传错文件会被服务端当场拒绝，不会下发到设备。
       </span>
     </div>
     <table id="fwTable"></table>
@@ -243,6 +249,7 @@ async function saveQuota() {
 // 要盯的现场问题：硬解失效、过热关机、画面错位、反复重启（常因过热）、缓存写满更新不了。
 function healthLine(hb) {
   const parts = [];
+  if (hb.update_error) parts.push(`<span class="bad" title="${esc(hb.update_error)}">程序更新失败</span>`);
   if (hb.hwdec === "no") parts.push('<span class="bad" title="硬解没起来，视频在软解：会发热、卡顿。在设备上运行 check-display.sh 排查">软解</span>');
   else if (hb.hwdec) parts.push(`<span class="okc" title="实际使用的硬件解码器">硬解 ${esc(hb.hwdec)}</span>`);
   if (hb.temp_c) parts.push(hb.temp_c >= 80
@@ -1236,14 +1243,18 @@ function renderFirmware() {
     <td>${devices.filter(d => d.hw?.agent_version === f.version).length} / ${devices.length} 台在用</td>
     <td><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
         <button class="danger" onclick="deleteFirmware('${esc(f.version)}')">删除</button></td></tr>`).join("");
+  $("#installCmd").textContent =
+    `curl -fsSL http://${location.hostname}:${info.bootstrap_port || 9000}/install.sh | ENROLL_TOKEN=注册口令 sh`;
+  $("#tlsFP").textContent = info.tls_fingerprint || "";
   $("#fwTable").innerHTML = `<tr><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序</td></tr>'}`;
 }
 async function uploadFirmware() {
-  const f = $("#fwFile").files[0], v = $("#fwVersion").value.trim();
-  if (!f || !v) { toast("请选择文件并填写版本号"); return; }
-  const fd = new FormData(); fd.append("file", f); fd.append("version", v); fd.append("notes", $("#fwNotes").value);
-  await api("/api/v1/admin/firmware", { method: "POST", body: fd });
-  toast("已上传 " + v); $("#fwVersion").value = ""; $("#fwNotes").value = ""; refresh();
+  const f = $("#fwFile").files[0];
+  if (!f) { toast("请选择程序包"); return; }
+  const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#fwNotes").value);
+  let fw;
+  try { fw = await api("/api/v1/admin/firmware", { method: "POST", body: fd }); } catch { return; }
+  toast("已上传 " + fw.version); $("#fwFile").value = ""; $("#fwNotes").value = ""; refresh();
 }
 async function deleteFirmware(v) {
   if (!confirm(`删除程序版本 ${v}？`)) return;
@@ -1257,7 +1268,7 @@ function rolloutDialog(version) {
     <div class="row"><label><input type="radio" name="who" value="all" checked> 全部设备</label>
       <label><input type="radio" name="who" value="some"> 指定设备：</label></div>
     <div style="max-height:200px;overflow:auto;border:1px solid var(--line);padding:6px">${devOpts}</div>
-    <p class="muted">设备在轮询时取到指令 → 下载校验 → 切换重启；新版本首个心跳成功即确认，连续 3 次启动失败自动回滚。</p>
+    <p class="muted">设备在轮询时取到指令 → 下载整包并校验 → 执行包内 update.sh → 切换重启；新版本首个心跳成功即确认，连续 3 次启动失败自动回滚。失败原因会显示在设备列表里。</p>
     <div class="actions"><button onclick="closeModal()">取消</button>
       <button class="danger" onclick="doRollout('', true)">取消所有待更新</button>
       <button class="primary" onclick="doRollout('${esc(version)}')">下发</button></div>`);

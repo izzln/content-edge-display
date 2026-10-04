@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,6 +82,44 @@ func TestConfigRequiresEnrollToken(t *testing.T) {
 	if err := c.fillDefaults(); err != nil {
 		t.Fatalf("enroll_token alone should suffice: %v", err)
 	}
+	c = &Config{ServerURL: "https://x:9001", EnrollToken: "tok"}
+	if err := c.fillDefaults(); err == nil || !strings.Contains(err.Error(), "tls_fingerprint") {
+		t.Fatalf("https 地址没配证书指纹应报错：%v", err)
+	}
+	c = &Config{ServerURL: "https://x:9001", EnrollToken: "tok", TLSFingerprint: strings.Repeat("AB:", 31) + "AB"}
+	if err := c.fillDefaults(); err != nil || c.TLSFingerprint != strings.Repeat("ab", 32) {
+		t.Fatalf("带冒号、大写的指纹应被规范化：%q %v", c.TLSFingerprint, err)
+	}
+}
+
+// 真实 HTTPS：服务端用自己生成的证书，设备按指纹固定，注册、拉清单都走加密连接。
+func TestRegisterOverPinnedHTTPS(t *testing.T) {
+	srv, err := server.New(&server.Config{MediaRoot: t.TempDir(), DataDir: t.TempDir(), EnrollToken: "enroll-me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Close)
+	ts := httptest.NewUnstartedServer(srv.Handler())
+	ts.TLS = srv.TLSConfig()
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+
+	cfg := &Config{ServerURL: ts.URL, EnrollToken: "enroll-me", CacheDir: t.TempDir(), Player: "null",
+		TLSFingerprint: srv.CertFingerprint()}
+	if err := cfg.fillDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	a := New(cfg, player.NewNull())
+	os.MkdirAll(a.mediaDir(), 0o755)
+	if err := a.ResolveIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Register(context.Background()); err != nil {
+		t.Fatalf("HTTPS 注册：%v", err)
+	}
+	if _, err := a.PollOnce(context.Background()); err != nil {
+		t.Fatalf("HTTPS 轮询：%v", err)
+	}
 }
 
 // newEnrollEnv 起一个启用自注册的服务端和一个无预置身份的代理。
@@ -155,58 +196,93 @@ func TestRegisterThenPoll(t *testing.T) {
 func setupInstallLayout(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	versions := filepath.Join(root, "versions")
-	os.MkdirAll(versions, 0o755)
-	old := filepath.Join(versions, "display-agent-old")
-	os.WriteFile(old, []byte("old-binary"), 0o755)
+	old := filepath.Join(root, "versions", "1.0.0")
+	os.MkdirAll(old, 0o755)
+	os.WriteFile(filepath.Join(old, "display-agent"), []byte("old-binary"), 0o755)
 	if err := os.Symlink(old, filepath.Join(root, "current")); err != nil {
 		t.Fatal(err)
 	}
 	return root
 }
 
+// testPackage 造一个设备程序包（与 make package 同样的结构），update.sh 的内容由调用方给。
+func testPackage(t *testing.T, version, updateScript string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, f := range []struct {
+		name, body string
+		mode       int64
+	}{
+		{"VERSION", version + "\n", 0o644},
+		{"display-agent", "new-binary-" + version, 0o755},
+		{"update.sh", updateScript, 0o755},
+		{"check-display.sh", "#!/bin/sh\n", 0o755},
+	} {
+		tw.WriteHeader(&tar.Header{Name: "display-agent-" + version + "/" + f.name, Mode: f.mode, Size: int64(len(f.body)), Typeflag: tar.TypeReg})
+		tw.Write([]byte(f.body))
+	}
+	tw.Close()
+	gz.Close()
+	return buf.Bytes()
+}
+
+// updateCommandFor 把整包放进设备媒体目录充当"固件"（固件与媒体共用签名下载器），返回对应的更新指令。
+func updateCommandFor(t *testing.T, devDir, version string, pkg []byte) manifest.Command {
+	t.Helper()
+	name := "fw-" + version + ".mp4"
+	os.WriteFile(filepath.Join(devDir, name), pkg, 0o644)
+	fw := mediaItem(t, devDir, name)
+	return manifest.Command{Type: "update", Version: version, URL: fw.URL, SHA256: fw.SHA256, Size: fw.Size}
+}
+
+// 整包 OTA：下载校验 → 解到版本目录 → 执行包内 update.sh → 切换 current/previous → 待确认；
+// 首个心跳成功后确认，并清掉 current、previous 以外的旧版本。
 func TestApplyUpdateSwitchesSymlinks(t *testing.T) {
 	a, _, _, _, devDir := newTestEnv(t)
 	ctx := context.Background()
 	a.cfg.InstallDir = setupInstallLayout(t)
+	layout := installLayout{root: a.cfg.InstallDir}
+	os.MkdirAll(layout.versionDir("0.9.0"), 0o755) // 更早的版本：确认后应被清掉
 
-	// 固件下载与媒体下载共用签名下载器：用设备媒体目录里的文件充当"固件"取得 URL/sha。
-	content := []byte("brand-new-binary")
-	os.WriteFile(filepath.Join(devDir, "fw.mp4"), content, 0o644)
-	fw := mediaItem(t, devDir, "fw.mp4")
-	cmd := manifest.Command{Type: "update", Version: "2.0.0", URL: fw.URL, SHA256: fw.SHA256, Size: fw.Size}
-
-	err := a.handleCommands(ctx, []manifest.Command{cmd})
-	if !errors.Is(err, ErrRestartForUpdate) {
+	script := "#!/bin/sh\nset -e\necho \"installing into $1\"\ntouch \"$1/update-ran\"\n"
+	cmd := updateCommandFor(t, devDir, "2.0.0", testPackage(t, "2.0.0", script))
+	if err := a.handleCommands(ctx, []manifest.Command{cmd}); !errors.Is(err, ErrRestartForUpdate) {
 		t.Fatalf("expected ErrRestartForUpdate, got %v", err)
 	}
-	layout := installLayout{root: a.cfg.InstallDir}
 	cur, _ := os.Readlink(layout.current())
 	prev, _ := os.Readlink(layout.previous())
-	if cur != layout.binary("2.0.0") {
-		t.Fatalf("current not switched: %s", cur)
+	if cur != layout.versionDir("2.0.0") || prev != layout.versionDir("1.0.0") {
+		t.Fatalf("current/previous 应切到新/旧版本目录：%s / %s", cur, prev)
 	}
-	if !strings.HasSuffix(prev, "display-agent-old") {
-		t.Fatalf("previous not set: %s", prev)
+	if data, _ := os.ReadFile(filepath.Join(cur, "display-agent")); string(data) != "new-binary-2.0.0" {
+		t.Fatal("新版本目录里的程序不对")
 	}
-	data, _ := os.ReadFile(cur)
-	if string(data) != string(content) {
-		t.Fatal("new binary content wrong")
+	if fi, err := os.Stat(filepath.Join(cur, "display-agent")); err != nil || fi.Mode().Perm()&0o111 == 0 {
+		t.Fatal("程序应可执行")
 	}
-	if fi, err := os.Stat(cur); err != nil || fi.Mode().Perm()&0o111 == 0 {
-		t.Fatal("new binary not executable")
+	if _, err := os.Stat(filepath.Join(layout.root, "update-ran")); err != nil {
+		t.Fatal("应执行了包内 update.sh（参数是安装目录）")
 	}
-	pv, err := os.ReadFile(layout.pendingVerify())
-	if err != nil || !strings.Contains(string(pv), "version=2.0.0") {
+	if pv, err := os.ReadFile(layout.pendingVerify()); err != nil || !strings.Contains(string(pv), "version=2.0.0") {
 		t.Fatalf("pending-verify missing: %v %q", err, pv)
 	}
 
-	// 心跳成功 → 提交（删除 pending-verify）
+	// 心跳成功 → 确认（删除 pending-verify），只留 current 与 previous
 	if err := a.Heartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(layout.pendingVerify()); !os.IsNotExist(err) {
 		t.Fatal("pending-verify should be cleared after successful heartbeat")
+	}
+	entries, _ := os.ReadDir(layout.versionsDir())
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if strings.Join(left, ",") != "1.0.0,2.0.0" {
+		t.Fatalf("确认后只应保留 current 与 previous：%v", left)
 	}
 
 	// 同版本命令忽略；坏校验和不切换
@@ -221,6 +297,31 @@ func TestApplyUpdateSwitchesSymlinks(t *testing.T) {
 	}
 	if cur2, _ := os.Readlink(layout.current()); cur2 != cur {
 		t.Fatal("current must not change on failed update")
+	}
+}
+
+// update.sh 失败：不切换版本，原因随心跳上报。
+func TestApplyUpdateScriptFailureIsReported(t *testing.T) {
+	a, _, _, _, devDir := newTestEnv(t)
+	ctx := context.Background()
+	a.cfg.InstallDir = setupInstallLayout(t)
+	layout := installLayout{root: a.cfg.InstallDir}
+
+	cmd := updateCommandFor(t, devDir, "2.0.0", testPackage(t, "2.0.0", "#!/bin/sh\necho 'cannot write unit file' >&2\nexit 3\n"))
+	if err := a.handleCommands(ctx, []manifest.Command{cmd}); err != nil {
+		t.Fatalf("失败应记录而不是返回：%v", err)
+	}
+	if cur, _ := os.Readlink(layout.current()); cur != layout.versionDir("1.0.0") {
+		t.Fatalf("update.sh 失败不能切换版本：%s", cur)
+	}
+	if !strings.Contains(a.updateErr, "update.sh failed") || !strings.Contains(a.updateErr, "cannot write unit file") {
+		t.Fatalf("失败原因应带上 update.sh 的输出：%q", a.updateErr)
+	}
+	// 版本号对不上的包也不装
+	cmd = updateCommandFor(t, devDir, "4.0.0", testPackage(t, "4.0.1", "#!/bin/sh\n"))
+	a.handleCommands(ctx, []manifest.Command{cmd})
+	if !strings.Contains(a.updateErr, "does not match") {
+		t.Fatalf("包内 VERSION 与指令不符应拒装：%q", a.updateErr)
 	}
 }
 

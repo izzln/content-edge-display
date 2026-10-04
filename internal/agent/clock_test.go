@@ -54,6 +54,21 @@ func TestSkewedDeviceClockStillAuthenticates(t *testing.T) {
 	}
 }
 
+// 已注册的设备断电重启、时间回退了一天：第一次轮询因时钟偏差被拒，但同一个响应已让代理学到偏差，
+// 立即重试就成功，不用等下一个轮询周期。
+func TestClockSkewRetriedImmediately(t *testing.T) {
+	a, p, _, _, _ := newTestEnv(t)
+	a.clock.local = func() time.Time { return time.Now().Add(-24 * time.Hour) }
+	calls := 0
+	_, err := retrySkew(func() (bool, error) { calls++; return a.PollOnce(context.Background()) })
+	if err != nil || calls != 2 {
+		t.Fatalf("应在第二次（立即重试）成功：调用 %d 次，错误 %v", calls, err)
+	}
+	if len(p.Scene().Items) == 0 {
+		t.Fatal("应已加载内容")
+	}
+}
+
 func TestServerClockOffset(t *testing.T) {
 	c := newServerClock()
 	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)

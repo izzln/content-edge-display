@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,13 +39,17 @@ const placeholderToken = "change-me"
 // 设备不在这里配置：一律由设备凭 enroll_token 自注册，记录在 data_dir/state.json。
 // 图片停留时长也不在这里配置：它是版式的一部分，跟着模板走（管理后台里改）。
 type Config struct {
-	Listen      string `json:"listen"`
-	MediaRoot   string `json:"media_root"`
-	DataDir     string `json:"data_dir"`  // state.json / rendered / firmware / incoming
-	FontPath    string `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
-	AdminToken  string `json:"admin_token"`
-	EnrollToken string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
-	Timezone    string `json:"timezone"`     // 时段计划时区，默认系统时区
+	// Listen 是 HTTPS 端口（设备、管理后台都走它），默认 :9001。
+	Listen string `json:"listen"`
+	// BootstrapListen 是 HTTP 端口，只提供装机入口（install.sh 与装机用的程序包），其余请求跳转到 HTTPS。
+	// 默认 :9000。
+	BootstrapListen string `json:"bootstrap_listen"`
+	MediaRoot       string `json:"media_root"`
+	DataDir         string `json:"data_dir"`  // state.json / rendered / firmware / incoming
+	FontPath        string `json:"font_path"` // 模板渲染字体（生产需 CJK 字体）
+	AdminToken      string `json:"admin_token"`
+	EnrollToken     string `json:"enroll_token"` // 设备自注册口令（烧进母镜像）
+	Timezone        string `json:"timezone"`     // 时段计划时区，默认系统时区
 	// FFmpegPath 指定 ffmpeg；留空在 PATH 里找（注意是服务进程的 PATH，systemd 下只有
 	// /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin）。不可用时不能上传视频（后台会提示原因），
 	// 因为未转码的原片码率过高，会让设备过热关机。
@@ -55,8 +60,17 @@ type Config struct {
 	HeartbeatIntervalS int `json:"heartbeat_interval_s,omitempty"` // 默认 60
 }
 
-// checkIntervals 填充轮询/心跳间隔的默认值并检查范围。
-func (c *Config) checkIntervals() error {
+// fillDefaults 填充端口、轮询/心跳间隔的默认值并检查范围。
+func (c *Config) fillDefaults() error {
+	if c.Listen == "" {
+		c.Listen = ":9001"
+	}
+	if c.BootstrapListen == "" {
+		c.BootstrapListen = ":9000"
+	}
+	if c.BootstrapListen == c.Listen {
+		return fmt.Errorf("bootstrap_listen (%s) must differ from listen (HTTPS)", c.Listen)
+	}
 	if c.PollIntervalS == 0 {
 		c.PollIntervalS = manifest.DefaultPollIntervalS
 	}
@@ -98,9 +112,6 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Listen == "" {
-		cfg.Listen = ":9000"
-	}
 	if cfg.MediaRoot == "" {
 		cfg.MediaRoot = "data/media"
 	}
@@ -114,7 +125,7 @@ func LoadConfig(path string) (*Config, error) {
 	if strings.ContainsRune(cfg.FFmpegPath, os.PathSeparator) {
 		cfg.FFmpegPath = resolvePath(base, cfg.FFmpegPath)
 	}
-	if err := cfg.checkIntervals(); err != nil {
+	if err := cfg.fillDefaults(); err != nil {
 		return nil, err
 	}
 	if cfg.EnrollToken == "" {
@@ -202,6 +213,8 @@ type Server struct {
 	pdf        pdfRenderer  // nil 表示没有可用的 poppler-utils：不收 PDF
 	pdfErr     string
 	cache      *contentCache // 文件缓存区，见 cache.go
+	cert       *tls.Certificate
+	certFP     string // 证书公钥指纹（tls.go）
 	jobs       *jobQueue
 	uploadMu   sync.Mutex
 	uploading  map[string]bool // 正在上传的 设备/文件名，见 claimMediaName
@@ -213,7 +226,7 @@ type Server struct {
 
 // New 创建服务端：加载状态文件、准备数据目录、初始化渲染器。
 func New(cfg *Config) (*Server, error) {
-	if err := cfg.checkIntervals(); err != nil {
+	if err := cfg.fillDefaults(); err != nil {
 		return nil, err
 	}
 	st, err := store.Open(filepath.Join(cfg.DataDir, "state.json"))
@@ -244,6 +257,9 @@ func New(cfg *Config) (*Server, error) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.loadOrCreateCert(); err != nil {
+		return nil, err
 	}
 	s.renderer, err = render.New(cfg.FontPath)
 	if err != nil {

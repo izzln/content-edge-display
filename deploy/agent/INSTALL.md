@@ -1,42 +1,48 @@
-# 设备端安装包
+# 设备端程序包
 
-本包内含装一台显示屏设备所需的全部文件，解开后在设备上（root）执行即可，无需其他文件。
+这个包（`display-agent-<版本>-armv7.tar.gz`）既是**装机包**，也是**程序更新（OTA）包**：
+在管理后台「程序更新」页上传它，新设备装机和已有设备升级都从服务端取这同一个包。
 
 ```
-display-agent-armv7      设备代理二进制（ARMv7，静态编译）
-enroll-token             设备自注册口令，与服务端包里的 server.json 匹配
-install-agent.sh         安装脚本：建立 OTA 布局、写配置、装 systemd 单元、固定 1440×900
-check-display.sh         现场自检：输出分辨率、硬件解码、SoC 温度
-harden.sh                安全加固：关自动更新、nftables 入站白名单、SSH 仅密钥
+display-agent            设备代理程序（ARMv7，静态编译）
+VERSION                  版本号（与程序内置版本一致，服务端据此识别）
+install-agent.sh         首次安装：装依赖、按 OTA 布局安装、写配置、设置显示参数、开机自启、重启
+update.sh                本版本的安装步骤：首次安装与每次 OTA 都执行（systemd 单元、固定路径的脚本等）
 rollback-check.sh        OTA 回滚检查（由 systemd ExecStartPre 调用）
+check-display.sh         现场自检：输出分辨率、硬件解码、CMA、SoC 温度
 display-agent.service    systemd 单元
-agent.example.json       配置样例（install-agent.sh 会据此生成 /etc/display-agent/agent.json）
+agent.example.json       配置样例
 ```
 
-## 安装
+## 装机（推荐：一行命令）
+
+先在管理后台「程序更新」页上传本包。然后在刚刷好**公版 Armbian**、设好 root 密码的设备上以 root 运行：
 
 ```sh
-tar xzf display-agent-<版本>-armv7.tar.gz && cd display-agent-<版本>
-
-# 1. 安全加固（母镜像制作时执行一次；加固后请先另开一个终端确认密钥 SSH 能登录再断开）
-SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
-
-# 2. 安装代理（注册口令默认取包内 enroll-token，无需手工填）
-#    server_url 写死在设备上、OTA 改不了，所以请用域名而不是 IP
-#    每次执行都会重写 /etc/display-agent/agent.json；装完**不会**自动设为开机自启
-SERVER_URL=http://display.lan:9000 ./install-agent.sh
-
-# 3. 重启让 HDMI 模式生效，然后手工起一次看效果
-reboot
-systemctl start display-agent
-journalctl -u display-agent -n 20     # 应看到 registered / playlist confirmed loaded
-
-# 4. 自检：输出分辨率是否 1440x900、是否在硬解、温度是否正常
-/usr/local/lib/display-agent/check-display.sh
-
-# 5. 确认画面无误后再设为开机自启
-systemctl enable display-agent
+curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 ```
+
+- 注册口令就是服务端 `server.json` 里的 `enroll_token`；后台「程序更新」页上有这条命令可直接复制。
+- 脚本由服务端生成，已填好服务端的 HTTPS 地址（`:9001`）和证书指纹；它下载最新上传的程序包、执行
+  `install-agent.sh`，装完自动重启。设备随后自动注册，1~2 分钟内出现在后台设备列表。
+- 可选参数写在 `ENROLL_TOKEN=...` 旁边：`HDMI_MODE=1440x900@60`（默认）、`HDMI_FORCE=e`（EDID 里没有该模式时强制）、
+  `CMA=256M`（默认按内存大小定）。
+
+手工安装（设备连不到服务端的 9000 端口时）：把本包拷到设备上解开，在包目录里以 root 运行
+
+```sh
+SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹> ENROLL_TOKEN=注册口令 ./install-agent.sh
+```
+
+## 现场排查
+
+```sh
+/usr/local/lib/display-agent/check-display.sh   # 分辨率、硬解、CMA、温度
+journalctl -u display-agent -f
+```
+
+**不知道设备 IP、屏幕又被播放画面占着时**：插上 USB 键盘，按任意键，屏幕会切到控制台并显示设备信息
+（编号、IP、MAC、服务端地址、连接状态），可直接登录 root；键盘 15 分钟不动自动恢复播放。
 
 ### 分辨率不对（画面错位）
 
@@ -48,18 +54,15 @@ video=HDMI-A-1:1440x900@60
 ```
 
 **改完要重启才生效。** 如果重启后 `check-display.sh` 仍报别的分辨率，多半是这块 HDMI
-驱动板的 EDID 里压根没有 1440x900 这个模式，内核就忽略了该参数——加 `,e` 强制输出：
-
-```sh
-HDMI_FORCE=e ./install-agent.sh && reboot
-```
+驱动板的 EDID 里压根没有 1440x900 这个模式，内核就忽略了该参数——重新装机时加 `HDMI_FORCE=e` 强制输出。
 
 实在不行就让模板跟着屏幕走：在管理后台把模板画布改成屏幕的实际分辨率。
 叠加图本来就会按设备实际输出分辨率缩放，不会错位，只是非等比时会有轻微形变。
 
-设备会自动获得唯一编号并向服务端注册，1~2 分钟内出现在管理后台设备列表中。
+## 程序更新
 
-之后升级代理程序**不需要再登录设备**：在管理后台"程序更新"页上传新版本二进制并下发即可
-（本包内的 `display-agent-armv7` 就是可上传的文件）。
+之后升级**不需要再登录设备**：在后台「程序更新」页上传新版本的整包并下发（立即或定时）。
+设备下载整包、校验、执行包内 `update.sh`，成功后切换到新版本；新版本连续 3 次启动失败自动回滚到上一个版本
+（程序和脚本一起回退）。失败原因会显示在后台设备列表里。
 
 完整说明见仓库 `docs/deployment.md`。

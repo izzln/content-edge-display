@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/png"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -75,6 +76,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		s.encMu.Lock()
 		info["ffmpeg_error"] = s.encoderErr
 		s.encMu.Unlock()
+	}
+	info["tls_fingerprint"] = s.certFP
+	if _, port, err := net.SplitHostPort(s.cfg.BootstrapListen); err == nil {
+		info["bootstrap_port"] = port // 后台据此拼出一键装机命令
 	}
 	info["pdf"] = false
 	if r := s.pdfRenderer(); r != nil {

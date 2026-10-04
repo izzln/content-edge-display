@@ -40,6 +40,7 @@ type Agent struct {
 	failures  int
 
 	updateFailedAt map[string]time.Time
+	updateErr      string       // 最近一次 OTA 失败的原因（随心跳上报）；成功或换了版本后清空
 	verified       bool         // 本次运行是否已确认过版本（首个成功心跳后）
 	clock          *serverClock // 签名用的时间以服务端为准，见 clock.go
 	sched          *schedule    // 轮询/心跳间隔由服务端规定，见 schedule.go
@@ -48,7 +49,7 @@ type Agent struct {
 // New 创建代理；设备身份在 Run（或 ResolveIdentity）中解析。
 func New(cfg *Config, p player.Player) *Agent {
 	clock, sched := newServerClock(), newSchedule()
-	tr := newTransport(cfg.CacheDir, clock, sched)
+	tr := newTransport(cfg.CacheDir, cfg.TLSFingerprint, clock, sched)
 	return &Agent{
 		cfg:            cfg,
 		player:         p,
@@ -115,7 +116,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		case <-pollTimer.C:
 			sdNotify("WATCHDOG=1")
-			changed, err := a.PollOnce(ctx)
+			changed, err := retrySkew(func() (bool, error) { return a.PollOnce(ctx) })
 			switch {
 			case errors.Is(err, ErrRestartForUpdate):
 				return err
@@ -145,7 +146,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			sdNotify("WATCHDOG=1")
 		case <-hbTimer.C:
 			sdNotify("WATCHDOG=1")
-			if err := a.Heartbeat(ctx); err != nil {
+			if _, err := retrySkew(func() (bool, error) { return false, a.Heartbeat(ctx) }); err != nil {
 				a.dropConnections()
 				log.Printf("agent: heartbeat failed: %v", err)
 			}
@@ -196,6 +197,21 @@ func (a *Agent) registerLoop(ctx context.Context) error {
 	}
 }
 
+// errClockSkew 表示服务端因时钟偏差拒绝了签名。
+var errClockSkew = errors.New("clock skew")
+
+// retrySkew 执行一次签名请求；因时钟偏差被拒时立即再试一次——偏差已从这次响应的 Date 头学到
+// （clock.go），第二次就按服务端时间签名了。没有 RTC 的设备断电重启后时间回退，不这样做就要白等一个
+// 轮询周期（还会被计入失败退避）。
+func retrySkew(do func() (bool, error)) (bool, error) {
+	changed, err := do()
+	if errors.Is(err, errClockSkew) {
+		log.Printf("agent: request rejected for clock skew, retrying with the server's time")
+		changed, err = do()
+	}
+	return changed, err
+}
+
 // errUnknownDevice 表示服务端没有这台设备的记录（被后台删除了），需要重新注册。
 var errUnknownDevice = errors.New("server does not know this device")
 
@@ -205,6 +221,9 @@ func statusError(resp *http.Response) error {
 	msg := strings.TrimSpace(string(body))
 	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "unknown device") {
 		return fmt.Errorf("%w (%s)", errUnknownDevice, msg)
+	}
+	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(msg, "clock skew") {
+		return fmt.Errorf("%w (%s)", errClockSkew, msg)
 	}
 	if msg == "" {
 		return fmt.Errorf("unexpected status %s", resp.Status)
@@ -448,6 +467,7 @@ func (a *Agent) Heartbeat(ctx context.Context) error {
 		HWDec:        stats.HWDec,
 		OutputW:      stats.OutputW,
 		OutputH:      stats.OutputH,
+		UpdateError:  a.updateErr,
 	})
 	if err != nil {
 		return err

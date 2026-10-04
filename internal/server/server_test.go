@@ -552,12 +552,12 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 
 func TestIntervalConfigBounds(t *testing.T) {
 	for _, c := range []Config{{PollIntervalS: 301}, {HeartbeatIntervalS: 5}, {PollIntervalS: -1}} {
-		if err := c.checkIntervals(); err == nil {
+		if err := c.fillDefaults(); err == nil {
 			t.Errorf("%+v 应被拒绝", c)
 		}
 	}
 	c := Config{}
-	if err := c.checkIntervals(); err != nil || c.PollIntervalS != 10 || c.HeartbeatIntervalS != 60 {
+	if err := c.fillDefaults(); err != nil || c.PollIntervalS != 10 || c.HeartbeatIntervalS != 60 {
 		t.Fatalf("默认值应为 10/60：%+v %v", c, err)
 	}
 }

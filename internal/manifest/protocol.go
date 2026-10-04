@@ -46,4 +46,6 @@ type Heartbeat struct {
 	// OutputW/H 是显示屏实际输出分辨率，与模板画布不一致时要查内核的 video= 参数。
 	OutputW int `json:"output_w,omitempty"`
 	OutputH int `json:"output_h,omitempty"`
+	// UpdateError 是最近一次程序更新失败的原因（下载/解包/update.sh），后台设备列表标红显示。
+	UpdateError string `json:"update_error,omitempty"`
 }

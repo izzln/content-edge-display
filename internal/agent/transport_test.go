@@ -2,7 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"github.com/izzln/content-edge-display/internal/sign"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -55,7 +63,7 @@ func TestTransportIgnoresProxyEnv(t *testing.T) {
 	t.Setenv("http_proxy", "http://127.0.0.1:1")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") }))
 	defer ts.Close()
-	c := &http.Client{Transport: newTransport(t.TempDir(), newServerClock(), nil)}
+	c := &http.Client{Transport: newTransport(t.TempDir(), "", newServerClock(), nil)}
 	resp, err := c.Get(strings.Replace(ts.URL, "127.0.0.1", "localhost", 1))
 	if err != nil {
 		t.Fatalf("应忽略代理直连：%v", err)
@@ -153,7 +161,7 @@ func TestScheduleFollowsServer(t *testing.T) {
 	}))
 	defer srv.Close()
 	sched := newSchedule()
-	c := &http.Client{Transport: newTransport(t.TempDir(), newServerClock(), sched)}
+	c := &http.Client{Transport: newTransport(t.TempDir(), "", newServerClock(), sched)}
 	get := func() {
 		resp, err := c.Get(srv.URL)
 		if err != nil {
@@ -178,5 +186,36 @@ func TestScheduleFollowsServer(t *testing.T) {
 	get()
 	if sched.Poll() != time.Second {
 		t.Fatal("没带头时应保持上次的值")
+	}
+}
+
+// 证书固定：指纹对就连，不对就拒；证书过期（设备时钟不准时常见）只要指纹对也照常连。
+func TestPinnedTLS(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test"},
+		NotBefore: time.Now().AddDate(-2, 0, 0), NotAfter: time.Now().AddDate(-1, 0, 0)} // 已过期
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := x509.ParseCertificate(der)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}}}
+	srv.StartTLS()
+	defer srv.Close()
+
+	get := func(pin string) error {
+		c := &http.Client{Transport: newTransport(t.TempDir(), pin, newServerClock(), nil)}
+		resp, err := c.Get(srv.URL)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	if err := get(sign.CertFingerprint(leaf)); err != nil {
+		t.Fatalf("指纹正确（证书已过期）应能连接：%v", err)
+	}
+	if err := get(strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "does not match tls_fingerprint") {
+		t.Fatalf("指纹不对应拒绝并说明原因：%v", err)
 	}
 }

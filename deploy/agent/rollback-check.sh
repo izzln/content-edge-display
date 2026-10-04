@@ -2,7 +2,8 @@
 # display-agent 更新回滚检查（systemd ExecStartPre）。
 #
 # OTA 切换 current 符号链接后会写 pending-verify；新版本首个心跳成功即删除该文件。
-# 若新版本反复启动失败（累计 3 次仍未确认），把 current 指回 previous，自动回滚。
+# 若新版本反复启动失败（累计 3 次仍未确认），把 current 指回 previous，自动回滚
+# （current/previous 指向整个版本目录：程序与配套脚本一起回退）。
 # 用系统 sh 执行，不依赖新二进制本身可运行。
 set -u
 DIR="${1:-/usr/local/lib/display-agent}"

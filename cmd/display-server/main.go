@@ -25,18 +25,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("init server: %v", err)
 	}
-	log.Printf("display-server listening on %s, media_root=%s, data_dir=%s, admin UI at /admin",
-		cfg.Listen, cfg.MediaRoot, cfg.DataDir)
+	log.Printf("display-server: HTTPS on %s (admin UI at /admin), install entry on http %s, media_root=%s, data_dir=%s",
+		cfg.Listen, cfg.BootstrapListen, cfg.MediaRoot, cfg.DataDir)
+	log.Printf("TLS certificate fingerprint (devices pin it): %s", s.CertFingerprint())
+
+	// 装机入口（HTTP）：只有 install.sh 与装机用的程序包，其余跳到 HTTPS
+	boot := &http.Server{Addr: cfg.BootstrapListen, Handler: s.BootstrapHandler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() { log.Fatal(boot.ListenAndServe()) }()
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           s.Handler(),
+		TLSConfig:         s.TLSConfig(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// 空闲长连接比设备端（90 秒）晚关：总是设备先放手。反过来的话，服务端刚关掉一条连接、
 		// 设备恰好拿它发请求，就是一次 connection reset by peer。
 		// 不设读写总超时：上传几百 MB 的视频、设备下载大文件都要很久。
 		IdleTimeout: 120 * time.Second,
 	}
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatal(err)
-	}
+	log.Fatal(srv.ListenAndServeTLS("", ""))
 }

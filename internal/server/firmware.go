@@ -1,11 +1,13 @@
 package server
 
 import (
+	"archive/tar"
 	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/izzln/content-edge-display/internal/agentpkg"
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
 )
@@ -26,16 +29,15 @@ const agentGOOS, agentGOARCH = "linux", "arm"
 // 从构建信息的 -ldflags 中取出注入的代理版本号。
 var versionLdflagPattern = regexp.MustCompile(`-X\s+\S*internal/agent\.Version=(\S+)`)
 
-// validateAgentBinary 校验上传的确实是设备端能执行的代理二进制，且其内置版本与填写的版本号一致。
+// validateAgentBinary 校验包里的确实是设备端能执行的代理程序，且其内置版本与包的 VERSION 一致。
 //
-// 没有这道校验时，误传 .tar.gz 成品包或本机架构的二进制都会被原样分发到所有设备：
-// 设备下载后切换符号链接并退出，systemd 执行失败，要连续失败 3 次才触发回滚，
-// 期间屏幕是黑的。Go 的构建信息可跨架构读取，因此这些错误都能在上传时当场挡住。
-func validateAgentBinary(path, declaredVersion string) error {
+// 没有这道校验时，本机架构的程序、没注入版本号的程序都会被原样分发到所有设备：设备装上后
+// systemd 执行失败，要连续失败 3 次才触发回滚，期间屏幕是黑的。Go 的构建信息可跨架构读取，
+// 因此这些错误都能在上传时当场挡住。
+func validateAgentBinary(path, version string) error {
 	info, err := buildinfo.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("这不是 Go 二进制文件——是否误传了 display-agent-*.tar.gz 成品包？" +
-			"请上传包内解开的 display-agent-armv7")
+		return fmt.Errorf("包里的 %s 不是 Go 程序", agentpkg.Binary)
 	}
 	var goos, goarch, ldflags string
 	for _, s := range info.Settings {
@@ -49,19 +51,60 @@ func validateAgentBinary(path, declaredVersion string) error {
 		}
 	}
 	if goos != agentGOOS || goarch != agentGOARCH {
-		return fmt.Errorf("这个二进制的目标平台是 %s/%s，设备需要 %s/%s——"+
-			"是否误传了本机架构的 bin/display-agent？请上传 bin/display-agent-armv7",
-			goos, goarch, agentGOOS, agentGOARCH)
+		return fmt.Errorf("包里程序的目标平台是 %s/%s，设备需要 %s/%s——请用 make package 打包", goos, goarch, agentGOOS, agentGOARCH)
 	}
 	m := versionLdflagPattern.FindStringSubmatch(ldflags)
 	if m == nil {
-		return fmt.Errorf("这个二进制没有注入版本号，请用 make agent-arm 或 make package 构建")
+		return fmt.Errorf("包里的程序没有注入版本号，请用 make package 打包")
 	}
-	if got := strings.Trim(m[1], `"'`); got != declaredVersion {
-		return fmt.Errorf("二进制内置版本是 %q，与填写的版本号 %q 不一致——"+
-			"版本号必须相同，否则设备升级后服务端无法判断已完成", got, declaredVersion)
+	if got := strings.Trim(m[1], `"'`); got != version {
+		return fmt.Errorf("程序内置版本是 %q，与包的 VERSION %q 不一致", got, version)
 	}
 	return nil
+}
+
+// inspectPackage 检查上传的整包：必须有 VERSION、update.sh 和 linux/arm 的代理程序，返回版本号。
+func inspectPackage(pkgPath string) (string, error) {
+	f, err := os.Open(pkgPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	bin, err := os.CreateTemp(filepath.Dir(pkgPath), ".agent-bin-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(bin.Name())
+	defer bin.Close()
+	var version string
+	var hasBinary, hasUpdate bool
+	err = agentpkg.Walk(f, func(name string, _ *tar.Header, body io.Reader) error {
+		switch name {
+		case agentpkg.VersionFile:
+			b, err := io.ReadAll(io.LimitReader(body, 256))
+			version = strings.TrimSpace(string(b))
+			return err
+		case agentpkg.Binary:
+			hasBinary = true
+			_, err := io.Copy(bin, body)
+			return err
+		case agentpkg.UpdateScript:
+			hasUpdate = true
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("这不是设备程序包（%v）——请上传 make package 产出的 display-agent-<版本>-armv7.tar.gz", err)
+	}
+	switch {
+	case !versionPattern.MatchString(version):
+		return "", fmt.Errorf("包里没有合法的 %s——请上传 make package 产出的设备程序包", agentpkg.VersionFile)
+	case !hasBinary:
+		return "", fmt.Errorf("包里没有 %s", agentpkg.Binary)
+	case !hasUpdate:
+		return "", fmt.Errorf("包里没有 %s", agentpkg.UpdateScript)
+	}
+	return version, validateAgentBinary(bin.Name(), version)
 }
 
 // updateCommand 判断是否要给设备下发更新指令：
@@ -97,15 +140,10 @@ func (s *Server) handleListFirmware(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleUploadFirmware 接收 multipart: file + version + notes。
+// handleUploadFirmware 接收 multipart: file（整包）+ notes。版本号从包里读。
 func (s *Server) handleUploadFirmware(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		http.Error(w, "bad multipart body", http.StatusBadRequest)
-		return
-	}
-	version := strings.TrimSpace(r.FormValue("version"))
-	if !versionPattern.MatchString(version) {
-		http.Error(w, "版本号非法（字母数字._-，≤64）", http.StatusBadRequest)
 		return
 	}
 	f, _, err := r.FormFile("file")
@@ -115,29 +153,31 @@ func (s *Server) handleUploadFirmware(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	name := "display-agent-" + version
-	dst := filepath.Join(s.firmwareDir(), name)
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	tmp, err := os.CreateTemp(s.firmwareDir(), ".upload-*")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(f, 64<<20))
-	out.Close()
-	if err != nil || n == 0 {
-		os.Remove(tmp)
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(f, maxPackageBytes+1))
+	tmp.Close()
+	switch {
+	case err != nil || n == 0:
 		http.Error(w, "empty or unreadable file", http.StatusBadRequest)
+		return
+	case n > maxPackageBytes:
+		http.Error(w, fmt.Sprintf("程序包超过 %dMB", maxPackageBytes>>20), http.StatusBadRequest)
 		return
 	}
 	// 在落库前把"传错文件"挡住——这个包会分发到所有设备。
-	if err := validateAgentBinary(tmp, version); err != nil {
-		os.Remove(tmp)
+	version, err := inspectPackage(tmp.Name())
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	name := "display-agent-" + version + "-armv7.tar.gz"
+	if err := os.Rename(tmp.Name(), filepath.Join(s.firmwareDir(), name)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -146,9 +186,13 @@ func (s *Server) handleUploadFirmware(w http.ResponseWriter, r *http.Request) {
 		Size: n, Notes: r.FormValue("notes"), UploadedAt: s.now(),
 	}
 	if s.update(w, func(st *store.State) { st.Firmware[version] = fw }) {
+		log.Printf("agent package %s uploaded (%s)", version, humanBytes(n))
 		writeJSON(w, fw)
 	}
 }
+
+// maxPackageBytes 是设备程序包的大小上限。
+const maxPackageBytes = 64 << 20
 
 func (s *Server) handleDeleteFirmware(w http.ResponseWriter, r *http.Request) {
 	version := r.PathValue("version")

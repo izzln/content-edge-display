@@ -7,11 +7,12 @@
 
 | 层 | 内容 | 更新方式 |
 |---|---|---|
-| OS 母镜像 | Armbian + GStreamer + 安全加固 + 代理安装布局 + 含 `enroll_token` 的配置 | 烧录时一次性写入，之后不动 |
-| 代理程序 | `display-agent` 单一静态二进制 | 管理后台上传 → 立即/定时下发 → 设备自动切换、失败自动回滚 |
+| 操作系统 | 公版 Armbian 镜像 | 烧录时一次性写入，之后不动 |
+| 设备端程序包 | `display-agent` 程序 + 安装/更新/回滚脚本 + systemd 单元（一个 tar.gz） | 管理后台上传 → 立即/定时下发 → 设备执行包内 `update.sh` 切换、失败自动回滚 |
 
-设备装好后很难再物理接触，所以**除首次烧录外的一切变更都必须能远程完成**——这是整套
-自注册 + OTA 设计的出发点。
+设备装好后很难再物理接触，所以**除首次装机外的一切变更都必须能远程完成**——这是整套
+一键装机 + 自注册 + OTA 设计的出发点。系统层面的设置（HDMI/CMA 启动参数、依赖、将来需要的系统调整）
+都由程序包里的脚本负责，随程序包一起 OTA，不依赖定制系统镜像。
 
 ## 1. 取得成品包
 
@@ -22,11 +23,11 @@
 
 ```sh
 make package
-# → bin/display-agent-<版本>-armv7.tar.gz    设备端（二进制 + 安装/加固/回滚脚本 + systemd 单元 + 配置样例）
+# → bin/display-agent-<版本>-armv7.tar.gz    设备端程序包（程序 + 安装/更新/回滚脚本 + systemd 单元）：装机与 OTA 都用它
 # → bin/display-server-<版本>-<架构>.tar.gz  服务端（二进制 + systemd 单元 + 配置样例）
 ```
 
-（`make build` / `make agent-arm` 仍然只产出裸二进制，OTA 上传用的就是 `bin/display-agent-armv7`。）
+（`make build` / `make agent-arm` 只产出裸二进制，供本地调试；后台上传的是上面的设备端程序包。）
 
 ### 1.2 从 GitHub 下载（本机没有 Go 环境时）
 
@@ -40,14 +41,14 @@ make package
 git tag v1.2.0 && git push origin v1.2.0     # 随后在 Releases 页面下载
 ```
 
-标签构建会把标签名同时用作**包名**与**二进制内置版本**，两者必定一致——
-管理后台"程序更新"页填的版本号必须与二进制内置版本相同，OTA 才能正确判断设备是否已升到目标版本。
+标签构建会把标签名同时用作**包名**、包内 `VERSION` 与**二进制内置版本**，三者必定一致——
+服务端上传时会核对，不一致拒收，OTA 据此判断设备是否已升到目标版本。
 
 > 服务端包按 Actions 运行器的架构（amd64）构建。若你的服务器是 ARM，请在本地用
 > `GOOS=linux GOARCH=arm64 make package-server` 自行构建。
 
 两个包里都带 `INSTALL.md`，现场不用带着仓库也能装。服务端包里的 `server.json`
-已填好自动生成的口令，设备端包里带匹配的 `enroll-token`（见 2.1）。
+已填好自动生成的口令（见 2.1）；设备端包里不含任何口令。
 
 ## 2. 服务端部署（运营方本地服务器）
 
@@ -77,7 +78,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   media/<设备ID>/     该设备的播放内容（后台上传，也可直接拷进来）
   media/.store/       文件缓存区：处理好的内容各存一份，设备目录里是指向它的硬链接（见 5 节"文件缓存区"）
   fonts/              渲染用字体
-  data/               服务端状态：state.json、firmware/、rendered/、incoming/（首次启动自动创建）
+  data/               服务端状态：state.json、firmware/、rendered/、incoming/、tls/（首次启动自动创建）
 ```
 
 **配置里的相对路径按 `server.json` 所在目录解析**，与进程工作目录无关——systemd 启动服务时
@@ -90,7 +91,9 @@ systemctl daemon-reload && systemctl enable --now display-server
 | 字段 | 说明 |
 |---|---|
 | `admin_token` | 管理后台口令，由 `make` 生成并已填好（见 2.1）。**留空则所有写接口一律拒绝**，避免管理面裸奔 |
-| `enroll_token` | 设备自注册口令，由 `make` 生成并已填好；设备端包里的 `enroll-token` 与之匹配 |
+| `enroll_token` | 设备注册口令，由 `make` 生成并已填好；新设备装机时在一键装机命令里输入 |
+| `listen` | HTTPS 主端口，默认 `:9001`：管理后台、设备通信都走这里 |
+| `bootstrap_listen` | HTTP 装机端口，默认 `:9000`：**只**提供一键装机脚本和装机用程序包，其余请求一律 301 跳到 HTTPS |
 | `media_root` | 各设备播放内容的根目录，下面按设备 ID 分子目录；后台上传的图片/视频落在这里 |
 | `data_dir` | 服务端状态：`state.json`、上传图片、渲染结果、固件 |
 | `font_path` | CJK 字体文件路径（是文件不是目录），缺失则中文渲染成方框 |
@@ -103,7 +106,19 @@ systemctl daemon-reload && systemctl enable --now display-server
 
 图片停留时长不在这里配置——它是版式的一部分，写在模板里，在管理后台改。
 
-管理后台：浏览器打开 `http://<服务器>:9000/admin`，首次访问输入 `admin_token`。
+管理后台：浏览器打开 `https://<服务器>:9001/admin`，首次访问输入 `admin_token`。
+
+**证书**：服务端首次启动在 `data_dir/tls/` 生成自签证书（`server.crt`/`server.key`，长期有效），
+所以浏览器第一次会提示"连接不是私密连接"——这是自签证书的正常现象，选"高级 → 继续访问"即可；
+不想每次看到提示，就把 `server.crt` 导入管理电脑的系统钥匙串/证书库并设为信任。
+设备不靠 CA 校验，而是**固定证书公钥指纹**（装机时自动写进设备的 `agent.json`）。指纹打印在服务端启动日志里，
+后台「程序更新」页也有显示。
+
+> **`data_dir/tls/` 要和 `state.json` 一起备份。** 证书丢了重新生成，指纹就变了，所有已装设备都会拒绝连接
+> （日志里是 `server certificate fingerprint ... does not match tls_fingerprint`），只能逐台改 `agent.json`。
+> 搬迁服务器时整个 `data_dir` 一起拷走即可。
+
+防火墙需要放行 TCP 9001（设备、管理后台）与 9000（新设备装机）。
 
 ### 2.1 两个口令从哪来
 
@@ -115,19 +130,19 @@ systemctl daemon-reload && systemctl enable --now display-server
 make tokens     # 查看当前口令；文件不存在时生成
 ```
 
-打出来的**服务端包里的 `server.json` 已经填好这两个口令**，设备端包里也带了一份
-匹配的 `enroll-token`，所以装机时不用再想口令怎么定、也不用手工对齐两边。
+打出来的**服务端包里的 `server.json` 已经填好这两个口令**。设备端包里不含口令：
+装机人员在一键装机命令里输入 `enroll_token`（见第 3 节），所以程序包可以随便拷、随便传。
 
 | 口令 | 用途 | 改了会怎样 |
 |---|---|---|
 | `admin_token` | 登录管理后台 | 重新登录即可，无其他影响 |
-| `enroll_token` | 设备自注册的凭证，烧进母镜像 | **已注册的设备不受影响**（它们用的是各自的密钥），但用旧母镜像新刷的设备注册不进来 |
+| `enroll_token` | 新设备注册的凭证，装机时输入；也用于下载装机用程序包 | **已注册的设备不受影响**（它们用的是各自的密钥），之后装机用新口令即可 |
 
-所以 `.secrets/tokens.env` 要保管好：丢了不影响现有设备运行，但要加新设备就得重做母镜像。
+`.secrets/tokens.env` 丢了也不影响现有设备运行，重新生成、改 `server.json` 并重启服务端即可。
 
 > **公开仓库的注意事项**：CI 构建（GitHub Actions）**不会**把真实口令打进产物——
 > 否则它们会随 Release 附件公开。从 Releases 下载的包里是占位值 `change-me`，
-> 服务端带着占位值会直接拒绝启动并提示你生成。自己 `make package` 出来的包才含真实口令，
+> 服务端带着占位值会直接拒绝启动并提示你生成。自己 `make package` 出来的服务端包才含真实口令，
 > 因此那个包本身也要当作机密对待，别到处发。
 
 ### 2.2 设备是怎么登记的
@@ -137,7 +152,7 @@ make tokens     # 查看当前口令；文件不存在时生成
 随后出现在后台设备列表里。同一编号用不同密钥再注册会被拒（409），
 防止冒名顶替；这种请求会显示在后台该设备上，核对无误可一键「接受新密钥」。详见 4.1。
 
-## 3. 设备端：单台部署（样机、调试、也是制作母镜像的第一步）
+## 3. 设备端：装机（公版 Armbian + 一键安装）
 
 目标硬件：Orange Pi One（全志 H3，1GB，百兆网，HDMI）+ LCD 1440×900（HDMI 驱动板）。
 
@@ -146,7 +161,8 @@ make tokens     # 查看当前口令；文件不存在时生成
 1. 从 [Armbian 官网](https://www.armbian.com/orange-pi-one/) 下载 Orange Pi One 的
    **Bookworm CLI（minimal 或 standard）** 镜像；
 2. 用 balenaEtcher 写入 TF 卡（建议**工业级/高耐久** TF 卡，≥16GB）；
-3. 首次上电走初始化向导（设 root 密码，普通用户可跳过），配好网络。
+3. 首次上电走初始化向导（设 root 密码，普通用户可跳过），配好网络；
+4. 想用主机名当设备编号（如 `scr-0017`，见 4.1）就在这时 `hostnamectl set-hostname scr-0017`，不设也行。
 
 ### 3.2 固定 HDMI 输出为 1440×900 并禁用息屏
 
@@ -162,37 +178,54 @@ make tokens     # 查看当前口令；文件不存在时生成
 代理退回首选模式（日志里会提示）——设一个显示屏不认的模式只会黑屏。
 
 驱动板 EDID 里压根没有 1440×900 时，内核会忽略 `video=`，该模式也不会出现在可用列表里。
-这时加 `,e` 强制输出：`HDMI_FORCE=e ./install-agent.sh`（即 `video=HDMI-A-1:1440x900@60,e`）。
+这时加 `,e` 强制输出：装机命令里加 `HDMI_FORCE=e`（即 `video=HDMI-A-1:1440x900@60,e`）。
 
-改完要**重启**，然后运行 `/usr/local/lib/display-agent/check-display.sh` 确认（见 3.4）。
+改完要**重启**（一键安装会自动重启），然后运行 `/usr/local/lib/display-agent/check-display.sh` 确认（见 3.4）。
 
 > 即便最终输出分辨率与模板画布不一致，画面也不会错位：设备端会按实际输出分辨率
 > 重新缩放叠加图，媒体区按同一比例换算。只是非等比时属性文字会有轻微形变，
 > 所以仍应把输出模式配对。
 
-### 3.3 安装 GStreamer 与代理
+### 3.3 一键安装
+
+前提：管理后台「程序更新」页**已上传过设备端程序包**（`display-agent-<版本>-armv7.tar.gz`，见 1 节）。
+装机下载的就是最新上传的那个包，之后 OTA 也是同一种包。
+
+在设备上以 root 运行（后台「程序更新」页的"新设备装机"里有这条命令，地址已填好，可直接复制）：
 
 ```sh
-# 开发机：拷一个包过去即可
-scp bin/display-agent-*-armv7.tar.gz root@<设备IP>:/root/
-
-# 设备上（root）
-tar xzf display-agent-*-armv7.tar.gz && cd display-agent-*/
-SSH_ALLOW_FROM=<服务器IP> SSH_PUBKEY="ssh-ed25519 AAAA... ops" ./harden.sh
-SERVER_URL=http://display.lan:9000 ./install-agent.sh   # 注册口令取包内 enroll-token
-reboot                                                  # 让 HDMI 模式生效
-systemctl start display-agent
-journalctl -u display-agent -n 20     # 应看到注册成功
-/usr/local/lib/display-agent/check-display.sh            # 见 3.4
-systemctl enable display-agent        # 确认无误后再设为开机自启
+curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 ```
 
-`install-agent.sh` 的两个行为要知道：
+它会：凭注册口令（`server.json` 的 `enroll_token`）下载程序包 → 装 GStreamer 依赖 → 按 OTA 布局安装 →
+写 `/etc/display-agent/agent.json`（服务端 HTTPS 地址与证书指纹已由服务端填好）→ 写 HDMI/CMA 启动参数 →
+`systemctl enable display-agent` → 10 秒后**自动重启**。重启后设备自动注册，1~2 分钟内出现在后台设备列表（在线）。
 
-- **每次运行都会重写** `/etc/display-agent/agent.json`（改服务端地址重跑一遍即可，不用先删文件）。
+可选参数写在 `ENROLL_TOKEN=...` 旁边，例如 `... | ENROLL_TOKEN=xxxx HDMI_FORCE=e sh`：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `HDMI_MODE` | `1440x900@60` | 输出模式（见 3.2） |
+| `HDMI_FORCE` | 空 | `e`：EDID 里没有该模式时强制输出 |
+| `CMA` | 按内存定 | 连续内存，1GB 板 256M、512MB 板 192M |
+| `NO_REBOOT` | 空 | `1`：装完不自动重启 |
+
+出错时的提示：`注册口令不对`、`服务端还没有上传设备程序包`、`连不上服务端`（查网线、IP、9000 端口防火墙）。
+
+只有 9000 端口是明文 HTTP，而且只提供这个脚本和程序包下载（程序包要凭注册口令下载）；设备装好后一律走 9001 的 HTTPS，
+并固定服务端证书指纹。脚本本身不含任何口令。
+
+**连不到 9000 端口时手工安装**：把程序包拷到设备上解开，在包目录里以 root 运行
+
+```sh
+SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹> ENROLL_TOKEN=注册口令 ./install-agent.sh
+```
+
+`install-agent.sh` 的行为要知道：
+
+- **每次运行都会重写** `/etc/display-agent/agent.json`（换服务端重跑一遍装机命令即可，不用先删文件）。
   设备编号与密钥在 `/var/lib/display-agent/identity.json`，不受影响；
-- **装完不会 enable 服务**，要人工确认画面无误后自己 `systemctl enable display-agent`。
-  做母镜像时别忘了这一步，否则烧出来的设备开机不播放（见 4.2）。
+- 装完**直接 enable 服务**：开机即进入播放，屏幕被播放画面占着。需要进控制台时插 USB 键盘按任意键（见 3.5）。
 
 设备会自动注册并出现在管理后台（在线），编号规则见 4.1。
 
@@ -234,20 +267,31 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 视频输出方式退一步记 `video output '…' failed: … retrying with '…'`；GStreamer 自己的 ERROR 行
 （以及 `kmssink`、`v4l2codecs` 的 WARN 行）也在其中。
 
-## 4. 设备端：母镜像批量部署
+### 3.5 现场救援：不知道设备 IP、屏幕又被播放画面占着
 
-所有设备烧**同一个镜像**，首次上电自动获得唯一编号并注册。
+设备能连上服务端时，后台设备列表里就有它的 IP，直接 SSH 即可。连不上服务端时（后台看不到它）：
+
+1. 给设备插上 **USB 键盘，按任意键**；
+2. 播放暂停，屏幕切到控制台（tty1），顶部显示设备信息：设备编号、主机名、全部 IPv4、MAC、服务端地址、
+   与服务端的连接状态和最近一次错误、程序版本；下面就是登录提示，可直接登录 root；
+3. 键盘 **15 分钟**不动自动恢复播放。要更久就在控制台里 `systemctl stop display-agent`，排查完 `systemctl start display-agent`。
+
+不需要任何网络，也不需要事先知道 IP。
+
+## 4. 设备端：批量部署
+
+推荐每台都按第 3 节走：刷公版 Armbian → 一键安装命令。命令一样，装机人员只需知道注册口令；
+首次上电自动获得唯一编号并注册。数量很大时也可以做母镜像（4.2），省掉每台装依赖的时间。
 
 ### 4.1 设备编号规则
 
 代理首次启动按以下优先级确定编号，并持久化到 `/var/lib/display-agent/identity.json`：
 
 1. `agent.json` 里显式的 `device_id`（手工配置场景）；
-2. **主机名**——烧录时在 Armbian Imager 的"自定义设置"里填写 hostname（如 `scr-0017`）即为设备编号；
+2. **主机名**——装机前 `hostnamectl set-hostname scr-0017`（或烧录时在 Armbian Imager 的"自定义设置"里填 hostname）即为设备编号；
 3. 主机名是默认值（`orangepione` 等）时，取 SoC 序列号后 8 位 → `opi-1a2b3c4d`（再退回 eth0 MAC）。
 
-> Armbian Imager 的自定义对官方镜像有效；对克隆的母镜像是否生效**需实机验证一次**。
-> 不生效也没关系：规则 3 保证编号唯一，在管理后台把名称改成"3 楼大堂"即可。
+> 不设主机名也没关系：规则 3 保证编号唯一，在管理后台把名称改成"3 楼大堂"即可。
 
 密钥在首启随机生成，只存在于设备与服务端两处；`enroll_token` 仅用于首次注册。
 同 ID 不同密钥的注册会被拒绝（409），防止冒名顶替。
@@ -274,7 +318,7 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 丢掉连接池里的旧连接、下次用新连接重试；服务端空闲连接保持 120 秒、比设备端（90 秒）晚关，
 避免"服务端刚关、设备正好复用"的竞争。仍然持续出现时按顺序查：
 
-1. `server_url` 指向的确实是 display-server（端口 9000 常被别的程序占用：`ss -ltnp | grep 9000`）；
+1. `server_url` 指向的确实是 display-server（端口被别的程序占用时服务端起不来：`ss -ltnp | grep 900`）；
 2. 服务端日志里有没有 `http: panic serving`（服务端处理请求时崩了），有的话把那几行发给开发；
 3. 服务器的防火墙（ufw、firewalld、fail2ban）有没有拦设备的 IP；
 4. 局域网里有没有 IP 冲突（另一台机器占了服务器的地址也会表现为连接被随机重置）。
@@ -301,12 +345,11 @@ agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                       
 留作证据而不是悄悄覆盖；同一缓存目录只允许一个代理进程（服务在跑时再手工启动一个会直接报错退出）；
 `agent.json` 里的相对路径按配置文件所在目录解析（不会因为启动方式不同而用到两份身份文件）。
 
-### 4.2 制作母镜像
+### 4.2 制作母镜像（可选）
 
-先按第 3 节把一台样机完整装好并验证通过，然后清理成"出厂状态"：
+先按第 3 节把一台样机完整装好并验证通过（服务已 enable），然后清理成"出厂状态"：
 
 ```sh
-systemctl enable display-agent    # install-agent.sh 不会自动 enable；母镜像里必须开着，否则烧出来的设备开机不播放
 systemctl stop display-agent
 rm -f /var/lib/display-agent/identity.json /var/lib/display-agent/current.json
 rm -rf /var/lib/display-agent/media/* /var/lib/display-agent/status.json /var/lib/display-agent/gstplayer.py
@@ -320,6 +363,9 @@ poweroff
 
 然后在管理后台**删除样机注册的那台设备**（它的密钥已随 identity.json 删除）。
 
+母镜像里的 `agent.json` 带着注册口令和服务端证书指纹：换了 `enroll_token` 或服务端证书后要重做母镜像
+（或烧完后重跑一次装机命令）。镜像里的程序版本旧了没关系，设备上线后按后台的更新目标自动 OTA。
+
 ### 4.3 读出并收缩镜像（开发机/Linux）
 
 ```sh
@@ -329,8 +375,8 @@ sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com
 
 ### 4.4 批量烧录与上线
 
-1. 用 Armbian Imager / balenaEtcher 烧 `display-golden.img.gz`；若 Imager 支持，为每张卡填 hostname 作为编号；
-2. 插卡、接屏、接网、上电；
+1. 逐台一键安装（第 3 节）；或用 balenaEtcher 烧 `display-golden.img.gz` 后直接上电；
+2. 接屏、接网、上电；
 3. 1~2 分钟内设备出现在管理后台设备列表（在线）；
 4. 后台设属性（如 `room=302`）、在【内容】里上传要播的图片/视频 → 屏幕在一个轮询周期内更新；
 5. 点【测试】确认是哪块屏。
@@ -427,38 +473,48 @@ device scr-0018 online (192.168.1.58, agent 1.3.0)
 ### 5.3 程序 OTA
 
 ```sh
-make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSION=1.2.0
+make package        # 版本号取自 git describe，也可 make package VERSION=1.2.0
 ```
 
-**程序更新**页要选的文件是 **`display-agent-armv7` 这个裸二进制**，不是 `.tar.gz` 成品包：
+**程序更新**页上传的是**设备端程序包** `display-agent-<版本>-armv7.tar.gz`（本地 `make package` 产出，
+或从 GitHub Release 下载），不用填版本号——服务端从包里的 `VERSION` 读取，并当场校验，不符即拒收、不会下发：
+包里有 `VERSION`、`update.sh` 和 `display-agent`；`display-agent` 是 linux/arm 的 Go 程序（挡住误传本机架构的构建）；
+其内置版本与 `VERSION` 一致。最新上传的包同时也是新设备一键装机下载的包。
 
-| 来源 | 路径 |
-|---|---|
-| 本地构建 | `bin/display-agent-armv7`（`make agent-arm` 或 `make package` 都会产出） |
-| 从 GitHub 下载 | 把 `display-agent-<版本>-armv7.tar.gz` 解开，取里面的 `display-agent-armv7` |
+点【下发】，选择立即或定时、全部或指定设备。
 
-版本号必须与二进制内置版本**完全一致**（`./display-agent-armv7 -version` 可核对；
-标签构建时就是标签名）。服务端在上传时会读取二进制的构建信息校验三件事，任何一项不符都当场拒绝、
-不会下发到设备：是不是 Go 二进制（挡住误传 tar.gz）、目标平台是不是 linux/arm（挡住误传本机架构的
-`bin/display-agent`）、内置版本与填写的版本号是否一致。
+设备端流程：轮询取到指令 → 断点续传下载整包 → sha256 校验 → 解到 `versions/<新版本>/` →
+**以 root 执行包内 `update.sh`**（更新 systemd 单元、固定路径的回滚脚本等）→ 成功后 `previous`/`current`
+符号链接原子切换 → 进程退出由 systemd 拉起新版本 → 首个心跳成功即确认，并清掉更早的版本目录。
 
-填好后点【下发】，选择立即或定时、全部或指定设备。
-
-设备端流程：轮询取到指令 → 断点续传下载 → sha256 校验 → `current` 符号链接原子切换 →
-进程退出由 systemd 拉起新版本 → 首个心跳成功即确认。若新版本连续 3 次启动失败，
-`rollback-check.sh`（systemd `ExecStartPre`，用系统 sh 执行、不依赖新二进制）自动切回上一版本。
+- `update.sh` 失败（非零退出或超过 2 分钟）：不切换，继续跑旧版本；失败原因随心跳上报，后台设备列表里红字
+  "程序更新失败"（鼠标悬停看详情）。5 分钟后自动重试，修好的包重新上传下发即可。
+- 新版本连续 3 次启动失败：`rollback-check.sh`（systemd `ExecStartPre`，用系统 sh 执行、不依赖新程序）
+  把 `current` 切回 `previous`——**程序和脚本一起回退**。
 
 后台设备列表显示"程序版本 → 目标版本"，两者一致即完成。
+
+安装布局（`/usr/local/lib/display-agent/`）：
+
+```
+versions/<版本>/        整包解开（程序 + 脚本）；只保留 current 与 previous 两个版本
+current -> versions/…   systemd 从 current/display-agent 启动
+previous -> versions/…  回滚目标
+pending-verify          新版本待确认（rollback-check.sh 计启动次数）
+rollback-check.sh       固定路径（update.sh 安装）
+check-display.sh        -> current/check-display.sh
+```
 
 **OTA 能改什么、不能改什么**——设备装好后很难再物理接触，这条边界决定了哪些改动要提前想清楚：
 
 | | 内容 |
 |---|---|
-| 仅 OTA 代理即可 | 播放逻辑（含随代理分发的播放进程 `gstplayer.py`）、播放列表行为、清单新字段的解析、下载与缓存策略、心跳内容 |
+| 程序包 OTA 即可 | 播放逻辑（含随代理分发的播放进程 `gstplayer.py`）、清单新字段的解析、下载与缓存策略、心跳内容；以及 `update.sh` 能做的系统调整：systemd 单元、启动参数、配置文件、换播放器所需的改动 |
 | 还需同时更新服务端 | 清单生成、模板渲染、管理后台界面（服务端在机房，更新它不用去现场） |
-| **OTA 改不了，需要 SSH** | `/etc/display-agent/agent.json`（OTA 只替换二进制）、systemd 单元、系统软件包（GStreamer、Python、内核、DRM 驱动） |
+| **OTA 做不到** | 需要从外网装的系统软件包（`update.sh` 约定离线运行、不调 `apt`，设备通常没有外网）；把设备从本服务端迁走（`server_url`、证书指纹写在设备的 `agent.json` 里——`update.sh` 技术上能改，但改错了设备就再也连不回来） |
 
-所以新增设备端配置项时，务必让"缺省值即可用"——否则这批设备就得逐台登录。
+`update.sh` 的约定：幂等（可重复执行）；离线可运行；对版本目录以外的改动要与上一个版本兼容——
+回滚只切回旧版本目录，**不会撤销** `update.sh` 做过的系统改动。新增设备端配置项时仍要让"缺省值即可用"。
 
 **播放能力现状**：模板媒体区里图文混排、视频播完自动切下一条、列表循环都已实测可用。
 
@@ -470,7 +526,8 @@ make agent-arm      # 版本号取自 git describe，也可 make agent-arm VERSI
 | 路径 | 内容 | 要不要保留 |
 |---|---|---|
 | `data/state.json` | 设备（含自注册设备的密钥）、属性、模板、时段、全局设置、固件元数据、更新目标 | **必须** |
-| `data/firmware/` | 上传的代理程序 | 建议（否则待下发的更新目标会失效） |
+| `data/firmware/` | 上传的设备端程序包 | 建议（否则待下发的更新目标会失效，新设备也没有包可装） |
+| `data/tls/` | 服务端证书与私钥 | **必须**。丢了重新生成指纹就变了，已装设备全部拒绝连接 |
 | `data/rendered/` | 模板/测试卡的渲染结果 | 不必，缺了会自动重新渲染 |
 | `media/` | 各设备的播放内容 | **必须** |
 | `server.json` | 配置（含两个口令） | **必须**。另外把 `.secrets/tokens.env` 也备份到构建机之外 |
@@ -497,10 +554,11 @@ tar czf display-backup.tar.gz -C /srv display
 `state.json` 是原子写入（临时文件 + rename），所以**热备份也是一致的**——不停机拷贝拿到的
 要么是旧版本要么是新版本，不会拿到写坏的半个文件。停机只是为了避免拷贝过程中运营方刚好在改配置。
 
-> **搬迁前务必确认一件事**：设备端 `agent.json` 里的 `server_url` 是写死在每台设备上的，
-> OTA 只替换二进制、改不了它。服务器换 IP 就意味着要逐台 SSH。
-> 所以**从一开始就用域名而不是 IP**（例如 `http://display.lan:9000`），
-> 搬迁时只改 DNS 指向即可，设备无感。
+> **搬迁前务必确认两件事**：
+> 1. 设备端 `agent.json` 里的 `server_url` 写死在每台设备上。服务器换 IP 就意味着要逐台改。
+>    所以**从一开始就用域名而不是 IP**（例如 `https://display.lan:9001`），搬迁时只改 DNS 指向即可，设备无感。
+>    一键装机脚本里的地址取自装机时浏览器/命令里用的主机名，所以装机命令里就写域名。
+> 2. `data/tls/` 一起搬过去，证书指纹不变，设备才认新服务器。
 
 ### 6.3 定期备份
 
@@ -516,8 +574,8 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 | 检查项 | 方法 |
 |---|---|
 | 分辨率 / 温度 | `check-display.sh` 全部通过；管理后台该设备显示 1440×900、温度正常（播放视频时也低于 80°C） |
-| 开机自启 | `systemctl is-enabled display-agent` 为 enabled（安装脚本不会自动 enable） |
-| 网络连通 | `curl -sI http://<服务器>:9000` 有响应 |
+| 开机自启 | `systemctl is-enabled display-agent` 为 enabled |
+| 网络连通 | `curl -skI https://<服务器>:9001/admin` 有响应 |
 | 代理运行 | `systemctl status display-agent` active (running) |
 | 软看门狗 | `systemctl show display-agent -p WatchdogTimestamp` 持续更新 |
 | 播放验证 | 后台点【测试】，2 分钟内屏幕出现测试卡 |
@@ -525,17 +583,26 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
 | 断电恢复 | 拔电重启后 1 分钟内自动恢复播放上次内容（无需人工干预） |
 | 断网兜底 | 拔网线，播放不中断；插回后心跳恢复 |
 
-## 8. 安全基线（`harden.sh` 做了什么，为什么）
+## 8. 通信安全
 
-- **关闭系统自动更新**并 `apt-mark hold` 内核/dtb 包：屏幕设备要的是十年如一日，
-  一次内核升级就可能打碎显示输出或硬解；
-- **nftables 入站默认 DROP**，仅放行 lo、已建立连接、ICMP 与来自运维地址的 SSH：
-  设备不对外提供任何服务，唯一入站就是运维；
-- **SSH 保留，但仅密钥登录 + 仅运维地址可达**。设备装好后难以物理接触，OTA 万一出问题时
-  SSH 是唯一的远程救援通道，关掉等于放弃远程修复能力；限定源地址后攻击面可以忽略；
-- 禁用 avahi / bluetooth 等无关服务；锁定 root 口令。
+| 通道 | 保护 |
+|---|---|
+| 设备 ↔ 服务端（9001） | HTTPS；设备**固定服务端证书公钥指纹**（`agent.json` 的 `tls_fingerprint`），不依赖 CA，也不校验有效期和主机名——设备时钟不准、服务器换 IP 都不影响，冒充的服务端拿不出同一把私钥就连不上 |
+| 设备请求的身份 | 每台设备一把随机密钥，请求带 HMAC 签名（时间戳 ± 5 分钟防重放）；设备只能取自己目录下的文件 |
+| 管理后台（9001） | HTTPS + `admin_token`；浏览器对自签证书的提示见第 2 节 |
+| 装机入口（9000，HTTP） | 只有一键装机脚本（不含口令，只含服务端地址与证书指纹）和程序包下载（凭注册口令）；其余请求 301 到 HTTPS |
 
-> 执行 `harden.sh` 后，**先用另一个终端确认密钥 SSH 能登录，再断开当前会话**。
+改成 HTTPS 之前存在的两个问题（现已修复）：明文 HTTP 下注册口令、设备注册时的密钥、管理口令都能在局域网里被窃听；
+服务端响应没有认证，局域网内的人 ARP 欺骗冒充服务端就能下发伪造的更新指令，让设备以 root 运行任意程序。
+固定证书指纹后，响应只能来自持有服务端私钥的那台机器。
+
+剩余的风险与取舍：
+
+- 装机那一刻的脚本走明文 HTTP：局域网内能做中间人的人可以篡改它。装机在受控的现场进行，可接受；
+  介意的话用手工安装（3.3），从后台复制证书指纹。
+- 程序包不做额外签名：服务端本身被攻破时可以下发任意程序包。服务端要按内网关键服务器对待（`admin_token`、
+  `data_dir/tls/server.key` 不外泄）。
+- 设备系统层面的安全设置（防火墙、SSH 策略等）目前不做；需要时写进程序包的 `install-agent.sh`/`update.sh`，随包 OTA。
 
 ## 9. 无外网运行
 
@@ -560,12 +627,14 @@ tar czf /backup/display-$(date +%F).tar.gz -C /srv display --exclude='display/da
   时间仍会走，但会慢慢漂移，且没人察觉。管理后台每次打开都会拿浏览器所在电脑的时间比对，相差 2 分钟
   以上会在顶部提示。设备的时钟由代理自动校到服务器时间，所以服务器准了，全部设备就都准了。
   服务器时间偏了且没有可用的时间源时，手工校准：`date -s "2026-10-02 09:30:00"` 后 `hwclock -w`。
-- **server_url 用的域名**：设备**第一次注册时**必须能解析（局域网 DNS 静态记录，或在母镜像的
+- **server_url 用的域名**：设备**第一次注册时**必须能解析（局域网 DNS 静态记录，或在设备的
   `/etc/hosts` 里写死）。之后 DNS 失效会用缓存的地址；但服务器换了 IP 而 DNS 又不可用时，设备找不到新地址。
 - **安装完成后不能再装软件**：ffmpeg、CJK 字体、GStreamer 要在安装时装好（`install-agent.sh`
   已包含设备端所需的全部软件包）。
-- **程序升级**：在一台能联网的机器上 `make package`（或下载 Release），把二进制拷到局域网里的电脑，
+- **程序升级**：在一台能联网的机器上 `make package`（或下载 Release），把程序包拷到局域网里的电脑，
   再从管理后台上传、下发即可——OTA 只在局域网内进行。
+- **装机时要能装 GStreamer**：一键安装会 `apt-get install` 播放依赖，装机那一刻设备需要能访问 Armbian/Debian 软件源
+  （或局域网镜像）。之后就不需要外网了。完全没有外网的现场用母镜像（4.2）。
 
 ## 10. 当前已知简化
 

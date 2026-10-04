@@ -11,7 +11,7 @@
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 系统架构与设计取舍：分发协议、模板渲染机制、可靠性设计、里程碑 |
-| [docs/deployment.md](docs/deployment.md) | 服务端部署、设备单台/母镜像批量部署、日常运维、程序 OTA、验机清单、安全基线 |
+| [docs/deployment.md](docs/deployment.md) | 服务端部署、设备一键装机、日常运维、整包 OTA、现场救援、验机清单、通信安全 |
 | [docs/hardware.md](docs/hardware.md) | 嵌入式硬件选型依据与候选对比，附二手盒子刷机指南 |
 
 ## 目录结构
@@ -43,7 +43,7 @@ bin/                  构建产物与成品包（gitignore，非源码）
 
 ```sh
 make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖，并生成两个口令（见下）
-# → bin/display-agent-<版本>-armv7.tar.gz    设备端一包（含二进制、安装/加固脚本、systemd 单元、INSTALL.md）
+# → bin/display-agent-<版本>-armv7.tar.gz    设备端程序包（程序 + 安装/更新/回滚脚本 + systemd 单元）：装机与 OTA 都用它
 # → bin/display-server-<版本>-<架构>.tar.gz  服务端一包
 # 本机没有 Go 环境时可从 GitHub Actions 产物或 Release 下载这两个包；
 # 但公开仓库的 CI 产物里不含真实口令（占位值），需自行生成，见 docs/deployment.md 2.1
@@ -53,12 +53,13 @@ make package          # 需 Go ≥ 1.24；首次构建需联网拉依赖，并�
 #    模板中文渲染需 CJK 字体：apt install fonts-noto-cjk 并设置 font_path
 #    视频转码需 ffmpeg：apt install ffmpeg（不装视频不转码，高码率原片会让设备过热）
 
-# 2. 管理后台：浏览器打开 http://<服务器>:9000/admin （输入 admin_token）
+# 2. 管理后台：浏览器打开 https://<服务器>:9001/admin （自签证书，首次选"继续访问"；输入 admin_token）
 #    首启已自动建好"左右分屏"模板并设为全局默认，直接在 设备 → 内容 里为每台设备
 #    上传要播的图片/视频即可（视频自动转码；属性在左还是在右用"左右对调"开关切换）
 
-# 3. 设备端：按 docs/deployment.md 用设备端包装好一台样机、做成母镜像批量烧录，
-#    之后设备上电自动注册，升级程序在后台"程序更新"页完成，无需再登录设备
+# 3. 设备端：后台"程序更新"页上传设备端程序包；设备刷公版 Armbian 后以 root 运行
+#      curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=<enroll_token> sh
+#    装完自动重启并注册；之后升级在后台"程序更新"页完成（整包 OTA），无需再登录设备
 ```
 
 无显示环境下把 agent 配置成 `"player": "null"` 即可验证整条分发链路。

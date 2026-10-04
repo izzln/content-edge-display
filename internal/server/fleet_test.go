@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -140,14 +141,33 @@ func agentBinaryFixture(t *testing.T) []byte {
 	return b
 }
 
+// agentPackage 现造一个设备程序包（与 make package 同样的结构）：顶层目录 + VERSION + 程序 + update.sh。
+func agentPackage(t *testing.T, version string, bin []byte, withUpdate bool) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	add := func(name string, body []byte, mode int64) {
+		tw.WriteHeader(&tar.Header{Name: "display-agent-" + version + "/" + name, Mode: mode, Size: int64(len(body)), Typeflag: tar.TypeReg})
+		tw.Write(body)
+	}
+	add("VERSION", []byte(version+"\n"), 0o644)
+	add("display-agent", bin, 0o755)
+	if withUpdate {
+		add("update.sh", []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	}
+	tw.Close()
+	gz.Close()
+	return buf.Bytes()
+}
+
 // uploadFirmwareRaw 发起一次固件上传，不对状态码做断言。
-func uploadFirmwareRaw(t *testing.T, h http.Handler, version string, content []byte) *httptest.ResponseRecorder {
+func uploadFirmwareRaw(t *testing.T, h http.Handler, content []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	mw.WriteField("version", version)
 	mw.WriteField("notes", "test build")
-	fw, _ := mw.CreateFormFile("file", "display-agent-armv7")
+	fw, _ := mw.CreateFormFile("file", "display-agent.tar.gz")
 	fw.Write(content)
 	mw.Close()
 	r := httptest.NewRequest("POST", "/api/v1/admin/firmware", &buf)
@@ -158,9 +178,9 @@ func uploadFirmwareRaw(t *testing.T, h http.Handler, version string, content []b
 	return w
 }
 
-func uploadFirmware(t *testing.T, h http.Handler, version string, content []byte) store.Firmware {
+func uploadFirmware(t *testing.T, h http.Handler, content []byte) store.Firmware {
 	t.Helper()
-	w := uploadFirmwareRaw(t, h, version, content)
+	w := uploadFirmwareRaw(t, h, content)
 	if w.Code != http.StatusOK {
 		t.Fatalf("上传固件失败: %d %s", w.Code, w.Body.String())
 	}
@@ -173,44 +193,35 @@ func uploadFirmware(t *testing.T, h http.Handler, version string, content []byte
 func TestFirmwareUploadRejectsWrongFile(t *testing.T) {
 	_, h := newAdminTestServer(t)
 	bin := agentBinaryFixture(t)
-
-	// 1. 误传 .tar.gz 成品包
-	var gz bytes.Buffer
-	zw := gzip.NewWriter(&gz)
-	zw.Write([]byte("这是成品包不是二进制"))
-	zw.Close()
-	if w := uploadFirmwareRaw(t, h, testAgentVersion, gz.Bytes()); w.Code != http.StatusBadRequest ||
-		!strings.Contains(w.Body.String(), "Go 二进制") {
-		t.Errorf("误传 tar.gz 应被拒绝并提示：%d %s", w.Code, w.Body.String())
-	}
-
-	// 2. 误传本机架构的二进制（测试二进制本身就是一个本机架构的 Go 程序）
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	selfBytes, err := os.ReadFile(self)
+	native, err := os.ReadFile(self) // 测试程序本身就是一个本机架构的 Go 程序
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := uploadFirmwareRaw(t, h, testAgentVersion, selfBytes); w.Code != http.StatusBadRequest ||
-		!strings.Contains(w.Body.String(), "目标平台") {
-		t.Errorf("误传本机架构二进制应被拒绝并提示：%d %s", w.Code, w.Body.String())
+	for _, c := range []struct {
+		desc string
+		pkg  []byte
+		want string
+	}{
+		{"误传裸程序而不是整包", bin, "这不是设备程序包"},
+		{"包里是本机架构的程序", agentPackage(t, testAgentVersion, native, true), "目标平台"},
+		{"VERSION 与程序内置版本不一致", agentPackage(t, "1.0.0", bin, true), "内置版本"},
+		{"缺 update.sh", agentPackage(t, testAgentVersion, bin, false), "update.sh"},
+	} {
+		if w := uploadFirmwareRaw(t, h, c.pkg); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.want) {
+			t.Errorf("%s：应被拒绝并提示 %q，得到 %d %s", c.desc, c.want, w.Code, w.Body.String())
+		}
 	}
 
-	// 3. 版本号与二进制内置版本不一致
-	if w := uploadFirmwareRaw(t, h, "1.0.0", bin); w.Code != http.StatusBadRequest ||
-		!strings.Contains(w.Body.String(), "内置版本") {
-		t.Errorf("版本号不一致应被拒绝并提示：%d %s", w.Code, w.Body.String())
+	pkg := agentPackage(t, testAgentVersion, bin, true)
+	fw := uploadFirmware(t, h, pkg)
+	if fw.Version != testAgentVersion || fw.Size != int64(len(pkg)) {
+		t.Fatalf("正确的整包应当上传成功，版本从包里读：%+v", fw)
 	}
-
-	// 4. 正确的文件 + 正确的版本号
-	fw := uploadFirmware(t, h, testAgentVersion, bin)
-	if fw.Version != testAgentVersion || fw.Size != int64(len(bin)) {
-		t.Fatalf("正确的二进制应当上传成功：%+v", fw)
-	}
-
-	// 被拒绝的三次上传都不得落库，列表里只应有刚才那一个版本
+	// 被拒绝的上传都不得落库，列表里只应有刚才那一个版本
 	if w := do(t, h, adminReq("GET", "/api/v1/admin/firmware", nil), http.StatusOK); strings.Count(w.Body.String(), `"version"`) != 1 {
 		t.Fatalf("固件列表应只有一个版本：%s", w.Body.String())
 	}
@@ -226,11 +237,11 @@ func heartbeatAs(t *testing.T, h http.Handler, agentVer string) {
 
 func TestFirmwareRolloutAndUpdateCommand(t *testing.T) {
 	s, h := newAdminTestServer(t)
-	bin := agentBinaryFixture(t)
+	pkg := agentPackage(t, testAgentVersion, agentBinaryFixture(t), true)
 	heartbeatAs(t, h, "1.0.0")
 
-	fw := uploadFirmware(t, h, testAgentVersion, bin)
-	if fw.Size != int64(len(bin)) || len(fw.SHA256) != 64 {
+	fw := uploadFirmware(t, h, pkg)
+	if fw.Size != int64(len(pkg)) || len(fw.SHA256) != 64 {
 		t.Fatalf("firmware meta wrong: %+v", fw)
 	}
 
@@ -251,8 +262,8 @@ func TestFirmwareRolloutAndUpdateCommand(t *testing.T) {
 
 	// 设备能下载固件
 	w := do(t, h, signedRequest("GET", m.Commands[0].URL, nil), http.StatusOK)
-	if !bytes.Equal(w.Body.Bytes(), bin) {
-		t.Fatalf("firmware download wrong: got %d bytes, want %d", w.Body.Len(), len(bin))
+	if !bytes.Equal(w.Body.Bytes(), pkg) {
+		t.Fatalf("firmware download wrong: got %d bytes, want %d", w.Body.Len(), len(pkg))
 	}
 	do(t, h, httptest.NewRequest("GET", m.Commands[0].URL, nil), http.StatusUnauthorized)
 

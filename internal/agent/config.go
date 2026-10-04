@@ -15,12 +15,15 @@ import (
 // 密钥首启随机生成，两者持久化在 cache_dir/identity.json。
 // 轮询/心跳间隔不在这里配置：由服务端规定，设备照办（见 schedule.go）。
 type Config struct {
-	ServerURL   string `json:"server_url"`
-	DeviceID    string `json:"device_id,omitempty"`
-	EnrollToken string `json:"enroll_token"`
-	CacheDir    string `json:"cache_dir"`
-	InstallDir  string `json:"install_dir"` // OTA 安装布局根目录；空=禁用 OTA
-	Player      string `json:"player"`      // "gst" | "null"
+	ServerURL string `json:"server_url"`
+	// TLSFingerprint 是服务端证书的公钥指纹（sha256 hex，后台与 install.sh 里都有）：
+	// server_url 为 https 时必填，设备只认这把公钥，防止局域网里有人冒充服务端。
+	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
+	DeviceID       string `json:"device_id,omitempty"`
+	EnrollToken    string `json:"enroll_token"`
+	CacheDir       string `json:"cache_dir"`
+	InstallDir     string `json:"install_dir"` // OTA 安装布局根目录；空=禁用 OTA
+	Player         string `json:"player"`      // "gst" | "null"
 	// DisplayMode 是显示屏输出模式（WxH，可带 @刷新率），见 OutputMode；留空用显示屏的首选模式。
 	DisplayMode string `json:"display_mode"`
 }
@@ -61,6 +64,11 @@ func (c *Config) fillDefaults() error {
 		return errors.New("config: enroll_token is required (must match enroll_token in the server's server.json)")
 	}
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
+	c.TLSFingerprint = strings.ToLower(strings.ReplaceAll(c.TLSFingerprint, ":", ""))
+	if strings.HasPrefix(c.ServerURL, "https://") && len(c.TLSFingerprint) != 64 {
+		return errors.New("config: tls_fingerprint is required for an https server_url " +
+			"(64 hex characters, shown in the admin UI and filled in by install.sh)")
+	}
 	if c.CacheDir == "" {
 		c.CacheDir = "/var/lib/display-agent"
 	}
