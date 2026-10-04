@@ -199,6 +199,8 @@ type Server struct {
 	encMu      sync.Mutex
 	encoder    videoEncoder // nil 表示没有可用的 ffmpeg：不收视频
 	encoderErr string       // 不可用的原因（日志与后台提示用）
+	pdf        pdfRenderer  // nil 表示没有可用的 poppler-utils：不收 PDF
+	pdfErr     string
 	jobs       *jobQueue
 	uploadMu   sync.Mutex
 	uploading  map[string]bool // 正在上传的 设备/文件名，见 claimMediaName
@@ -264,11 +266,19 @@ func New(cfg *Config) (*Server, error) {
 		s.encoder = enc
 		log.Printf("video transcoding enabled: %s", enc.Version())
 	}
+	if r, err := transcode.FindPDF(); err != nil {
+		s.pdfErr = err.Error()
+		log.Printf("warning: poppler-utils unavailable, PDF uploads are disabled: %v. "+
+			"Run apt install poppler-utils, then restart the server", err)
+	} else {
+		s.pdf = r
+		log.Printf("PDF rendering enabled: %s", r.Version())
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.stop, s.stopped = cancel, make(chan struct{})
 	go func() {
 		defer close(s.stopped)
-		s.runTranscoder(ctx)
+		s.runJobs(ctx)
 	}()
 	return s, nil
 }
@@ -287,6 +297,23 @@ func (s *Server) setEncoder(enc videoEncoder) {
 	s.encoder, s.encoderErr = enc, ""
 	if enc == nil {
 		s.encoderErr = "test: no encoder configured"
+	}
+}
+
+// pdfRenderer 返回可用的 PDF 渲染器，没有则为 nil。
+func (s *Server) pdfRenderer() pdfRenderer {
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+	return s.pdf
+}
+
+// setPDFRenderer 直接指定 PDF 渲染器（测试用）；nil 表示模拟"没有 poppler-utils"。
+func (s *Server) setPDFRenderer(r pdfRenderer) {
+	s.encMu.Lock()
+	defer s.encMu.Unlock()
+	s.pdf, s.pdfErr = r, ""
+	if r == nil {
+		s.pdfErr = "test: no PDF renderer configured"
 	}
 }
 
@@ -321,9 +348,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/device/register", s.handleRegister)
 	mux.HandleFunc("GET /api/v1/device/manifest", s.handleManifest)
 	mux.HandleFunc("POST /api/v1/device/heartbeat", s.handleHeartbeat)
-	mux.HandleFunc("GET /media/{device}/{file}", s.serveDeviceFile(func(dev string) string { return s.deviceMediaDir(dev) }))
-	mux.HandleFunc("GET /render/{device}/{file}", s.serveDeviceFile(func(dev string) string { return filepath.Join(s.renderedDir(), dev) }))
-	mux.HandleFunc("GET /firmware/{file}", s.serveDeviceFile(func(string) string { return s.firmwareDir() }))
+	mux.HandleFunc("GET /media/{device}/{file}", s.serveDeviceFile(func(dev string, _ *http.Request) string { return s.deviceMediaDir(dev) }))
+	// PDF 的逐页图片：/media/<设备>/<文档名>/p001.jpg
+	mux.HandleFunc("GET /media/{device}/{doc}/{file}", s.serveDeviceFile(func(dev string, r *http.Request) string {
+		doc := r.PathValue("doc")
+		if !manifest.SafeFileName(doc) || manifest.TypeOf(doc) != "document" {
+			return ""
+		}
+		return filepath.Join(s.deviceMediaDir(dev), manifest.PagesDir, doc)
+	}))
+	mux.HandleFunc("GET /render/{device}/{file}", s.serveDeviceFile(func(dev string, _ *http.Request) string { return filepath.Join(s.renderedDir(), dev) }))
+	mux.HandleFunc("GET /firmware/{file}", s.serveDeviceFile(func(string, *http.Request) string { return s.firmwareDir() }))
 	s.registerAdmin(mux)
 	return mux
 }
@@ -420,7 +455,7 @@ func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Devic
 // serveDeviceFile 生成设备下载文件的处理器（媒体、渲染图、固件共用）：
 // 校验签名；路径里带 {device} 的只允许访问自己的目录；文件名不得含路径成分。
 // http.ServeFile 原生支持 Range，设备端据此断点续传。
-func (s *Server) serveDeviceFile(dirOf func(deviceID string) string) http.HandlerFunc {
+func (s *Server) serveDeviceFile(dirOf func(deviceID string, r *http.Request) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dev, ok := s.deviceAuth(w, r)
 		if !ok {
@@ -430,12 +465,12 @@ func (s *Server) serveDeviceFile(dirOf func(deviceID string) string) http.Handle
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		name := r.PathValue("file")
-		if !manifest.SafeFileName(name) {
+		name, dir := r.PathValue("file"), dirOf(dev.ID, r)
+		if !manifest.SafeFileName(name) || dir == "" {
 			http.Error(w, "bad file name", http.StatusBadRequest)
 			return
 		}
-		http.ServeFile(w, r, filepath.Join(dirOf(dev.ID), name))
+		http.ServeFile(w, r, filepath.Join(dir, name))
 	}
 }
 

@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,6 +71,45 @@ func TestBuildItemsFollowsGivenOrder(t *testing.T) {
 	}
 	if img.URL != "/media/dev-001/a.jpg" || len(img.SHA256) != 64 || img.Size != int64(len("image-bytes")) {
 		t.Fatalf("条目字段错误：%+v", img)
+	}
+}
+
+// 文档在播放列表里是一项，下发给设备时按页序展开成图片条目（与图片同样的停留时长）；
+// 还没渲染完（页面目录不存在）的文档不下发。
+func TestBuildItemsExpandsDocuments(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.jpg", "image-bytes")
+	writeFile(t, dir, "季度报告.pdf", "pdf-bytes")
+	writeFile(t, dir, "rendering.pdf", "pdf-bytes")
+	pages := filepath.Join(dir, PagesDir, "季度报告.pdf")
+	os.MkdirAll(pages, 0o755)
+	for _, p := range []string{"p002.jpg", "p001.jpg", "p010.jpg"} {
+		writeFile(t, pages, p, "page-"+p)
+	}
+
+	if TypeOf("x.PDF") != "document" {
+		t.Fatal(".pdf 应识别为文档")
+	}
+	if names, _ := ListMedia(dir); len(names) != 3 {
+		t.Fatalf("页面目录不能被当成媒体：%v", names)
+	}
+	items, err := BuildItems(dir, "dev 1", []string{"季度报告.pdf", "rendering.pdf", "a.jpg"}, 7, NewHashCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, it := range items {
+		got = append(got, it.Name)
+		if it.Type != "image" || it.Duration != 7 {
+			t.Fatalf("文档页面应是带停留时长的图片：%+v", it)
+		}
+	}
+	want := []string{"季度报告-p001.jpg", "季度报告-p002.jpg", "季度报告-p010.jpg", "a.jpg"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("展开顺序 %v，期望 %v", got, want)
+	}
+	if items[0].URL != "/media/dev%201/"+url.PathEscape("季度报告.pdf")+"/p001.jpg" {
+		t.Fatalf("页面 URL：%s", items[0].URL)
 	}
 }
 

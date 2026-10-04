@@ -73,6 +73,15 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		info["ffmpeg_error"] = s.encoderErr
 		s.encMu.Unlock()
 	}
+	info["pdf"] = false
+	if r := s.pdfRenderer(); r != nil {
+		info["pdf"], info["pdftoppm"] = true, r.Version()
+	} else {
+		s.encMu.Lock()
+		info["pdf_error"] = s.pdfErr
+		s.encMu.Unlock()
+	}
+	info["pdf_limits"] = map[string]int{"max_mb": maxPDFUploadBytes >> 20, "max_pages": maxPDFPages}
 	writeJSON(w, info)
 }
 
