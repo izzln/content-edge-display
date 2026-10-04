@@ -79,13 +79,18 @@ var videoExts = map[string]bool{
 	".mp4": true, ".mkv": true, ".mov": true, ".avi": true, ".ts": true, ".webm": true, ".m4v": true,
 }
 
+// PagesDir 是媒体目录下存放文档逐页渲染图的隐藏目录：<媒体目录>/.pages/<文档名>/p001.jpg …
+// 隐藏目录不会被 ListMedia 当成媒体；清单生成时文档展开成这些页面。
+const PagesDir = ".pages"
+
 // SafeFileName 判断 name 是不是可以直接拼进目录的单个文件名：不含路径成分、不是隐藏文件。
 // 设备下载、后台删除/缩略图、构建清单都要过这一关。
 func SafeFileName(name string) bool {
 	return name != "" && name == filepath.Base(name) && !strings.HasPrefix(name, ".") && !strings.ContainsRune(name, '\\')
 }
 
-// TypeOf 根据扩展名返回条目类型，不支持的类型返回空串。
+// TypeOf 根据扩展名返回条目类型（image | video | document），不支持的类型返回空串。
+// document 只出现在服务端的播放列表里，下发给设备时展开成逐页的图片条目。
 func TypeOf(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
 	switch {
@@ -93,6 +98,8 @@ func TypeOf(name string) string {
 		return "image"
 	case videoExts[ext]:
 		return "video"
+	case ext == ".pdf":
+		return "document"
 	default:
 		return ""
 	}
@@ -199,34 +206,66 @@ func ListMedia(dir string) ([]string, error) {
 
 // BuildItems 按给定顺序为 names 构建播放条目。已不存在的文件会被跳过
 // （管理后台的播放列表可能残留刚被删掉的文件名，不该因此让整份清单构建失败）。
+// 文档展开成逐页的图片条目，与图片一样按 imageDuration 停留。
 func BuildItems(dir, deviceID string, names []string, imageDuration int, cache *HashCache) ([]Item, error) {
 	items := []Item{}
-	for _, name := range names {
-		if !SafeFileName(name) || TypeOf(name) == "" {
-			continue
-		}
-		info, err := os.Stat(filepath.Join(dir, name))
+	add := func(path, name, rawURL, typ string) error {
+		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				continue
+				return nil
 			}
-			return nil, err
+			return err
 		}
-		sum, err := cache.FileSHA256(filepath.Join(dir, name), info.Size(), info.ModTime().Unix())
+		sum, err := cache.FileSHA256(path, info.Size(), info.ModTime().Unix())
 		if err != nil {
-			return nil, err
+			return err
 		}
-		item := Item{
-			Type:   TypeOf(name),
-			Name:   name,
-			URL:    "/media/" + url.PathEscape(deviceID) + "/" + url.PathEscape(name),
-			SHA256: sum,
-			Size:   info.Size(),
-		}
-		if item.Type == "image" {
+		item := Item{Type: typ, Name: name, URL: rawURL, SHA256: sum, Size: info.Size()}
+		if typ == "image" {
 			item.Duration = imageDuration
 		}
 		items = append(items, item)
+		return nil
+	}
+	base := "/media/" + url.PathEscape(deviceID) + "/"
+	for _, name := range names {
+		if !SafeFileName(name) {
+			continue
+		}
+		var err error
+		switch typ := TypeOf(name); typ {
+		case "image", "video":
+			err = add(filepath.Join(dir, name), name, base+url.PathEscape(name), typ)
+		case "document":
+			stem := strings.TrimSuffix(name, filepath.Ext(name))
+			for _, page := range Pages(dir, name) {
+				err = add(filepath.Join(dir, PagesDir, name, page), stem+"-"+page,
+					base+url.PathEscape(name)+"/"+url.PathEscape(page), "image")
+				if err != nil {
+					break
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	return items, nil
+}
+
+// Pages 返回文档已渲染好的页面文件名（按页序）；还没渲染或目录不存在时为空。
+func Pages(dir, doc string) []string {
+	entries, err := os.ReadDir(filepath.Join(dir, PagesDir, doc))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && SafeFileName(e.Name()) && TypeOf(e.Name()) == "image" {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
 }

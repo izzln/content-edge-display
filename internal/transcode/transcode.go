@@ -34,16 +34,18 @@ import (
 type Spec struct {
 	MaxW, MaxH  int // 输出不超过这个尺寸（等比缩小，不放大）
 	MaxFPS      int // 帧率上限
-	BitrateK    int // 目标码率（kbps）
-	MaxBitrateK int // 瞬时码率上限（kbps）
+	CRF         int // 画质（x264 CRF，越小越清晰）：码率随内容走，静态画面只用很少的码率
+	MaxBitrateK int // 码率上限（kbps）：复杂画面也不超过它
 }
 
 // DefaultSpec 针对 Orange Pi One + 1440×900 的取值。
 //
-// 4Mbps 对 1440×900 的宣传片绰绰有余（蓝光 1080p 也就 20~40Mbps，而这里分辨率更低、
-// 内容多为静态画面与缓慢运镜），同时把解码与发热压在 H3 吃得消的范围内。
+// 按画质（CRF）而不是按固定码率编码：固定码率会把简单的素材（静态画面、幻灯片式动画）
+// 也撑到目标码率，原片 75kbps 的动画转出来变成 2.5Mbps，文件大十倍、画质却没变好。
+// CRF 22 在 1440×900 上已看不出压缩痕迹；4Mbps 的上限对宣传片绰绰有余（蓝光 1080p 也就
+// 20~40Mbps，而这里分辨率更低），同时把解码与发热压在 H3 吃得消的范围内。
 func DefaultSpec() Spec {
-	return Spec{MaxW: 1440, MaxH: 900, MaxFPS: 30, BitrateK: 2500, MaxBitrateK: 4000}
+	return Spec{MaxW: 1440, MaxH: 900, MaxFPS: 30, CRF: 22, MaxBitrateK: 4000}
 }
 
 // Encoder 封装一个可用的 ffmpeg。
@@ -162,7 +164,7 @@ func (e *Encoder) videoArgs(src, dst string, spec Spec) []string {
 		// 设备正常走硬解用不着它；留着是给硬解失效时兜底——退化成软解也不至于放不动。
 		"-tune", "fastdecode",
 		"-pix_fmt", "yuv420p",
-		"-b:v", strconv.Itoa(spec.BitrateK) + "k",
+		"-crf", strconv.Itoa(spec.CRF),
 		"-maxrate", strconv.Itoa(spec.MaxBitrateK) + "k",
 		"-bufsize", strconv.Itoa(spec.MaxBitrateK*2) + "k",
 		"-g", "60", // 2 秒一个关键帧，循环播放时跳转快

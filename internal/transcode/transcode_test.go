@@ -96,13 +96,30 @@ func TestVideoNormalizesHotSource(t *testing.T) {
 		t.Fatalf("码率没压住：2 秒产物 %d 字节", fi.Size())
 	}
 	data, _ := os.ReadFile(dst)
-	// fastdecode：设备是软解，要关掉 CABAC 与环路滤波（x264 把编码参数写在码流的 SEI 里）
+	// fastdecode：硬解失效退化成软解时也放得动——关掉 CABAC 与环路滤波（x264 把编码参数写在码流的 SEI 里）
 	if !bytes.Contains(data, []byte("cabac=0")) || !bytes.Contains(data, []byte("deblock=0")) {
 		t.Fatal("产物应按 fastdecode 编码（cabac=0、deblock=0）")
 	}
 	// faststart：moov 应在 mdat 之前，设备边下边播、断点续传后都能立即打开
 	if m, d := bytes.Index(data, []byte("moov")), bytes.Index(data, []byte("mdat")); m < 0 || d < 0 || m > d {
 		t.Fatal("产物没有做 faststart（moov 应在 mdat 之前）")
+	}
+}
+
+// 简单的素材（静态画面、幻灯片式动画）不能被撑到高码率：按画质编码，码率随内容走。
+// 回归：曾按固定 2.5Mbps 编码，原片 75kbps 的动画转出来大了十倍。
+func TestVideoSimpleSourceStaysSmall(t *testing.T) {
+	e := needFFmpeg(t)
+	dir := t.TempDir()
+	src := makeClip(t, dir, "simple.mp4", "-f", "lavfi", "-i", "testsrc=size=852x480:rate=30:duration=6",
+		"-c:v", "libx264", "-b:v", "100k")
+	dst := filepath.Join(dir, "out.mp4")
+	if err := e.Video(context.Background(), src, dst, DefaultSpec(), nil); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(dst)
+	if kbps := fi.Size() * 8 / 1000 / 6; kbps > 600 {
+		t.Fatalf("简单素材转出来 %dkbps，码率应随内容走（远低于 %dkbps 上限）", kbps, DefaultSpec().MaxBitrateK)
 	}
 }
 

@@ -37,8 +37,9 @@ func newTestServer(t *testing.T) (*Server, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	// 默认按"没装 ffmpeg"跑，结果不依赖测试机环境；转码相关测试自己注入转码器。
+	// 默认按"没装 ffmpeg、没装 poppler"跑，结果不依赖测试机环境；相关测试自己注入。
 	s.setEncoder(nil)
+	s.setPDFRenderer(nil)
 	// 设备只有自注册这一条路径，测试里直接写进 store，省去逐个走注册接口。
 	addTestDevice(t, s, testDeviceID, testSecret)
 	addTestDevice(t, s, "dev-002", "other-secret")
@@ -463,7 +464,7 @@ func TestConsoleLogsWorkNotHeartbeats(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"device dev-001 online", "upload started: device dev-001, a.jpg", "upload done: device dev-001, a.jpg",
-		"queued for transcoding as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4", "transcoding: device dev-001, b.mp4 50%",
+		"queued for processing as b.mp4", "upload rejected: device dev-001, c.txt", "transcode started: device dev-001, b.mp4", "transcoding: device dev-001, b.mp4 50%",
 		"transcode done: device dev-001, b.mp4", "new content pushed: device dev-001", "admin PUT /devices/dev-001/attributes -> 200",
 	} {
 		if !strings.Contains(out, want) {

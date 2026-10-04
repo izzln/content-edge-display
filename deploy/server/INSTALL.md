@@ -27,6 +27,9 @@ cp /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /srv/display/fonts/
 # 不装的话后台不能上传视频（未转码的原片码率过高，会让设备过热关机）。
 apt install -y ffmpeg
 
+# PDF：上传的 PDF 逐页渲染成图片轮播。不装的话后台不能上传 PDF。
+apt install -y poppler-utils
+
 #   server.json 里的 admin_token / enroll_token 已由 make 生成填好；
 #   若是从 GitHub Releases 下载的包，里面是占位值 change-me，服务端会拒绝启动，
 #   需在构建机上执行 make tokens 生成后替换。
@@ -34,6 +37,7 @@ apt install -y ffmpeg
 
 useradd -r -s /usr/sbin/nologin display 2>/dev/null || true
 sudo -u display ffmpeg -version | head -1   # 必须以服务的运行用户能跑通（见下方说明）
+sudo -u display pdftoppm -v 2>&1 | head -1  # 同上
 chown -R display:display /srv/display
 install -m 0644 display-server.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now display-server

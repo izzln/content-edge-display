@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -40,10 +43,11 @@ const maxMediaStem = 100
 // 让运营方看到进度和失败原因；它们排在已就绪文件之后，不参与排序与播放。
 type MediaFile struct {
 	Name     string `json:"name"`
-	Type     string `json:"type"` // image | video
+	Type     string `json:"type"` // image | video | document
 	Size     int64  `json:"size"`
 	Status   string `json:"status"` // ready | queued | transcoding | failed
 	Progress int    `json:"progress,omitempty"`
+	Pages    int    `json:"pages,omitempty"` // 文档的页数（渲染中为已知的总页数）
 	Error    string `json:"error,omitempty"`
 }
 
@@ -81,8 +85,13 @@ func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
 	}
 	out := make([]MediaFile, 0, len(names))
 	for _, name := range names {
-		if info, err := os.Stat(filepath.Join(s.deviceMediaDir(deviceID), name)); err == nil {
-			out = append(out, MediaFile{Name: name, Type: manifest.TypeOf(name), Size: info.Size(), Status: mediaReady})
+		dir := s.deviceMediaDir(deviceID)
+		if info, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			f := MediaFile{Name: name, Type: manifest.TypeOf(name), Size: info.Size(), Status: mediaReady}
+			if f.Type == "document" {
+				f.Pages = len(manifest.Pages(dir, name))
+			}
+			out = append(out, f)
 		}
 	}
 	for _, j := range s.jobs.snapshot(deviceID) {
@@ -90,8 +99,12 @@ func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
 		if info, err := os.Stat(j.src); err == nil {
 			size = info.Size()
 		}
-		out = append(out, MediaFile{Name: j.name, Type: "video", Size: size,
-			Status: j.status, Progress: j.progress, Error: j.err})
+		typ := "video"
+		if j.kind == jobPDF {
+			typ = "document"
+		}
+		out = append(out, MediaFile{Name: j.name, Type: typ, Size: size,
+			Status: j.status, Progress: j.progress, Pages: j.pages, Error: j.err})
 	}
 	return out, nil
 }
@@ -163,6 +176,7 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 		Reason string `json:"reason"`
 	}
 	accepted := []string{}    // 已就绪，直接进播放列表
+	reused := []string{}      // 其中复用了缓存区里已处理好的结果的
 	transcoding := []string{} // 已进入转码队列，完成后自动追加到播放列表末尾
 	rejected := []rejection{}
 	for {
@@ -182,7 +196,7 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 		log.Printf("upload started: device %s, %s (%s)", dev.ID, orig, uploadSizeHint(r))
 		start := time.Now()
 		cr := &countingReader{r: part}
-		name, queued, reason := s.saveUploadedMedia(dev.ID, dir, cr, orig)
+		name, outcome, reason := s.saveUploadedMedia(dev.ID, dir, cr, orig)
 		part.Close()
 		took := time.Since(start).Round(100 * time.Millisecond)
 		if reason != nil {
@@ -190,10 +204,14 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 			rejected = append(rejected, rejection{Name: orig, Reason: reason.ui})
 			continue
 		}
-		if queued {
-			log.Printf("upload done: device %s, %s (%s in %s), queued for transcoding as %s", dev.ID, orig, humanBytes(cr.n), took, name)
+		switch outcome {
+		case uploadQueued:
+			log.Printf("upload done: device %s, %s (%s in %s), queued for processing as %s", dev.ID, orig, humanBytes(cr.n), took, name)
 			transcoding = append(transcoding, name)
-		} else {
+		case uploadReused:
+			log.Printf("upload done: device %s, %s (%s in %s), reused cached result, added to playlist", dev.ID, name, humanBytes(cr.n), took)
+			accepted, reused = append(accepted, name), append(reused, name)
+		default:
 			log.Printf("upload done: device %s, %s (%s in %s), added to playlist", dev.ID, name, humanBytes(cr.n), took)
 			accepted = append(accepted, name)
 		}
@@ -210,7 +228,8 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"accepted": accepted, "transcoding": transcoding, "rejected": rejected, "playlist": files})
+	s.kickCache()
+	writeJSON(w, map[string]any{"accepted": accepted, "reused": reused, "transcoding": transcoding, "rejected": rejected, "playlist": files})
 }
 
 // rejectReason 是拒收原因：ui 显示在后台（中文，告诉运营方怎么办），log 写进控制台（英文）。
@@ -218,53 +237,80 @@ type rejectReason struct{ ui, log string }
 
 func reject(ui, log string) *rejectReason { return &rejectReason{ui: ui, log: log} }
 
-// saveUploadedMedia 把一个上传分片落盘并归一化。
-// 返回最终文件名、是否进入了转码队列，或拒收原因。
+// uploadOutcome 是一个上传文件的去向。
+type uploadOutcome int
+
+const (
+	uploadReady  uploadOutcome = iota // 已就绪（图片）
+	uploadQueued                      // 进入后台处理（视频转码、PDF 渲染）
+	uploadReused                      // 同一原片处理过：直接复用缓存区里的结果，立即就绪
+)
+
+// saveUploadedMedia 把一个上传分片落盘并归一化，返回最终文件名与去向，或拒收原因。
 //
 //   - 图片：校验能解码，过大的缩到画布尺寸以内，立即就绪；
 //   - 视频：原片放进暂存区排队转码，产物名统一为 .mp4。没有 ffmpeg 就不收视频——
 //     未转码的原片码率过高，会让设备过热关机，宁可当场拒绝。
-func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name string) (string, bool, *rejectReason) {
+//   - PDF：放进暂存区排队逐页渲染成图片（见 renderPDF）。没有 poppler-utils 就不收。
+//
+// 落盘时顺带算原片的 sha256：同一原片按同样参数处理过、结果还在缓存区里，就直接复用（见 cache.go）。
+// 设备在用的文件已占满缓存区配额时拒收。
+func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name string) (string, uploadOutcome, *rejectReason) {
 	name = cleanMediaName(name)
-	isVideo := false
+	kind := ""
 	switch manifest.TypeOf(name) {
 	case "image":
 		if ext := strings.ToLower(filepath.Ext(name)); ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
-			return "", false, reject("图片仅支持 png/jpg", "unsupported image format")
+			return "", 0, reject("图片仅支持 png/jpg", "unsupported image format")
 		}
+		kind = "image"
 	case "video":
 		if s.videoEncoder() == nil {
-			return "", false, reject("服务端 ffmpeg 不可用，暂不能上传视频（未转码的视频会让设备过热）；原因见后台顶部提示",
+			return "", 0, reject("服务端 ffmpeg 不可用，暂不能上传视频（未转码的视频会让设备过热）；原因见后台顶部提示",
 				"ffmpeg unavailable, videos are not accepted")
 		}
-		isVideo, name = true, transcode.OutputName(name)
+		kind, name = "video", transcode.OutputName(name)
+	case "document":
+		if s.pdfRenderer() == nil {
+			return "", 0, reject("服务端没装 poppler-utils，暂不能上传 PDF；原因见后台顶部提示",
+				"poppler-utils unavailable, PDFs are not accepted")
+		}
+		kind = "pdf"
 	default:
-		return "", false, reject("不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等）", "unsupported file type")
+		return "", 0, reject("不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等，PDF）", "unsupported file type")
+	}
+	if st := s.cacheStats(); st.InUseBytes >= s.quotaBytes() {
+		return "", 0, reject(fmt.Sprintf("缓存区已被设备在用的文件占满（%s / %dGB），请在「存储」页调大缓存区，或先删除不再使用的内容",
+			humanBytes(st.InUseBytes), s.store.CacheQuotaGB()), "cache quota is full of in-use files")
 	}
 	name, release, err := s.claimMediaName(deviceID, name)
 	if err != nil {
-		return "", false, reject(err.Error(), err.Error())
+		return "", 0, reject(err.Error(), err.Error())
 	}
 	defer release()
 
 	limit, stageDir := int64(maxImageUploadBytes), dir
-	if isVideo {
+	if kind != "image" {
 		limit, stageDir = maxVideoUploadBytes, filepath.Join(s.incomingDir(), deviceID)
+		if kind == "pdf" {
+			limit = maxPDFUploadBytes
+		}
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
-			return "", false, reject(err.Error(), err.Error())
+			return "", 0, reject(err.Error(), err.Error())
 		}
 	}
 	tmp := filepath.Join(stageDir, "."+name+".part")
 	out, err := os.Create(tmp)
 	if err != nil {
-		return "", false, reject(err.Error(), err.Error())
+		return "", 0, reject(err.Error(), err.Error())
 	}
 	// 多读 1 字节：读得出来说明超限了。
-	n, err := io.Copy(out, io.LimitReader(part, limit+1))
+	h := sha256.New()
+	n, err := io.Copy(out, io.TeeReader(io.LimitReader(part, limit+1), h))
 	out.Close()
-	fail := func(reason *rejectReason) (string, bool, *rejectReason) {
+	fail := func(reason *rejectReason) (string, uploadOutcome, *rejectReason) {
 		os.Remove(tmp)
-		return "", false, reason
+		return "", 0, reason
 	}
 	switch {
 	case errors.Is(err, io.ErrUnexpectedEOF):
@@ -277,10 +323,22 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name st
 		return fail(reject(fmt.Sprintf("文件超过上限 %dMB", limit>>20), fmt.Sprintf("exceeds the %dMB limit", limit>>20)))
 	}
 
-	if isVideo {
-		// 编码不用查：转码会统一成 H.264。是不是真视频交给 ffmpeg 判断，失败会显示在列表里。
-		s.jobs.add(&transcodeJob{deviceID: deviceID, name: name, src: tmp, status: jobQueued})
-		return name, true, nil
+	key := processKey(kind, hex.EncodeToString(h.Sum(nil)))
+	if reused, err := s.cacheReuse(dir, name, key); err != nil {
+		log.Printf("cache: reuse failed, processing again: %v", err)
+	} else if reused {
+		os.Remove(tmp)
+		return name, uploadReused, nil
+	}
+	if kind != "image" {
+		// 视频：编码不用查，转码会统一成 H.264；是不是真视频交给 ffmpeg 判断。
+		// PDF：页数、加密与否交给 pdfinfo 判断。失败都会显示在列表里。
+		jk := jobVideo
+		if kind == "pdf" {
+			jk = jobPDF
+		}
+		s.jobs.add(&mediaJob{kind: jk, deviceID: deviceID, name: name, src: tmp, key: key, status: jobQueued})
+		return name, uploadQueued, nil
 	}
 	if reason := checkImage(tmp); reason != nil {
 		return fail(reason)
@@ -292,7 +350,10 @@ func (s *Server) saveUploadedMedia(deviceID, dir string, part io.Reader, name st
 	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
 		return fail(reject(err.Error(), err.Error()))
 	}
-	return name, false, nil
+	if err := s.cacheAdopt(dir, name, key); err != nil {
+		log.Printf("cache: cannot add %s to the cache: %v", name, err)
+	}
+	return name, uploadReady, nil
 }
 
 // cleanMediaName 把浏览器给的原文件名整理成能安全落盘、放进 URL 的名字——整理而不是拒收：
@@ -477,18 +538,35 @@ func (s *Server) handleReorderDeviceMedia(w http.ResponseWriter, r *http.Request
 	writeJSON(w, files)
 }
 
-// handleDeviceMediaThumb 返回播放列表里一张图片的缩略图（后台列表用）。视频没有缩略图，回 404。
+// handleDeviceMediaThumb 返回播放列表里一张图片的缩略图（后台列表用）；PDF 返回某一页
+// （?page=n，默认第 1 页）。视频没有缩略图，回 404。
 func (s *Server) handleDeviceMediaThumb(w http.ResponseWriter, r *http.Request) {
 	dev, ok := s.pathDevice(w, r)
 	if !ok {
 		return
 	}
 	name := r.PathValue("file")
-	if !manifest.SafeFileName(name) || manifest.TypeOf(name) != "image" {
+	if !manifest.SafeFileName(name) {
 		http.NotFound(w, r)
 		return
 	}
-	path := filepath.Join(s.deviceMediaDir(dev.ID), name)
+	dir := s.deviceMediaDir(dev.ID)
+	path := filepath.Join(dir, name)
+	switch manifest.TypeOf(name) {
+	case "image":
+	case "document":
+		pages := manifest.Pages(dir, name)
+		n, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		n = max(n, 1)
+		if n > len(pages) {
+			http.NotFound(w, r)
+			return
+		}
+		path = filepath.Join(dir, manifest.PagesDir, name, pages[n-1])
+	default:
+		http.NotFound(w, r)
+		return
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		http.NotFound(w, r)
@@ -522,13 +600,16 @@ func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "bad file name", http.StatusBadRequest)
 		return
 	}
-	if s.jobs.remove(dev.ID, name) { // 转码中的会被取消，失败的直接移除
-		log.Printf("transcode cancelled: device %s, %s (deleted by operator)", dev.ID, name)
+	if s.jobs.remove(dev.ID, name) { // 处理中的会被取消，失败的直接移除
+		log.Printf("processing cancelled: device %s, %s (deleted by operator)", dev.ID, name)
 	}
+	s.cacheTouch(filepath.Join(s.deviceMediaDir(dev.ID), name)) // 淘汰按"最后一次在用"排序
 	if err := os.Remove(filepath.Join(s.deviceMediaDir(dev.ID), name)); err != nil && !os.IsNotExist(err) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	os.RemoveAll(filepath.Join(s.deviceMediaDir(dev.ID), manifest.PagesDir, name)) // PDF 的逐页图片
+	s.kickCache()
 	kept := []string{}
 	for _, n := range s.store.Display(dev.ID).Playlist {
 		if n != name {

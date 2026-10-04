@@ -38,10 +38,10 @@ jobs:
 
       # 转码测试需要真实 ffmpeg（含 libx264/libx265），播放进程测试需要 Python + GStreamer
       # （用 fakesink 代替显示、软解代替 cedrus）；没装时那些用例会跳过，所以这里显式装上
-      - name: 安装 ffmpeg 与 GStreamer
+      - name: 安装 ffmpeg、poppler（PDF）、qpdf（造加密 PDF）与 GStreamer
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends ffmpeg python3-gi python3-gst-1.0 \
+          sudo apt-get install -y -q --no-install-recommends ffmpeg poppler-utils qpdf python3-gi python3-gst-1.0 \
             gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad gstreamer1.0-libav
 
