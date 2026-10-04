@@ -4,17 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
 // PageWidth 是 PDF 页面渲染出的宽度（像素，高度按比例）：与画布同宽，设备照常按 cover 裁剪缩放。
-const PageWidth = 1440
+const PageWidth = manifest.CanvasW
 
 // ErrPDFEncrypted 表示 PDF 有密码保护，渲染不了。
 var ErrPDFEncrypted = errors.New("PDF is password protected")
@@ -29,15 +30,12 @@ type PDFRenderer struct {
 // （与 ffmpeg 一样，"装了却找不到"多半是服务以 display 用户运行、PATH 不同）。
 func FindPDF() (*PDFRenderer, error) {
 	r := &PDFRenderer{}
-	for _, t := range []struct {
-		name string
-		dst  *string
-	}{{"pdfinfo", &r.info}, {"pdftoppm", &r.toppm}} {
-		path, err := exec.LookPath(t.name)
-		if err != nil {
-			return nil, fmt.Errorf("%s not found in PATH (service PATH=%s, user %s)", t.name, os.Getenv("PATH"), currentUser())
-		}
-		*t.dst = path
+	var err error
+	if r.info, err = lookTool("pdfinfo"); err != nil {
+		return nil, err
+	}
+	if r.toppm, err = lookTool("pdftoppm"); err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -49,13 +47,8 @@ func FindPDF() (*PDFRenderer, error) {
 	return r, nil
 }
 
-// Version 返回 pdftoppm 的版本行，用于在管理后台显示。
-func (r *PDFRenderer) Version() string {
-	if r == nil {
-		return ""
-	}
-	return r.version
-}
+// Version 返回 pdftoppm 的版本行（启动日志用）。
+func (r *PDFRenderer) Version() string { return r.version }
 
 var pagesLine = regexp.MustCompile(`(?m)^Pages:\s+(\d+)`)
 
@@ -75,15 +68,18 @@ func (r *PDFRenderer) Pages(ctx context.Context, src string) (int, error) {
 	return strconv.Atoi(string(m[1]))
 }
 
+// pageStem 是第 n 页（从 1 起）渲染产物去掉 .jpg 的名字（pdftoppm 自己加后缀）。
+func pageStem(n int) string { return fmt.Sprintf("p%03d", n) }
+
 // PageName 是第 n 页（从 1 起）渲染产物的文件名。
-func PageName(n int) string { return fmt.Sprintf("p%03d.jpg", n) }
+func PageName(n int) string { return pageStem(n) + ".jpg" }
 
 // Render 把 src 的前 pages 页逐页渲染到 dir（p001.jpg …），每完成一页回调一次（可为 nil）。
 // 逐页调用 pdftoppm 而不是一次渲染全部，是为了能报进度、能随时取消。
 func (r *PDFRenderer) Render(ctx context.Context, src, dir string, pages int, onPage func(done int)) error {
 	for n := 1; n <= pages; n++ {
 		page := strconv.Itoa(n)
-		prefix := filepath.Join(dir, strings.TrimSuffix(PageName(n), ".jpg"))
+		prefix := filepath.Join(dir, pageStem(n))
 		out, err := exec.CommandContext(ctx, r.toppm, "-f", page, "-l", page, "-singlefile",
 			"-jpeg", "-jpegopt", "quality=90", "-scale-to-x", strconv.Itoa(PageWidth), "-scale-to-y", "-1",
 			src, prefix).CombinedOutput()

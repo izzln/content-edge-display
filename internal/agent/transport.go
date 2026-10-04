@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/fsutil"
+	"github.com/izzln/content-edge-display/internal/sign"
 )
 
 // 设备与服务端都在局域网里，系统必须在**没有外网**时照常工作。传输层为此做了三件事：
@@ -26,10 +32,11 @@ const (
 	connectTimeout = 10 * time.Second
 )
 
-// newTransport 构造设备端共用的 HTTP 传输层。
-func newTransport(cacheDir string, clock *serverClock, sched *schedule) http.RoundTripper {
+// newTransport 构造设备端共用的 HTTP 传输层：只接受公钥指纹等于 pin 的服务端证书。
+func newTransport(cacheDir, pin string, clock *serverClock, sched *schedule) clockTransport {
 	r := &fallbackResolver{path: filepath.Join(cacheDir, "server-addr")}
 	t := &http.Transport{
+		TLSClientConfig:       pinnedTLS(pin),
 		Proxy:                 nil, // 永远直连
 		DialContext:           r.dial,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -40,13 +47,52 @@ func newTransport(cacheDir string, clock *serverClock, sched *schedule) http.Rou
 	return clockTransport{base: t, clock: clock, sched: sched}
 }
 
-// fallbackResolver 解析服务端地址，失败时退回上次成功解析的地址。
+// clockTransport 在每个 HTTP 响应上更新 serverClock 与服务端规定的轮询/心跳间隔（schedule.go）。
+type clockTransport struct {
+	base  *http.Transport
+	clock *serverClock
+	sched *schedule
+}
+
+func (t clockTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(r)
+	if err == nil {
+		t.clock.observe(resp.Header)
+		t.sched.observe(resp.Header)
+	}
+	return resp, err
+}
+
+// CloseIdleConnections 让 http.Client.CloseIdleConnections 生效（Client 只认实现了它的 Transport）。
+func (t clockTransport) CloseIdleConnections() { t.base.CloseIdleConnections() }
+
+// pinnedTLS 固定服务端证书：不走 CA 链，也不看有效期与主机名（设备时钟可能不准、服务器 IP 会变），
+// 只要求对端证书的公钥指纹等于装机时记下的那个。服务端证书是自签的，见 server/tls.go。
+func pinnedTLS(pin string) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true, // 由下面的 VerifyConnection 按指纹校验
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("server presented no certificate")
+			}
+			if got := sign.CertFingerprint(cs.PeerCertificates[0]); got != pin {
+				return fmt.Errorf("server certificate fingerprint %s does not match tls_fingerprint %s "+
+					"(someone may be impersonating the server, or the server was reinstalled without its data_dir/tls)", got, pin)
+			}
+			return nil
+		},
+		MinVersion: tls.VersionTLS12,
+	}
+}
+
+// fallbackResolver 解析服务端地址，失败时退回上次成功连上的地址（内存里一份，cache_dir 里落盘一份）。
 type fallbackResolver struct {
 	path string
 
 	mu     sync.Mutex
-	last   map[string]string // host → 上次成功解析的 IP（内存副本）
-	warned map[string]bool   // 只在开始用兜底地址时提示一次
+	host   string // 上次成功连上的主机名与 IP
+	ip     string
+	warned bool // 只在开始用兜底地址时提示一次
 }
 
 func (r *fallbackResolver) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -58,11 +104,11 @@ func (r *fallbackResolver) dial(ctx context.Context, network, addr string) (net.
 	lctx, cancel := context.WithTimeout(ctx, dnsTimeout)
 	ips, lerr := net.DefaultResolver.LookupHost(lctx, host)
 	cancel()
-	if lerr == nil && len(ips) > 0 {
-		r.remember(host, ips[0])
-		var conn net.Conn
+	if lerr == nil {
 		for _, ip := range ips {
+			var conn net.Conn
 			if conn, err = d.DialContext(ctx, network, net.JoinHostPort(ip, port)); err == nil {
+				r.remember(host, ip)
 				return conn, nil
 			}
 		}
@@ -73,45 +119,38 @@ func (r *fallbackResolver) dial(ctx context.Context, network, addr string) (net.
 		return nil, lerr
 	}
 	r.mu.Lock()
-	if !r.warned[host] {
-		if r.warned == nil {
-			r.warned = map[string]bool{}
-		}
-		r.warned[host] = true
+	if !r.warned {
+		r.warned = true
 		log.Printf("agent: resolving %s failed (%v), using last known address %s (LAN DNS often fails when the internet is down)", host, lerr, ip)
 	}
 	r.mu.Unlock()
 	return d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 }
 
-// remember 记下成功解析的地址；变化时落盘，供重启后断网时使用。
+// remember 记下成功连上的地址；变化时落盘，供重启后断网时使用。
 func (r *fallbackResolver) remember(host, ip string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.last == nil {
-		r.last = map[string]string{}
-	}
-	delete(r.warned, host) // DNS 恢复了，下次失效时再提示
-	if r.last[host] == ip {
+	r.warned = false // DNS 恢复了，下次失效时再提示
+	if r.host == host && r.ip == ip {
 		return
 	}
-	r.last[host] = ip
-	_ = writeFileSync(r.path, []byte(host+" "+ip+"\n"), 0o644)
+	r.host, r.ip = host, ip
+	_ = fsutil.WriteFile(r.path, []byte(host+" "+ip+"\n"), 0o644)
 }
 
-// recall 返回上次成功解析的地址（内存优先，其次磁盘）。
+// recall 返回上次成功连上 host 的地址（内存优先，其次磁盘）。
 func (r *fallbackResolver) recall(host string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if ip := r.last[host]; ip != "" {
-		return ip
+	if r.host == host {
+		return r.ip
 	}
 	data, err := os.ReadFile(r.path)
 	if err != nil {
 		return ""
 	}
-	f := strings.Fields(string(data))
-	if len(f) == 2 && f[0] == host && net.ParseIP(f[1]) != nil {
+	if f := strings.Fields(string(data)); len(f) == 2 && f[0] == host && net.ParseIP(f[1]) != nil {
 		return f[1]
 	}
 	return ""

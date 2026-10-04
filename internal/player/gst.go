@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -24,35 +23,36 @@ import (
 //go:embed gstplayer.py
 var gstScript []byte
 
-// FadeSeconds 是切换时淡出、淡入各自的时长。
-const FadeSeconds = 0.6
-
 // GST 驱动播放进程 gstplayer.py：DRM/KMS 直接出画面，视频走 H3 的硬件解码器（cedrus）。
 //
 // 代理只管"该放什么"：每次 Load 把完整画面交给播放进程，排期、淡入淡出都由它自己做。
-// 播放进程退出或卡住（ping 不回）就重启，重启后重新下发当前画面——内容没变时服务端只回 304，
+// 播放进程退出或卡住（状态查询不回）就重启，重启后重新下发当前画面——内容没变时服务端只回 304，
 // 不重发的话，一次重启就会黑屏到下次内容变化。
 type GST struct {
 	python        string   // 解释器
 	env           []string // 额外环境变量（测试用）
 	script        string   // 运行时写出的脚本路径
 	width, height int      // 显示输出分辨率：显示模式、叠加图光栅化都按它
-	reqID         atomic.Int64
 
-	callTimeout  time.Duration // 一次请求等多久回复
-	pingInterval time.Duration // 看门狗间隔
-	restartDelay time.Duration // 播放进程退出后隔多久重启
+	callTimeout   time.Duration // 一次请求等多久回复
+	watchInterval time.Duration // 看门狗（兼状态查询）间隔
+	restartDelay  time.Duration // 播放进程退出后隔多久重启
 
-	mu      sync.Mutex
-	desired *Scene
-	proc    *gstProc
+	mu        sync.Mutex
+	desired   *Scene
+	proc      *gstProc
+	hwdec     string // 看门狗最近一次问到的解码方式
+	paused    bool
+	runCancel context.CancelFunc // 结束当前这一轮播放进程（暂停时用）
+	wake      chan struct{}      // 恢复播放
 }
 
 // NewGST 创建播放器；脚本写在 dir 下，显示输出分辨率为 width×height。
 func NewGST(dir string, width, height int) *GST {
 	return &GST{
 		python: "python3", script: filepath.Join(dir, "gstplayer.py"), width: width, height: height,
-		callTimeout: 5 * time.Second, pingInterval: 10 * time.Second, restartDelay: 2 * time.Second,
+		callTimeout: 5 * time.Second, watchInterval: 10 * time.Second, restartDelay: 2 * time.Second,
+		wake: make(chan struct{}, 1),
 	}
 }
 
@@ -79,29 +79,52 @@ func (p *GST) Load(scene Scene) error {
 	return p.send(proc, s)
 }
 
-// Stats 问播放进程实际用的解码器与输出分辨率；问不到时各项留空。
+// SetPaused 暂停时结束播放进程（DRM 随之释放，内核恢复控制台显示），恢复时重新拉起并补发当前画面。
+func (p *GST) SetPaused(paused bool) {
+	p.mu.Lock()
+	changed := p.paused != paused
+	p.paused = paused
+	cancel := p.runCancel
+	p.mu.Unlock()
+	if !changed {
+		return
+	}
+	if paused {
+		log.Printf("player(gst): pausing playback (player process stopped, display released)")
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+	log.Printf("player(gst): resuming playback")
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+// waitUnpaused 等到不处于暂停；ctx 取消返回 false。
+func (p *GST) waitUnpaused(ctx context.Context) bool {
+	for {
+		p.mu.Lock()
+		paused := p.paused
+		p.mu.Unlock()
+		if !paused {
+			return true
+		}
+		select {
+		case <-p.wake:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// Stats 返回看门狗最近一次问到的解码方式与输出分辨率（不阻塞，心跳随时可调）。
 func (p *GST) Stats() Stats {
 	p.mu.Lock()
-	proc := p.proc
-	p.mu.Unlock()
-	if proc == nil {
-		return Stats{}
-	}
-	r, err := proc.call(&p.reqID, map[string]any{"cmd": "stats"})
-	if err != nil {
-		return Stats{}
-	}
-	var st Stats
-	if v, ok := r["hwdec"].(string); ok {
-		st.HWDec = v
-	}
-	if v, ok := r["output_w"].(float64); ok {
-		st.OutputW = int(v)
-	}
-	if v, ok := r["output_h"].(float64); ok {
-		st.OutputH = int(v)
-	}
-	return st
+	defer p.mu.Unlock()
+	return Stats{HWDec: p.hwdec, OutputW: p.width, OutputH: p.height}
 }
 
 // send 把画面转成播放进程的 load 请求。叠加图在这里按输出分辨率光栅化成 BGRA，
@@ -112,8 +135,8 @@ func (p *GST) send(proc *gstProc, s Scene) error {
 		items = append(items, map[string]any{"path": it.Path, "type": it.Type, "duration": it.Duration})
 	}
 	req := map[string]any{"cmd": "load", "items": items, "overlay": nil}
-	if s.Overlay != nil {
-		raw, err := rasterize(s.Overlay.PNG, p.width, p.height)
+	if s.OverlayPNG != "" {
+		raw, err := rasterize(s.OverlayPNG, p.width, p.height)
 		if err != nil {
 			// 叠加图用不了时宁可整屏播放，也不要黑屏
 			log.Printf("player(gst): overlay unusable (%v), playing fullscreen", err)
@@ -123,7 +146,7 @@ func (p *GST) send(proc *gstProc, s Scene) error {
 			req["media"] = []int{s.Media.X, s.Media.Y, s.Media.W, s.Media.H}
 		}
 	}
-	if _, err := proc.call(&p.reqID, req); err != nil {
+	if err := proc.call(req, nil); err != nil {
 		return fmt.Errorf("player(gst): load: %w", err)
 	}
 	log.Printf("player(gst): loaded %d item(s)", len(s.Items))
@@ -133,9 +156,29 @@ func (p *GST) send(proc *gstProc, s Scene) error {
 // supervise 拉起播放进程并在其退出后自动重启（进程级守护的最内层）。
 func (p *GST) supervise(ctx context.Context) {
 	for ctx.Err() == nil {
-		p.runOnce(ctx)
+		if !p.waitUnpaused(ctx) {
+			return
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		p.mu.Lock()
+		if p.paused { // 刚好在这期间被暂停
+			p.mu.Unlock()
+			cancel()
+			continue
+		}
+		p.runCancel = cancel
+		p.mu.Unlock()
+		p.runOnce(runCtx)
+		p.mu.Lock()
+		p.runCancel = nil
+		paused := p.paused
+		p.mu.Unlock()
+		cancel()
 		if ctx.Err() != nil {
 			return
+		}
+		if paused {
+			continue
 		}
 		log.Printf("player(gst): player process exited, restarting in %s", p.restartDelay)
 		select {
@@ -164,7 +207,7 @@ func (p *GST) runOnce(ctx context.Context) {
 		log.Printf("player(gst): cannot start %s: %v", p.python, err)
 		return
 	}
-	proc := &gstProc{stdin: stdin, timeout: p.callTimeout, pending: map[int64]chan map[string]any{}, dead: make(chan struct{})}
+	proc := &gstProc{stdin: stdin, timeout: p.callTimeout, pending: map[int64]chan json.RawMessage{}, dead: make(chan struct{})}
 	go func() {
 		proc.read(stdout)
 		close(proc.dead)
@@ -177,9 +220,7 @@ func (p *GST) runOnce(ctx context.Context) {
 		p.mu.Unlock()
 	}()
 
-	if _, err := proc.call(&p.reqID, map[string]any{
-		"cmd": "config", "width": p.width, "height": p.height, "fade": FadeSeconds,
-	}); err != nil {
+	if err := proc.call(map[string]any{"cmd": "config", "width": p.width, "height": p.height}, nil); err != nil {
 		log.Printf("player(gst): configure failed: %v", err)
 		cmd.Process.Kill()
 		cmd.Wait()
@@ -195,21 +236,28 @@ func (p *GST) runOnce(ctx context.Context) {
 		}
 	}
 
-	// 看门狗：播放进程卡死（GStreamer 死锁、驱动挂住）时不会自己退出，ping 不回就杀掉重来。
+	// 看门狗：播放进程卡死（GStreamer 死锁、驱动挂住）时不会自己退出，状态查询不回就杀掉重来。
+	// 问到的解码方式顺便缓存下来，心跳直接读。
 	stop := make(chan struct{})
 	go func() {
-		t := time.NewTicker(p.pingInterval)
+		t := time.NewTicker(p.watchInterval)
 		defer t.Stop()
 		for {
 			select {
 			case <-stop:
 				return
 			case <-t.C:
-				if _, err := proc.call(&p.reqID, map[string]any{"cmd": "ping"}); err != nil {
+				var st struct {
+					HWDec string `json:"hwdec"`
+				}
+				if err := proc.call(map[string]any{"cmd": "stats"}, &st); err != nil {
 					log.Printf("player(gst): player not responding (%v), killing it", err)
 					cmd.Process.Kill()
 					return
 				}
+				p.mu.Lock()
+				p.hwdec = st.HWDec
+				p.mu.Unlock()
 			}
 		}
 	}()
@@ -241,62 +289,69 @@ type gstProc struct {
 	timeout time.Duration
 	wmu     sync.Mutex // 串行写 stdin；与 mu 分开，写阻塞时不耽误分发回复
 	mu      sync.Mutex
-	pending map[int64]chan map[string]any
+	lastID  int64
+	pending map[int64]chan json.RawMessage
 	dead    chan struct{}
 }
 
-func (g *gstProc) call(seq *atomic.Int64, req map[string]any) (map[string]any, error) {
-	id := seq.Add(1)
-	req["id"] = id
-	line, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan map[string]any, 1)
+// call 发出请求并等回复；out 非 nil 时把回复解码进去。
+func (g *gstProc) call(req map[string]any, out any) error {
+	ch := make(chan json.RawMessage, 1)
 	g.mu.Lock()
+	g.lastID++
+	id := g.lastID
 	g.pending[id] = ch
 	g.mu.Unlock()
-	g.wmu.Lock()
-	_, err = g.stdin.Write(append(line, '\n'))
-	g.wmu.Unlock()
 	defer func() {
 		g.mu.Lock()
 		delete(g.pending, id)
 		g.mu.Unlock()
 	}()
+	req["id"] = id
+	line, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return err
+	}
+	g.wmu.Lock()
+	_, err = g.stdin.Write(append(line, '\n'))
+	g.wmu.Unlock()
+	if err != nil {
+		return err
 	}
 	select {
 	case r := <-ch:
-		if msg, ok := r["error"].(string); ok {
-			return nil, errors.New(msg)
+		var e struct {
+			Error string `json:"error"`
 		}
-		return r, nil
+		if json.Unmarshal(r, &e); e.Error != "" {
+			return errors.New(e.Error)
+		}
+		if out != nil {
+			return json.Unmarshal(r, out)
+		}
+		return nil
 	case <-g.dead:
-		return nil, errors.New("player process exited")
+		return errors.New("player process exited")
 	case <-time.After(g.timeout):
-		return nil, errors.New("timeout")
+		return errors.New("timeout")
 	}
 }
 
-// read 分发播放进程的输出：带 id 的是回复；事件只用于诊断（播放进程自己已记日志）。
+// read 分发播放进程的输出：带 id 的是回复；事件（playing/error/crop）只用于诊断，播放进程自己已记日志。
 func (g *gstProc) read(r io.Reader) {
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
-		var msg map[string]any
-		if json.Unmarshal(sc.Bytes(), &msg) != nil {
-			continue
+		var msg struct {
+			ID *int64 `json:"id"`
 		}
-		id, ok := msg["id"].(float64)
-		if !ok {
+		if json.Unmarshal(sc.Bytes(), &msg) != nil || msg.ID == nil {
 			continue
 		}
 		g.mu.Lock()
-		ch := g.pending[int64(id)]
+		ch := g.pending[*msg.ID]
 		g.mu.Unlock()
 		if ch != nil {
-			ch <- msg
+			ch <- append(json.RawMessage(nil), sc.Bytes()...)
 		}
 	}
 }

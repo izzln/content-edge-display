@@ -148,7 +148,7 @@ func TestVersionStableAndChanges(t *testing.T) {
 		t.Fatal("停留时长变化必须改变版本号")
 	}
 	items[0].Duration--
-	if Version(items, []Command{{Type: "update", Version: "2"}}, nil) == v4 {
+	if Version(items, &Update{Version: "2"}, nil) == v4 {
 		t.Fatal("指令出现必须改变版本号")
 	}
 	l := &Layout{CanvasW: 1440, CanvasH: 900, Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}

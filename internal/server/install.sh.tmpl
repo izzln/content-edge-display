@@ -1,0 +1,40 @@
+#!/bin/sh
+# display-agent 一键安装（由 display-server 生成；服务端地址与证书指纹已填好，不含任何口令）。
+#
+# 在刚刷好公版 Armbian、设好 root 密码的设备上以 root 运行：
+#   curl -fsSL {{.Bootstrap}}/install.sh | ENROLL_TOKEN=注册口令 sh
+# 可选：HDMI_MODE=1440x900@60（默认）、HDMI_FORCE=e（EDID 里没有该模式时强制）、CMA=256M（默认按内存大小定）。
+#
+# 做的事：凭注册口令从服务端下载最新的设备程序包 → 执行包内 install-agent.sh
+# （安装依赖、安装程序、写配置、设置显示参数、开机自启）→ 重启。
+set -eu
+
+# 整个脚本包在函数里、读完再执行：经管道运行时脚本本身就是 stdin，不能让中途的命令读走后半截。
+main() {
+	SERVER_URL="{{.ServerURL}}"
+	TLS_FINGERPRINT="{{.Fingerprint}}"
+	BOOTSTRAP="{{.Bootstrap}}"
+
+	if [ -z "${ENROLL_TOKEN:-}" ]; then
+		echo "缺少注册口令。用法：curl -fsSL $BOOTSTRAP/install.sh | ENROLL_TOKEN=注册口令 sh" >&2
+		echo "（注册口令即服务端 server.json 里的 enroll_token）" >&2
+		exit 1
+	fi
+	[ "$(id -u)" = 0 ] || { echo "请以 root 运行" >&2; exit 1; }
+
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+	echo "== 下载设备程序包"
+	code=$(curl -sS -o "$tmp/agent.tar.gz" -w '%{http_code}' -H "X-Enroll-Token: $ENROLL_TOKEN" "$BOOTSTRAP/bootstrap/agent.tar.gz") || code=000
+	case "$code" in
+	200) ;;
+	401) echo "注册口令不对（应与服务端 server.json 的 enroll_token 一致）" >&2; exit 1 ;;
+	404) echo "服务端还没有上传设备程序包：先在管理后台「程序更新」页上传 display-agent-<版本>-armv7.tar.gz" >&2; exit 1 ;;
+	000) echo "连不上服务端 $BOOTSTRAP（网线、IP、防火墙？）" >&2; exit 1 ;;
+	*) echo "下载失败：HTTP $code" >&2; exit 1 ;;
+	esac
+	tar -xzf "$tmp/agent.tar.gz" -C "$tmp"
+	cd "$tmp"/display-agent-*/
+	SERVER_URL="$SERVER_URL" TLS_FINGERPRINT="$TLS_FINGERPRINT" ENROLL_TOKEN="$ENROLL_TOKEN" sh ./install-agent.sh </dev/null
+}
+main

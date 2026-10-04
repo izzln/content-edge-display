@@ -1,8 +1,0 @@
-{
-  "server_url": "http://192.168.1.10:9000",
-  "enroll_token": "与服务端 server.json 的 enroll_token 一致",
-  "cache_dir": "/var/lib/display-agent",
-  "install_dir": "/usr/local/lib/display-agent",
-  "player": "gst",
-  "display_mode": "1440x900@60"
-}

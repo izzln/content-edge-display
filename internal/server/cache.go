@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/izzln/content-edge-display/internal/fsutil"
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
@@ -45,15 +45,14 @@ type cacheIndex struct {
 
 // CacheStats 是缓存区的现状（后台"存储"页用）。
 type CacheStats struct {
-	QuotaGB     int       `json:"quota_gb"`
-	MinQuotaGB  int       `json:"min_quota_gb"` // 不能低于在用文件的总大小
-	UsedBytes   int64     `json:"used_bytes"`
-	InUseBytes  int64     `json:"in_use_bytes"`
-	CachedBytes int64     `json:"cached_bytes"` // 未在用、可被清理的
-	Files       int       `json:"files"`
-	InUseFiles  int       `json:"in_use_files"`
-	DiskFree    int64     `json:"disk_free_bytes"` // -1 表示读不到
-	Updated     time.Time `json:"updated"`
+	QuotaGB     int   `json:"quota_gb"`
+	MinQuotaGB  int   `json:"min_quota_gb"` // 不能低于在用文件的总大小
+	UsedBytes   int64 `json:"used_bytes"`
+	InUseBytes  int64 `json:"in_use_bytes"`
+	CachedBytes int64 `json:"cached_bytes"` // 未在用、可被清理的
+	Files       int   `json:"files"`
+	InUseFiles  int   `json:"in_use_files"`
+	DiskFree    int64 `json:"disk_free_bytes"` // -1 表示读不到
 }
 
 type contentCache struct {
@@ -65,13 +64,11 @@ type contentCache struct {
 	stats CacheStats
 	kick  chan struct{}
 
-	// 以下在 mu 下读写；测试会改：gb 调小好用小文件触发淘汰，link 换成总失败的实现验证退回复制
-	gb   int64                               // 配额 1GB 对应的字节数
-	link func(oldname, newname string) error // 建硬链接
+	gb int64 // 配额 1GB 对应的字节数（在 mu 下读写；测试调小它，好用小文件触发淘汰）
 }
 
 func openCache(root, path string) (*contentCache, error) {
-	c := &contentCache{root: root, path: path, kick: make(chan struct{}, 1), gb: 1 << 30, link: os.Link,
+	c := &contentCache{root: root, path: path, kick: make(chan struct{}, 1), gb: 1 << 30,
 		idx: cacheIndex{Sources: map[string]string{}, Blobs: map[string]*cacheBlob{}}}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
@@ -97,10 +94,7 @@ func openCache(root, path string) (*contentCache, error) {
 func (c *contentCache) saveLocked() {
 	data, err := json.MarshalIndent(&c.idx, "", " ")
 	if err == nil {
-		tmp := c.path + ".tmp"
-		if err = os.WriteFile(tmp, data, 0o644); err == nil {
-			err = os.Rename(tmp, c.path)
-		}
+		err = fsutil.WriteFile(c.path, data, 0o644)
 	}
 	if err != nil {
 		log.Printf("cache: cannot save index: %v", err)
@@ -115,17 +109,14 @@ func processKey(kind, srcSHA string) string {
 	var params string
 	switch kind {
 	case "image":
-		params = fmt.Sprintf("shrink %dx%d", canvasW, canvasH)
+		params = fmt.Sprintf("shrink %dx%d", manifest.CanvasW, manifest.CanvasH)
 	case "video":
 		params = fmt.Sprintf("%+v", transcode.DefaultSpec())
-	case "pdf":
+	case "document":
 		params = fmt.Sprintf("pages w%d", transcode.PageWidth)
 	}
 	return kind + "|" + params + "|" + srcSHA
 }
-
-// pagesDir 是设备目录里文档 name 的页面目录。
-func pagesDir(dir, name string) string { return filepath.Join(dir, manifest.PagesDir, name) }
 
 // cacheReuse 查这份原片有没有处理好的结果；有就链接成设备文件 dir/name（PDF 连页面），返回 true。
 func (s *Server) cacheReuse(dir, name, key string) (bool, error) {
@@ -144,12 +135,7 @@ func (s *Server) cacheReuse(dir, name, key string) (bool, error) {
 	if _, err := os.Stat(src); err != nil {
 		return false, nil // 仓库里的文件不见了：当作没有，重新处理
 	}
-	if manifest.TypeOf(name) == "document" {
-		if err := c.linkPages(c.pagesPath(sha), pagesDir(dir, name)); err != nil {
-			return false, err
-		}
-	}
-	if err := c.linkFile(src, filepath.Join(dir, name)); err != nil {
+	if err := linkContent(src, filepath.Join(dir, name), c.pagesPath(sha), manifest.PagesPath(dir, name)); err != nil {
 		return false, err
 	}
 	b.LastUsed = time.Now()
@@ -157,68 +143,59 @@ func (s *Server) cacheReuse(dir, name, key string) (bool, error) {
 	return true, nil
 }
 
-// cacheAdopt 把设备文件 dir/name（PDF 连页面）纳入仓库：仓库里已有同样内容就让设备文件改为链接它（省空间），
-// 没有就把它链接进仓库。key 非空时登记"这份原片 → 这个结果"，供以后复用。
-func (s *Server) cacheAdopt(dir, name, key string) error {
+// cacheAdopt 把设备文件 dir/name（PDF 连页面）纳入仓库，返回内容的 sha256：仓库里已有同样内容就让设备文件
+// 改为链接它（省空间），没有就把它链接进仓库。key 非空时登记"这份原片 → 这个结果"，供以后复用。
+func (s *Server) cacheAdopt(dir, name, key string) (string, error) {
 	path := filepath.Join(dir, name)
-	info, err := os.Stat(path)
+	sha, size, err := s.hashes.Sum(path)
 	if err != nil {
-		return err
+		return "", err
 	}
-	sha, err := s.hashes.FileSHA256(path, info.Size(), info.ModTime().Unix())
-	if err != nil {
-		return err
-	}
-	doc := manifest.TypeOf(name) == "document"
 	c := s.cache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ext := strings.ToLower(filepath.Ext(name))
 	b := c.idx.Blobs[sha]
 	if b != nil {
 		if _, err := os.Stat(c.blobPath(sha, b.Ext)); err != nil {
 			b = nil // 索引里有、文件没了：重新纳入
 		}
 	}
+	pages := manifest.PagesPath(dir, name)
 	if b == nil {
-		size := info.Size()
-		if doc {
-			if err := c.linkPages(pagesDir(dir, name), c.pagesPath(sha)); err != nil {
-				return err
-			}
-			size += dirSize(c.pagesPath(sha))
+		ext := strings.ToLower(filepath.Ext(name))
+		if err := linkContent(path, c.blobPath(sha, ext), pages, c.pagesPath(sha)); err != nil {
+			return "", err
 		}
-		if err := c.linkFile(path, c.blobPath(sha, ext)); err != nil {
-			return err
-		}
-		b = &cacheBlob{Ext: ext, Size: size}
+		b = &cacheBlob{Ext: ext, Size: size + dirSize(c.pagesPath(sha))}
 		c.idx.Blobs[sha] = b
-	} else {
-		if doc {
-			if err := c.linkPages(c.pagesPath(sha), pagesDir(dir, name)); err != nil {
-				return err
-			}
-		}
-		if err := c.linkFile(c.blobPath(sha, b.Ext), path); err != nil {
-			return err
-		}
+	} else if err := linkContent(c.blobPath(sha, b.Ext), path, c.pagesPath(sha), pages); err != nil {
+		return "", err
 	}
 	b.LastUsed = time.Now()
 	if key != "" {
 		c.idx.Sources[key] = sha
 	}
 	c.saveLocked()
-	return nil
+	return sha, nil
+}
+
+// linkContent 让 dst 成为 src 的硬链接；src 是文档（PDF）时把它的页面目录 srcPages 也链接到 dstPages。
+// 仓库里的页面目录是 <sha>.pages，设备目录里是 .pages/<文件名>/。
+func linkContent(src, dst, srcPages, dstPages string) error {
+	if manifest.TypeOf(dst) == "document" || manifest.TypeOf(src) == "document" {
+		if err := linkPages(srcPages, dstPages); err != nil {
+			return err
+		}
+	}
+	return fsutil.LinkFile(src, dst)
 }
 
 // cacheTouch 在设备文件被删除前记下它的仓库内容"刚刚还在用"，淘汰顺序才准。
 func (s *Server) cacheTouch(paths ...string) {
 	var shas []string
 	for _, p := range paths {
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			if sha, err := s.hashes.FileSHA256(p, info.Size(), info.ModTime().Unix()); err == nil {
-				shas = append(shas, sha)
-			}
+		if sha, _, err := s.hashes.Sum(p); err == nil {
+			shas = append(shas, sha)
 		}
 	}
 	c := s.cache
@@ -235,9 +212,11 @@ func (s *Server) cacheTouch(paths ...string) {
 
 // quotaBytes 是当前配额的字节数。
 func (s *Server) quotaBytes() int64 {
+	var gb int
+	s.store.View(func(st *store.State) { gb = st.CacheQuotaGB })
 	s.cache.mu.Lock()
 	defer s.cache.mu.Unlock()
-	return int64(s.store.CacheQuotaGB()) * s.cache.gb
+	return int64(gb) * s.cache.gb
 }
 
 // kickCache 让缓存协程尽快整理一次（不阻塞）。
@@ -280,11 +259,7 @@ func (s *Server) reconcileCache() {
 				continue // 没渲染过的 PDF（直接拷进目录的）：不下发，也不纳入
 			}
 			path := filepath.Join(dir, name)
-			info, err := os.Stat(path)
-			if err != nil {
-				continue
-			}
-			sha, err := s.hashes.FileSHA256(path, info.Size(), info.ModTime().Unix())
+			sha, _, err := s.hashes.Sum(path)
 			if err != nil {
 				continue
 			}
@@ -292,13 +267,9 @@ func (s *Server) reconcileCache() {
 			known := c.idx.Blobs[sha] != nil
 			c.mu.Unlock()
 			if !known {
-				if err := s.cacheAdopt(dir, name, ""); err != nil {
+				if sha, err = s.cacheAdopt(dir, name, ""); err != nil {
 					log.Printf("cache: cannot adopt %s: %v", path, err)
 					continue
-				}
-				// 纳入时设备文件可能被换成了链接，重算一次
-				if info, err = os.Stat(path); err == nil {
-					sha, _ = s.hashes.FileSHA256(path, info.Size(), info.ModTime().Unix())
 				}
 			}
 			inUse[sha] = true
@@ -320,7 +291,9 @@ func (s *Server) reconcileCache() {
 	}
 
 	// 2. 超出配额：清最久没用的（整理开始后才被用到的不动——可能刚被复用、链接进了设备目录）
-	quota := int64(s.store.CacheQuotaGB()) * c.gb
+	var quotaGB int
+	s.store.View(func(st *store.State) { quotaGB = st.CacheQuotaGB })
+	quota := int64(quotaGB) * c.gb
 	if used > quota {
 		var idle []string
 		for sha, b := range c.idx.Blobs {
@@ -358,7 +331,6 @@ func (s *Server) reconcileCache() {
 		Files:       len(c.idx.Blobs),
 		InUseFiles:  inUseFiles,
 		DiskFree:    diskFree(c.root),
-		Updated:     now,
 	}
 }
 
@@ -377,34 +349,10 @@ func (s *Server) runCache(stop <-chan struct{}) {
 	}
 }
 
-// linkFile 让 dst 成为 src 的硬链接（替换已有的 dst）；文件系统不支持硬链接时退回复制。
-func (c *contentCache) linkFile(src, dst string) error {
-	if a, err := os.Stat(src); err == nil {
-		if b, err := os.Stat(dst); err == nil && os.SameFile(a, b) {
-			return nil
-		}
-	}
-	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".link")
-	os.Remove(tmp)
-	if err := c.link(src, tmp); err != nil {
-		if err := copyFile(src, tmp); err != nil {
-			return err
-		}
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-// linkPages 把页面目录 srcDir 里的文件逐个链接到 dstDir（dstDir 原有内容换掉）。
-func (c *contentCache) linkPages(srcDir, dstDir string) error {
+// linkPages 把页面目录 srcDir 里的文件逐个链接到 dstDir（dstDir 原有内容整个换掉）。
+func linkPages(srcDir, dstDir string) error {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dstDir), 0o755); err != nil {
 		return err
 	}
 	tmp := filepath.Join(filepath.Dir(dstDir), "."+filepath.Base(dstDir)+".link")
@@ -416,31 +364,13 @@ func (c *contentCache) linkPages(srcDir, dstDir string) error {
 		if e.IsDir() {
 			continue
 		}
-		if err := c.linkFile(filepath.Join(srcDir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
+		if err := fsutil.LinkFile(filepath.Join(srcDir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
 			os.RemoveAll(tmp)
 			return err
 		}
 	}
 	os.RemoveAll(dstDir)
 	return os.Rename(tmp, dstDir)
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err = io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(dst)
-		return err
-	}
-	return out.Close()
 }
 
 func dirSize(dir string) int64 {
@@ -460,7 +390,7 @@ func (s *Server) handleGetCache(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.cacheStats())
 }
 
-// handlePutCache 修改缓存区配额：不能小于设备在用文件的总大小；调小后立即按新配额清理。
+// handlePutCache 修改缓存区配额：不能小于设备在用文件的总大小；调小后缓存协程随即按新配额清理。
 func (s *Server) handlePutCache(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		QuotaGB int `json:"quota_gb"`
@@ -469,16 +399,14 @@ func (s *Server) handlePutCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.reconcileCache() // 用最新的在用总量校验
-	st := s.cacheStats()
-	if req.QuotaGB < st.MinQuotaGB {
+	if st := s.cacheStats(); req.QuotaGB < st.MinQuotaGB {
 		http.Error(w, fmt.Sprintf("缓存区不能小于设备在用文件的总大小：至少 %dGB（在用 %s）", st.MinQuotaGB, humanBytes(st.InUseBytes)),
 			http.StatusBadRequest)
 		return
 	}
-	if !s.update(w, func(st *store.State) { st.CacheQuotaGB = req.QuotaGB }) {
-		return
+	if s.update(w, func(st *store.State) { st.CacheQuotaGB = req.QuotaGB }) {
+		log.Printf("cache quota set to %dGB", req.QuotaGB)
+		s.kickCache()
+		w.WriteHeader(http.StatusNoContent)
 	}
-	log.Printf("cache quota set to %dGB", req.QuotaGB)
-	s.reconcileCache()
-	writeJSON(w, s.cacheStats())
 }

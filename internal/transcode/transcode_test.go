@@ -182,8 +182,8 @@ func TestShrinkImage(t *testing.T) {
 	jpgEnc := func(f *os.File, i image.Image) error { return jpeg.Encode(f, i, nil) }
 
 	big := write("big.jpg", 4000, 3000, jpgEnc)
-	if shrunk, err := ShrinkImage(big, 1440, 900); err != nil || !shrunk {
-		t.Fatalf("大图应被缩小：%v %v", shrunk, err)
+	if err := ShrinkImage(big, 1440, 900); err != nil {
+		t.Fatalf("大图应被缩小：%v", err)
 	}
 	if w, h, f := size(big); w != 1200 || h != 900 || f != "jpeg" {
 		t.Fatalf("4000×3000 应等比缩到 1200×900 且保持 jpeg，得到 %d×%d %s", w, h, f)
@@ -197,9 +197,7 @@ func TestShrinkImage(t *testing.T) {
 
 	small := write("small.png", 800, 600, pngEnc)
 	before, _ := os.ReadFile(small)
-	if shrunk, _ := ShrinkImage(small, 1440, 900); shrunk {
-		t.Fatal("小图不应被改动")
-	}
+	ShrinkImage(small, 1440, 900)
 	if after, _ := os.ReadFile(small); !bytes.Equal(before, after) {
 		t.Fatal("小图文件内容不应变化")
 	}

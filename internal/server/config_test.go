@@ -15,7 +15,7 @@ import (
 func TestLoadConfigResolvesRelativePathsAgainstConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "server.json")
-	body := `{"media_root":"media","data_dir":"data","font_path":"fonts/cjk.ttc","enroll_token":"tok"}`
+	body := `{"media_root":"media","data_dir":"data","font_path":"fonts/cjk.ttc","admin_token":"adm","enroll_token":"tok"}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestLoadConfigKeepsAbsolutePathsAndDefaults(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "server.json")
 	// media_root 绝对路径；data_dir/font_path 留空
-	body := `{"media_root":"/srv/media","enroll_token":"tok"}`
+	body := `{"media_root":"/srv/media","admin_token":"adm","enroll_token":"tok"}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestLoadConfigRejectsPlaceholderAndMissingTokens(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDefaultListenPort(t *testing.T) {
+func TestLoadConfigDefaultPorts(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "server.json")
 	if err := os.WriteFile(p, []byte(`{"admin_token":"6DOTtuXB","enroll_token":"G2o4MrHY"}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -151,8 +151,14 @@ func TestLoadConfigDefaultListenPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Listen != ":9000" {
-		t.Fatalf("默认监听端口应为 :9000，得到 %q", cfg.Listen)
+	if cfg.Listen != ":9001" || cfg.BootstrapListen != ":9000" {
+		t.Fatalf("默认端口应为 HTTPS :9001、装机 :9000，得到 %q、%q", cfg.Listen, cfg.BootstrapListen)
+	}
+	if err := os.WriteFile(p, []byte(`{"admin_token":"6DOTtuXB","enroll_token":"G2o4MrHY","bootstrap_listen":":9001"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(p); err == nil || !strings.Contains(err.Error(), "bootstrap_listen") {
+		t.Fatalf("两个端口相同应报错，得到 %v", err)
 	}
 }
 

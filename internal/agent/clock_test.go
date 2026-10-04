@@ -17,17 +17,18 @@ import (
 func TestSkewedDeviceClockStillAuthenticates(t *testing.T) {
 	for _, skew := range []time.Duration{2 * time.Hour, -26 * time.Hour} {
 		t.Run(skew.String(), func(t *testing.T) {
-			a, p, _, _, devDir := newTestEnv(t) // newTestEnv 已经走过一次注册
-			_ = devDir
+			e := newEnv(t, true)
+			a, p := e.a, e.p
 			a.clock.local = func() time.Time { return time.Now().Add(skew) }
 
 			// 问题复现：直接用本机时钟签名，服务端拒绝并说明是时钟偏差
 			req, _ := http.NewRequest("GET", a.cfg.ServerURL+"/api/v1/device/manifest", nil)
 			ts := strconv.FormatInt(time.Now().Add(skew).Unix(), 10)
-			req.Header.Set(sign.HeaderDeviceID, a.DeviceID())
+			req.Header.Set(sign.HeaderDeviceID, a.identity.DeviceID)
 			req.Header.Set(sign.HeaderTimestamp, ts)
 			req.Header.Set(sign.HeaderSign, sign.Sign(a.identity.Secret, ts, "GET", "/api/v1/device/manifest"))
-			resp, err := http.DefaultClient.Do(req)
+			raw := &http.Client{Transport: &http.Transport{TLSClientConfig: pinnedTLS(a.cfg.TLSFingerprint)}}
+			resp, err := raw.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,19 +39,35 @@ func TestSkewedDeviceClockStillAuthenticates(t *testing.T) {
 			}
 
 			// 修复：代理从服务端响应的 Date 头学到偏差（注册响应就足够），按服务端时间签名
-			if err := a.Register(context.Background()); err != nil {
+			if err := a.register(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := a.PollOnce(context.Background()); err != nil {
+			if err := a.poll(context.Background()); err != nil {
 				t.Fatalf("时钟偏差 %s 时轮询应成功：%v", skew, err)
 			}
-			if err := a.Heartbeat(context.Background()); err != nil {
+			if err := a.heartbeat(context.Background()); err != nil {
 				t.Fatalf("时钟偏差 %s 时心跳应成功：%v", skew, err)
 			}
 			if len(p.Scene().Items) == 0 {
 				t.Fatal("应已下载并加载内容")
 			}
 		})
+	}
+}
+
+// 已注册的设备断电重启、时间回退了一天：第一次轮询因时钟偏差被拒，但同一个响应已让代理学到偏差，
+// 立即重试就成功，不用等下一个轮询周期。
+func TestClockSkewRetriedImmediately(t *testing.T) {
+	e := newEnv(t, true)
+	a, p := e.a, e.p
+	a.clock.local = func() time.Time { return time.Now().Add(-24 * time.Hour) }
+	calls := 0
+	err := retrySkew(func() error { calls++; return a.poll(context.Background()) })
+	if err != nil || calls != 2 {
+		t.Fatalf("应在第二次（立即重试）成功：调用 %d 次，错误 %v", calls, err)
+	}
+	if len(p.Scene().Items) == 0 {
+		t.Fatal("应已加载内容")
 	}
 }
 

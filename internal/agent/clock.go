@@ -61,29 +61,10 @@ func (c *serverClock) observe(h http.Header) {
 	if skewed != c.skewed {
 		c.skewed = skewed
 		if skewed {
-			log.Printf("agent: local clock differs from the server by %s (local %s) but is NTP-synchronized, "+
-				"so it is left alone and requests are signed with server time. Check the server's clock",
-				-c.offset, c.local().Format(time.DateTime))
+			log.Printf("agent: local clock differs from the server by %s (local %s); requests are signed with server time. "+
+				"If this device is NTP-synchronized, check the server's clock", -c.offset, c.local().Format(time.DateTime))
 		} else {
 			log.Printf("agent: local clock is in sync with the server again")
 		}
 	}
-}
-
-// clockTransport 在每个 HTTP 响应上更新 serverClock 与服务端规定的轮询/心跳间隔（schedule.go）。
-type clockTransport struct {
-	base  http.RoundTripper
-	clock *serverClock
-	sched *schedule // 可为 nil
-}
-
-func (t clockTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	resp, err := t.base.RoundTrip(r)
-	if err == nil {
-		t.clock.observe(resp.Header)
-		if t.sched != nil {
-			t.sched.observe(resp.Header)
-		}
-	}
-	return resp, err
 }

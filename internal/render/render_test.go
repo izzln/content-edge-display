@@ -79,8 +79,8 @@ func TestRenderWithoutMediaRegion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.HasMedia {
-		t.Fatal("模板没有媒体区，HasMedia 应为 false")
+	if !out.MediaRegion.Empty() {
+		t.Fatal("模板没有媒体区，MediaRegion 应为空")
 	}
 }
 
@@ -119,8 +119,8 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !overlay.HasMedia {
-		t.Fatal("模板有媒体区，HasMedia 应为 true")
+	if overlay.MediaRegion.Empty() {
+		t.Fatal("模板有媒体区，MediaRegion 不应为空")
 	}
 	// 叠加图：媒体区全透明（且是预乘 alpha 的全零，显示图层需要）
 	for _, p := range []image.Point{{720, 0}, {1080, 450}, {1439, 899}} {

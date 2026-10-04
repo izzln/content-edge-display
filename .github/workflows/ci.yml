@@ -45,24 +45,24 @@ jobs:
             gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad gstreamer1.0-libav
 
-      - run: go vet ./...
-      - run: go test ./...
+      - run: make test
 
   package:
-    name: 打成品包
-    # 打了标签时由 release job 负责出包，这里就不重复构建了
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    name: 打成品包（v* 标签时发布 Release）
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 发布 Release 需要
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 版本号取自 git describe，需要完整历史与标签
+          fetch-depth: 0   # 版本号取自 git describe（打了标签就是标签名），需要完整历史与标签
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
+      # 包名、包内 VERSION 与程序内置版本都来自同一个版本号，服务端上传时会核对三者一致
       - run: make package
 
       - id: meta
@@ -76,30 +76,8 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  release:
-    name: 发布 Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write   # 仅此 job 需要写权限（创建 Release）
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # 版本号用标签名，保证二进制内置版本与 Release 名、包名三者一致——
-      # 管理后台"程序更新"页填的版本号必须与二进制内置版本相同，OTA 才能正确判断是否已升级。
-      - run: make package VERSION=${{ github.ref_name }}
-
       - name: 创建 Release 并附上成品包
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ github.ref_name }}" bin/*.tar.gz \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
+        run: gh release create "${{ github.ref_name }}" bin/*.tar.gz --title "${{ github.ref_name }}" --generate-notes

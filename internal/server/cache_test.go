@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,27 +14,6 @@ import (
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/testpdf"
 )
-
-// manifestFor 以指定设备身份拉取清单。
-func manifestFor(t *testing.T, h http.Handler, dev, secret string) manifest.Manifest {
-	t.Helper()
-	var m manifest.Manifest
-	if err := json.Unmarshal(do(t, h, signedAs(dev, secret, "GET", "/api/v1/device/manifest"), http.StatusOK).Body.Bytes(), &m); err != nil {
-		t.Fatal(err)
-	}
-	return m
-}
-
-func waitForCond(t *testing.T, desc string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("等待超时：%s", desc)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
 
 // smallGB 把配额单位调成 n 字节，好用几百字节的文件触发淘汰。
 func smallGB(s *Server, n int64) {
@@ -117,7 +95,7 @@ func TestDeletedContentStaysCached(t *testing.T) {
 func TestCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	smallGB(s, 1200)
-	s.store.Update(func(st *store.State) error { st.CacheQuotaGB = 2; return nil }) // 2400 字节
+	s.store.Update(func(st *store.State) { st.CacheQuotaGB = 2 }) // 2400 字节
 	file := func(c byte) []byte { return bytes.Repeat([]byte{c}, 600) }
 	for _, n := range []string{"a.jpg", "b.jpg", "c.jpg"} {
 		putMediaFile(t, s, n, file(n[0]))
@@ -144,7 +122,7 @@ func TestCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 
 	// 在用的超过配额也不清
-	s.store.Update(func(st *store.State) error { st.CacheQuotaGB = 1; return nil })
+	s.store.Update(func(st *store.State) { st.CacheQuotaGB = 1 })
 	s.reconcileCache()
 	for _, n := range []string{"c.jpg", "d.jpg", "e.jpg"} {
 		if _, err := os.Stat(devFile(s, testDeviceID, n)); err != nil {
@@ -186,8 +164,9 @@ func TestCacheQuotaAPI(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "至少 2GB") {
 		t.Fatalf("应说明最小值：%s", w.Body.String())
 	}
-	json.Unmarshal(do(t, h, adminReq("PUT", "/api/v1/admin/cache", map[string]int{"quota_gb": 2}), http.StatusOK).Body.Bytes(), &st)
-	if st.QuotaGB != 2 || s.store.CacheQuotaGB() != 2 {
+	do(t, h, adminReq("PUT", "/api/v1/admin/cache", map[string]int{"quota_gb": 2}), http.StatusNoContent)
+	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/cache", nil), http.StatusOK).Body.Bytes(), &st)
+	if st.QuotaGB != 2 || state(s).CacheQuotaGB != 2 {
 		t.Fatalf("配额应已保存：%+v", st)
 	}
 
@@ -219,22 +198,6 @@ func TestPDFReuseIncludesPages(t *testing.T) {
 	if !sameFile(t, filepath.Join(s.deviceMediaDir(testDeviceID), manifest.PagesDir, "doc.pdf", pages[0]),
 		filepath.Join(s.deviceMediaDir("dev-002"), manifest.PagesDir, "同一份.pdf", pages[0])) {
 		t.Fatal("页面也应是同一份内容的硬链接")
-	}
-}
-
-// 文件系统不支持硬链接（如 exFAT 移动硬盘）时退回复制，功能不变。
-func TestCacheFallsBackToCopy(t *testing.T) {
-	s, h := newAdminTestServer(t)
-	s.cache.mu.Lock()
-	s.cache.link = func(string, string) error { return errors.New("operation not permitted") }
-	s.cache.mu.Unlock()
-	parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.png", tinyPNG(t)}))
-	res := parseUpload(t, uploadMedia(t, h, "dev-002", upload{"a.png", tinyPNG(t)}))
-	if len(res.Reused) != 1 {
-		t.Fatalf("退回复制时也应复用：%+v", res)
-	}
-	if sameFile(t, devFile(s, testDeviceID, "a.png"), devFile(s, "dev-002", "a.png")) {
-		t.Fatal("不支持硬链接时应是复制出来的独立文件")
 	}
 }
 

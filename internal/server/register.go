@@ -1,9 +1,7 @@
 package server
 
 import (
-	"crypto/subtle"
 	"log"
-	"net"
 	"net/http"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
@@ -16,18 +14,14 @@ import (
 // 同 id 同 secret → 幂等 200；
 // 同 id 不同 secret → 409，并把新密钥记为待确认请求：运营方在后台核对后点「接受新密钥」，
 // 设备下次重试即可注册成功，属性、播放列表等配置都保留（不必删设备重来）。
-// 不自动接受，是因为 enroll_token 烧在每台设备里，自动接受等于谁都能冒充任意设备。
+// 不自动接受，是因为每台设备上都有 enroll_token，自动接受等于谁都能冒充任意设备。
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.announceSchedule(w) // 注册成功后设备即按服务端规定的间隔轮询、心跳
-	if s.cfg.EnrollToken == "" {
-		http.Error(w, "enrollment disabled", http.StatusForbidden)
-		return
-	}
 	var req manifest.RegisterRequest
 	if !decodeJSON(w, r, 16<<10, &req) {
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(req.EnrollToken), []byte(s.cfg.EnrollToken)) != 1 {
+	if !tokenOK(req.EnrollToken, s.cfg.EnrollToken) {
 		http.Error(w, "bad enroll token", http.StatusUnauthorized)
 		return
 	}
@@ -35,11 +29,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid device_id or secret", http.StatusBadRequest)
 		return
 	}
-	if req.IP == "" {
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			req.IP = host
-		}
-	}
+	ip := clientIP(r)
 
 	var conflict, created bool
 	if !s.update(w, func(st *store.State) {
@@ -48,13 +38,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			conflict = true
 			d.Rekey = &store.RekeyRequest{
 				Secret: req.Secret, Fingerprint: sign.Fingerprint(req.Secret), At: s.now(),
-				IP: req.IP, Hostname: req.Hostname, HWSerial: req.HWSerial, MAC: req.MAC,
+				IP: ip, Hostname: req.Hostname, HWSerial: req.HWSerial, MAC: req.MAC,
 			}
 		} else {
 			if !ok {
 				d, created = store.Device{ID: req.DeviceID, Secret: req.Secret, RegisteredAt: s.now()}, true
 			}
-			d.Hostname, d.HWSerial, d.MAC, d.IP, d.AgentVersion = req.Hostname, req.HWSerial, req.MAC, req.IP, req.AgentVersion
+			d.Hostname, d.HWSerial, d.MAC, d.IP, d.AgentVersion = req.Hostname, req.HWSerial, req.MAC, ip, req.AgentVersion
 		}
 		st.Devices[req.DeviceID] = d
 	}) {
@@ -62,11 +52,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case conflict:
-		log.Printf("device %s asked to register with a new key (key=%s, %s); waiting for confirmation in the admin UI", req.DeviceID, sign.Fingerprint(req.Secret), req.IP)
+		log.Printf("device %s asked to register with a new key (key=%s, %s); waiting for confirmation in the admin UI", req.DeviceID, sign.Fingerprint(req.Secret), ip)
 		http.Error(w, "device id already registered with a different secret; accept the new key in the admin UI", http.StatusConflict)
 	case created:
 		log.Printf("new device registered: %s (host %s, serial %s, %s, agent %s)",
-			req.DeviceID, req.Hostname, req.HWSerial, req.IP, req.AgentVersion)
+			req.DeviceID, req.Hostname, req.HWSerial, ip, req.AgentVersion)
 		w.WriteHeader(http.StatusCreated)
 	default:
 		w.WriteHeader(http.StatusOK)
@@ -94,10 +84,7 @@ func (s *Server) handleRekey(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Accept {
 			d.Secret = d.Rekey.Secret
-			d.Hostname, d.HWSerial, d.MAC = d.Rekey.Hostname, d.Rekey.HWSerial, d.Rekey.MAC
-			if d.Rekey.IP != "" {
-				d.IP = d.Rekey.IP
-			}
+			d.Hostname, d.HWSerial, d.MAC, d.IP = d.Rekey.Hostname, d.Rekey.HWSerial, d.Rekey.MAC, d.Rekey.IP
 		}
 		d.Rekey = nil
 		st.Devices[dev.ID] = d

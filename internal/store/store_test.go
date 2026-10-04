@@ -1,7 +1,6 @@
 package store
 
 import (
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -15,13 +14,12 @@ func TestPersistAndReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(time.Minute).Truncate(time.Second)
-	err = st.Update(func(s *State) error {
+	err = st.Update(func(s *State) {
 		s.DeviceAttrs["dev-001"] = map[string]string{"room": "302"}
 		s.Templates["t1"] = Template{ID: "t1", Name: "T", W: 100, H: 100,
 			Regions: []Region{{ID: "r1", W: 100, H: 100, Type: "text", Key: "x"}}}
-		s.Displays["dev-001"] = DisplayConfig{Mode: "template", TemplateID: "t1"}
+		s.Displays["dev-001"] = DisplayConfig{TemplateID: "t1"}
 		s.TestUntil["dev-001"] = until
-		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -31,35 +29,17 @@ func TestPersistAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st2.Attrs("dev-001")["room"] != "302" {
-		t.Fatal("attrs not persisted")
-	}
 	if _, ok := st2.Template("t1"); !ok {
 		t.Fatal("template not persisted")
 	}
-	if st2.Display("dev-001").Mode != "template" {
-		t.Fatal("display not persisted")
-	}
-	if !st2.TestUntil("dev-001").Equal(until) {
-		t.Fatal("test_until not persisted")
-	}
-	// 未配置设备的默认值：跟随全局模板
-	if st2.Display("dev-999").Mode != ModeGlobal {
-		t.Fatal("未配置的设备应当跟随全局模板")
-	}
-}
-
-func TestUpdateErrorDoesNotPersist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	st, _ := Open(path)
-	_ = st.Update(func(s *State) error { s.DeviceAttrs["d"] = map[string]string{"a": "1"}; return nil })
-	if err := st.Update(func(s *State) error { return os.ErrInvalid }); err == nil {
-		t.Fatal("expected error")
-	}
-	st2, _ := Open(path)
-	if st2.Attrs("d")["a"] != "1" {
-		t.Fatal("previous state lost")
-	}
+	st2.View(func(s *State) {
+		if s.DeviceAttrs["dev-001"]["room"] != "302" || s.Displays["dev-001"].TemplateID != "t1" || !s.TestUntil["dev-001"].Equal(until) {
+			t.Fatalf("state not persisted: %+v", s)
+		}
+		if s.CacheQuotaGB != DefaultCacheQuotaGB {
+			t.Fatalf("缓存区配额默认值应在加载时填好：%d", s.CacheQuotaGB)
+		}
+	})
 }
 
 func TestConcurrentAccess(t *testing.T) {
@@ -69,9 +49,9 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_ = st.Update(func(s *State) error { s.DeviceAttrs["d"] = map[string]string{"n": "1"}; return nil })
+			_ = st.Update(func(s *State) { s.DeviceAttrs["d"] = map[string]string{"n": "1"} })
 		}()
-		go func() { defer wg.Done(); _ = st.Attrs("d") }()
+		go func() { defer wg.Done(); st.View(func(s *State) { _ = s.DeviceAttrs["d"] }) }()
 	}
 	wg.Wait()
 }
@@ -132,25 +112,10 @@ func TestValidateDisplay(t *testing.T) {
 		return Template{}, false
 	}
 
-	d := DisplayConfig{}
-	if err := ValidateDisplay(&d, get); err != nil || d.Mode != ModeGlobal {
-		t.Fatalf("空配置应当默认跟随全局模板：%v %+v", err, d)
-	}
-	d = DisplayConfig{Mode: "global", TemplateID: "t1"}
-	if err := ValidateDisplay(&d, get); err != nil || d.TemplateID != "" {
-		t.Fatalf("跟随全局时不应保留专属模板：%v %+v", err, d)
-	}
-	d = DisplayConfig{Mode: "template", TemplateID: "t1"}
-	if err := ValidateDisplay(&d, get); err != nil {
-		t.Fatalf("valid display rejected: %v", err)
-	}
-	d = DisplayConfig{Mode: "template", TemplateID: "missing"}
-	if err := ValidateDisplay(&d, get); err == nil {
-		t.Fatal("missing template accepted")
-	}
-	d = DisplayConfig{Mode: "weird"}
-	if err := ValidateDisplay(&d, get); err == nil {
-		t.Fatal("unknown mode accepted")
+	for id, ok := range map[string]bool{"": true /* 跟随全局 */, "t1": true, "missing": false} {
+		if err := ValidateDisplay(DisplayConfig{TemplateID: id}, get); (err == nil) != ok {
+			t.Errorf("template_id %q: err=%v，期望 ok=%v", id, err, ok)
+		}
 	}
 }
 

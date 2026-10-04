@@ -46,8 +46,7 @@ func New(fontPath string) (*Renderer, error) {
 // Rendered 是一次模板渲染的产物。
 type Rendered struct {
 	Image       *image.RGBA
-	MediaRegion image.Rectangle // 媒体区在画布上的位置；HasMedia 为 false 时无意义
-	HasMedia    bool
+	MediaRegion image.Rectangle // 媒体区在画布上的位置（左右对调后的）；模板没有媒体区时为空
 }
 
 // Render 按模板 + 设备属性合成一张图。
@@ -70,7 +69,7 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
 
 		if reg.Type == store.RegionMedia {
-			out.MediaRegion, out.HasMedia = rect, true
+			out.MediaRegion = rect
 			if overlayMode {
 				// 挖洞：透明黑，设备端的视频从这里透出来
 				draw.Draw(canvas, rect, image.NewUniform(color.RGBA{}), image.Point{}, draw.Src)
