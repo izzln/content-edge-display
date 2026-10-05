@@ -8,8 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	_ "image/jpeg" // 底图解码
-	_ "image/png"
+	"image/png"
 	"log"
 	"math"
 	"os"
@@ -26,6 +25,7 @@ import (
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 
+	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
 )
 
@@ -91,12 +91,6 @@ func parseFont(data []byte) (*opentype.Font, error) {
 	return first, nil
 }
 
-// Rendered 是一次模板渲染的产物。
-type Rendered struct {
-	Image       *image.RGBA
-	MediaRegion image.Rectangle // 媒体区在画布上的位置（左右对调后的）；模板没有媒体区时为空
-}
-
 // Render 按模板 + 设备属性合成一张图。
 //
 // mirror 为真时所有区域左右对调（属性在左还是在右，用同一个模板即可覆盖两种设备）。
@@ -107,9 +101,8 @@ type Rendered struct {
 //   - false：填上自己的底色，得到一张整屏静态图——用于模板没有媒体区、或媒体区还没有内容的情形
 //
 // 底图（PNG）在媒体区之后、文字之前整张叠上去：媒体区里它透明的地方露出视频，不透明的装饰压在视频上。
-func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, overlayMode bool) (*Rendered, error) {
+func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, overlayMode bool) (*image.RGBA, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
-	out := &Rendered{Image: canvas}
 	fill(canvas, canvas.Bounds(), parseColor(tpl.Background))
 	regions := make([]store.Region, len(tpl.Regions))
 	for i, reg := range tpl.Regions {
@@ -117,15 +110,12 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 			reg = store.Mirrored(reg, tpl.W)
 		}
 		regions[i] = reg
-		if reg.Type != store.RegionMedia {
-			continue
-		}
-		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
-		out.MediaRegion = rect
-		if overlayMode {
-			draw.Draw(canvas, rect, image.NewUniform(color.RGBA{}), image.Point{}, draw.Src) // 设备端的视频从这里透出来
-		} else if reg.Bg != "" {
-			fill(canvas, rect, parseColor(reg.Bg))
+		switch {
+		case reg.Type != store.RegionMedia:
+		case overlayMode:
+			fill(canvas, reg.Rect(), color.RGBA{}) // 设备端的视频从这里透出来
+		case reg.Bg != "":
+			fill(canvas, reg.Rect(), parseColor(reg.Bg))
 		}
 	}
 	if file := tpl.BackgroundFor(mirror); file != "" {
@@ -141,7 +131,7 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 		if reg.Type == store.RegionMedia {
 			continue
 		}
-		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
+		rect := reg.Rect()
 		if reg.Bg != "" {
 			fill(canvas, rect, parseColor(reg.Bg))
 		}
@@ -160,7 +150,7 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 			}
 		}
 	}
-	return out, nil
+	return canvas, nil
 }
 
 // background 返回铺满 w×h 画布的底图：等比缩放到刚好盖住画布，居中裁掉多出来的一边。
@@ -177,7 +167,7 @@ func (r *Renderer) background(file string, w, h int) (*image.RGBA, error) {
 		return nil, err
 	}
 	defer f.Close()
-	src, _, err := image.Decode(f)
+	src, err := png.Decode(f)
 	if err != nil {
 		return nil, fmt.Errorf("decode %s: %w", file, err)
 	}
@@ -225,13 +215,13 @@ func TransparentShare(img *image.RGBA, rect image.Rectangle) float64 {
 	return float64(n) / float64(rect.Dx()*rect.Dy())
 }
 
-// Preview 把播放内容的一帧 content 按设备的方式铺进媒体区，再盖上叠加模式渲染出的模板 overlay，
+// Preview 把播放内容的一帧 content 按设备的方式铺进媒体区 media，再盖上叠加模式渲染出的模板 overlay，
 // 得到与设备上一致的画面（含压在媒体区上的底图装饰）。
-func Preview(overlay *Rendered, content image.Image) *image.RGBA {
-	out := image.NewRGBA(overlay.Image.Bounds())
+func Preview(overlay *image.RGBA, media image.Rectangle, content image.Image) *image.RGBA {
+	out := image.NewRGBA(overlay.Bounds())
 	fill(out, out.Bounds(), color.RGBA{A: 0xFF})
-	cover(out, overlay.MediaRegion, content)
-	draw.Draw(out, out.Bounds(), overlay.Image, image.Point{}, draw.Over)
+	cover(out, media, content)
+	draw.Draw(out, out.Bounds(), overlay, image.Point{}, draw.Over)
 	return out
 }
 
@@ -244,7 +234,7 @@ func (r *Renderer) RenderGuide(tpl store.Template, mirror bool) (*image.RGBA, er
 		if mirror {
 			reg = store.Mirrored(reg, tpl.W)
 		}
-		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
+		rect := reg.Rect()
 		var lines []string
 		var c color.RGBA
 		switch reg.Type {
@@ -276,9 +266,10 @@ func (r *Renderer) RenderGuide(tpl store.Template, mirror bool) (*image.RGBA, er
 	return canvas, nil
 }
 
-// RenderTestCard 生成现场定位用的测试卡：纯色底 + 大号“测试” + 设备编号与属性。
+// RenderTestCard 生成现场定位用的整屏测试卡：纯色底 + 大号“测试” + 设备编号与属性。
 // until 按它自带的时区显示，由调用方转换成运营方配置的时区（不能用服务器操作系统的时区）。
-func (r *Renderer) RenderTestCard(w, h int, deviceID string, attrs map[string]string, until time.Time) (*image.RGBA, error) {
+func (r *Renderer) RenderTestCard(deviceID string, attrs map[string]string, until time.Time) (*image.RGBA, error) {
+	w, h := manifest.CanvasW, manifest.CanvasH
 	canvas := image.NewRGBA(image.Rect(0, 0, w, h))
 	fill(canvas, canvas.Bounds(), color.RGBA{0x00, 0x66, 0xCC, 0xFF})
 

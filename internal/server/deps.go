@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -33,8 +32,6 @@ type DepsRepo struct {
 	UploadedAt time.Time `json:"uploaded_at"`
 }
 
-func (s *Server) depsDir() string { return filepath.Join(s.cfg.DataDir, "deps") }
-
 func isDepsBundle(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, depsCodenameFile))
 	return err == nil
@@ -45,16 +42,16 @@ func (s *Server) installDeps(dir string) (DepsRepo, error) {
 	b, _ := os.ReadFile(filepath.Join(dir, depsCodenameFile))
 	codename := strings.TrimSpace(string(b))
 	if !codenamePattern.MatchString(codename) {
-		return DepsRepo{}, fmt.Errorf("依赖包里的 CODENAME %q 无效", codename)
+		return DepsRepo{}, errBadRequest("依赖包里的 CODENAME %q 无效", codename)
 	}
 	for _, f := range []string{"Packages", "Release"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			return DepsRepo{}, fmt.Errorf("依赖包缺少 %s——请上传 scripts/build-deps.sh 产出的包", f)
+			return DepsRepo{}, errBadRequest("依赖包缺少 %s——请上传 scripts/build-deps.sh 产出的包", f)
 		}
 	}
 	// 先把旧的挪开再换上新的：装机脚本任何时候看到的都是一个完整的仓库
 	dst := filepath.Join(s.depsDir(), codename)
-	trash, err := os.MkdirTemp(s.depsDir(), ".old-")
+	trash, err := os.MkdirTemp(s.incomingDir(), "old-deps-")
 	if err != nil {
 		return DepsRepo{}, err
 	}

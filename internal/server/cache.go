@@ -201,13 +201,15 @@ func (s *Server) cacheTouch(paths ...string) {
 	c := s.cache
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := time.Now()
+	now, touched := time.Now(), false
 	for _, sha := range shas {
 		if b := c.idx.Blobs[sha]; b != nil {
-			b.LastUsed = now
+			b.LastUsed, touched = now, true
 		}
 	}
-	c.saveLocked()
+	if touched {
+		c.saveLocked()
+	}
 }
 
 // quotaBytes 是当前配额的字节数。
@@ -250,11 +252,11 @@ func (s *Server) reconcileCache() {
 			continue
 		}
 		dir := filepath.Join(s.cfg.MediaRoot, d.Name())
-		names, err := manifest.ListMedia(dir)
+		files, err := manifest.ListMedia(dir)
 		if err != nil {
 			continue
 		}
-		for _, name := range names {
+		for _, name := range manifest.Names(files) {
 			if manifest.TypeOf(name) == "document" && len(manifest.Pages(dir, name)) == 0 {
 				continue // 没渲染过的 PDF（直接拷进目录的）：不下发，也不纳入
 			}
@@ -302,6 +304,10 @@ func (s *Server) reconcileCache() {
 			}
 		}
 		sort.Slice(idle, func(i, j int) bool { return c.idx.Blobs[idle[i]].LastUsed.Before(c.idx.Blobs[idle[j]].LastUsed) })
+		sources := map[string][]string{} // 结果 → 处理键
+		for k, sha := range c.idx.Sources {
+			sources[sha] = append(sources[sha], k)
+		}
 		for _, sha := range idle {
 			if used <= quota {
 				break
@@ -310,10 +316,8 @@ func (s *Server) reconcileCache() {
 			os.Remove(c.blobPath(sha, b.Ext))
 			os.RemoveAll(c.pagesPath(sha))
 			delete(c.idx.Blobs, sha)
-			for k, v := range c.idx.Sources {
-				if v == sha {
-					delete(c.idx.Sources, k)
-				}
+			for _, k := range sources[sha] {
+				delete(c.idx.Sources, k)
 			}
 			used -= b.Size
 			log.Printf("cache: evicted %s%s (%s, last used %s) to stay within %dGB",
@@ -330,7 +334,7 @@ func (s *Server) reconcileCache() {
 		CachedBytes: used - inUseBytes,
 		Files:       len(c.idx.Blobs),
 		InUseFiles:  inUseFiles,
-		DiskFree:    diskFree(c.root),
+		DiskFree:    fsutil.DiskFree(c.root),
 	}
 }
 
@@ -342,6 +346,7 @@ func (s *Server) runCache(stop <-chan struct{}) {
 		s.reconcileCache()
 		s.gcBackgrounds()
 		s.gcThumbs()
+		s.hashes.Prune()
 		s.auth.prune(time.Now())
 		select {
 		case <-stop:
@@ -407,7 +412,7 @@ func (s *Server) handlePutCache(w http.ResponseWriter, r *http.Request) {
 			http.StatusBadRequest)
 		return
 	}
-	if s.update(w, func(st *store.State) { st.CacheQuotaGB = req.QuotaGB }) {
+	if s.update(w, func(st *store.State) error { st.CacheQuotaGB = req.QuotaGB; return nil }) {
 		log.Printf("cache quota set to %dGB", req.QuotaGB)
 		s.kickCache()
 		w.WriteHeader(http.StatusNoContent)

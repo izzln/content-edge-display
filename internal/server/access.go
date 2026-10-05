@@ -73,13 +73,18 @@ func (s *Server) handlePutAccess(w http.ResponseWriter, r *http.Request) {
 		hash = sha512Crypt(req.RootPassword, "")
 	}
 	now := s.now()
-	if s.update(w, func(st *store.State) {
+	if s.update(w, func(st *store.State) error {
 		st.Access.SSHKeys = keys
 		if hash != "" {
 			st.Access.RootPasswordHash, st.Access.RootPasswordSetAt = hash, now
 		}
+		return nil
 	}) {
-		log.Printf("device access updated: %d SSH key(s)%s", len(keys), map[bool]string{true: ", root password changed"}[hash != ""])
+		what := ""
+		if hash != "" {
+			what = ", root password changed"
+		}
+		log.Printf("device access updated: %d SSH key(s)%s", len(keys), what)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

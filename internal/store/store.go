@@ -1,5 +1,5 @@
-// Package store 持久化服务端可变状态：设备、属性、模板、显示配置、时段计划、测试屏、程序包与更新目标、
-// 缓存区配额。规模小（几十台设备），用单个 JSON 文件 + 内存镜像 + 原子写，避免引入数据库依赖。
+// Package store 持久化服务端可变状态：设备（含属性、显示配置、测试屏、更新目标）、模板、时段计划、程序包、
+// 缓存区配额、设备访问凭据与管理口令。规模小（几十台设备），用单个 JSON 文件 + 内存镜像 + 原子写，避免引入数据库依赖。
 package store
 
 import (
@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
 	"maps"
 	"os"
 	"path/filepath"
@@ -54,14 +55,17 @@ func (t Template) BackgroundFor(mirror bool) string {
 	return t.BackgroundImage
 }
 
-// MediaRegion 返回模板的播放列表区域。
-func (t Template) MediaRegion() (Region, bool) {
+// MediaRect 返回模板的媒体区在画布上的位置（mirror 时是左右对调后的）；没有媒体区时 ok 为 false。
+func (t Template) MediaRect(mirror bool) (rect image.Rectangle, ok bool) {
 	for _, r := range t.Regions {
 		if r.Type == RegionMedia {
-			return r, true
+			if mirror {
+				r = Mirrored(r, t.W)
+			}
+			return r.Rect(), true
 		}
 	}
-	return Region{}, false
+	return image.Rectangle{}, false
 }
 
 // Region 是模板中的一个显示区域。
@@ -79,6 +83,9 @@ type Region struct {
 	Align    string `json:"align"` // "left" | "center" | "right"
 }
 
+// Rect 返回区域在画布上的矩形。
+func (r Region) Rect() image.Rectangle { return image.Rect(r.X, r.Y, r.X+r.W, r.Y+r.H) }
+
 // DisplayConfig 是一台设备的显示配置。
 type DisplayConfig struct {
 	TemplateID string   `json:"template_id,omitempty"` // 本设备专属模板；空 = 跟随全局（时段计划 / 全局默认模板）
@@ -86,30 +93,37 @@ type DisplayConfig struct {
 	Playlist   []string `json:"playlist,omitempty"`    // 媒体区播放顺序，文件位于 media_root/<设备>/
 }
 
-// Device 是自注册设备。设备编号就是它的名字（后台不提供改名）。
+// Device 是自注册设备及运营方给它的全部设置。设备编号就是它的名字（后台不提供改名）。
 type Device struct {
 	ID           string    `json:"id"`
 	Secret       string    `json:"secret"`
 	RegisteredAt time.Time `json:"registered_at"`
+	Hardware
 	// Rekey 是"同编号、新密钥"的注册请求，等运营方在后台确认。设备丢了身份文件（重装、换卡）
 	// 就会这样；也可能是另一台机器撞了编号或有人冒充，所以不自动接受。
-	Rekey        *RekeyRequest `json:"rekey,omitempty"`
-	Hostname     string        `json:"hostname,omitempty"`
-	HWSerial     string        `json:"hw_serial,omitempty"`
-	MAC          string        `json:"mac,omitempty"`
-	IP           string        `json:"ip,omitempty"`
-	AgentVersion string        `json:"agent_version,omitempty"`
+	Rekey *RekeyRequest `json:"rekey,omitempty"`
+
+	Attrs     map[string]string `json:"attrs,omitempty"`     // 属性（模板的属性区域显示）
+	Display   DisplayConfig     `json:"display,omitzero"`    // 专属模板、左右对调、播放顺序
+	TestUntil time.Time         `json:"test_until,omitzero"` // 在此之前显示测试卡
+	Update    *UpdateTarget     `json:"update,omitempty"`    // 程序更新目标
+}
+
+// Hardware 是设备注册时报上来的信息（后台显示，供运营方辨认）。
+type Hardware struct {
+	Hostname     string `json:"hostname,omitempty"`
+	HWSerial     string `json:"hw_serial,omitempty"`
+	MAC          string `json:"mac,omitempty"`
+	IP           string `json:"ip,omitempty"`
+	AgentVersion string `json:"agent_version,omitempty"`
 }
 
 // RekeyRequest 是一次待确认的换密钥注册请求，附带请求方信息供运营方核对。
 type RekeyRequest struct {
-	Secret      string    `json:"secret,omitempty"` // 后台接口返回时清空
-	Fingerprint string    `json:"fingerprint"`      // 密钥指纹，与设备日志里的 key= 对照
+	Secret      string    `json:"secret"`
+	Fingerprint string    `json:"fingerprint"` // 密钥指纹，与设备日志里的 key= 对照
 	At          time.Time `json:"at"`
-	IP          string    `json:"ip,omitempty"`
-	Hostname    string    `json:"hostname,omitempty"`
-	HWSerial    string    `json:"hw_serial,omitempty"`
-	MAC         string    `json:"mac,omitempty"`
+	Hardware
 }
 
 // Package 是已上传的设备端程序包（make package 产出的 tar.gz，装机与 OTA 共用）。
@@ -125,8 +139,7 @@ type Package struct {
 // UpdateTarget 是下发给某台设备的更新目标。
 type UpdateTarget struct {
 	Version   string    `json:"version"`
-	NotBefore time.Time `json:"not_before,omitempty"` // 零值=立即
-	CreatedAt time.Time `json:"created_at"`
+	NotBefore time.Time `json:"not_before,omitzero"` // 零值=立即
 }
 
 // GlobalConfig 是全局显示设置（运营方在管理后台改，立即对所有设备生效）。
@@ -160,44 +173,28 @@ type Admin struct {
 
 // State 是全部可变状态；字段直接序列化到 state.json。
 type State struct {
-	DeviceAttrs  map[string]map[string]string `json:"device_attrs"`
-	Templates    map[string]Template          `json:"templates"`
-	Displays     map[string]DisplayConfig     `json:"displays"`
-	TestUntil    map[string]time.Time         `json:"test_until"`
-	Devices      map[string]Device            `json:"devices"`
-	Packages     map[string]Package           `json:"packages"`
-	Updates      map[string]UpdateTarget      `json:"updates"`
-	Global       GlobalConfig                 `json:"global"`
-	Schedules    []Schedule                   `json:"schedules"`
-	CacheQuotaGB int                          `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
-	Access       Access                       `json:"access"`
-	Admin        Admin                        `json:"admin"`
+	Devices      map[string]*Device  `json:"devices"`
+	Templates    map[string]Template `json:"templates"`
+	Packages     map[string]Package  `json:"packages"`
+	Global       GlobalConfig        `json:"global"`
+	Schedules    []Schedule          `json:"schedules"`
+	CacheQuotaGB int                 `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
+	Access       Access              `json:"access"`
+	Admin        Admin               `json:"admin"`
 }
 
 // DefaultCacheQuotaGB 是文件缓存区的默认配额。
 const DefaultCacheQuotaGB = 16
 
 func (s *State) init() {
-	if s.DeviceAttrs == nil {
-		s.DeviceAttrs = map[string]map[string]string{}
+	if s.Devices == nil {
+		s.Devices = map[string]*Device{}
 	}
 	if s.Templates == nil {
 		s.Templates = map[string]Template{}
 	}
-	if s.Displays == nil {
-		s.Displays = map[string]DisplayConfig{}
-	}
-	if s.TestUntil == nil {
-		s.TestUntil = map[string]time.Time{}
-	}
-	if s.Devices == nil {
-		s.Devices = map[string]Device{}
-	}
 	if s.Packages == nil {
 		s.Packages = map[string]Package{}
-	}
-	if s.Updates == nil {
-		s.Updates = map[string]UpdateTarget{}
 	}
 	if s.Schedules == nil {
 		s.Schedules = []Schedule{}
@@ -249,11 +246,14 @@ func (st *Store) View(fn func(*State)) {
 	fn(&st.s)
 }
 
-// Update 在写锁下修改状态并原子持久化。
-func (st *Store) Update(fn func(*State)) error {
+// Update 在写锁下修改状态并原子持久化。fn 返回错误时不写盘，原样返回该错误——
+// 所以 fn 要先检查、再修改（检查不通过时状态不能已经改了一半）。
+func (st *Store) Update(fn func(*State) error) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	fn(&st.s)
+	if err := fn(&st.s); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(&st.s, "", "  ")
 	if err != nil {
 		return err
@@ -264,11 +264,16 @@ func (st *Store) Update(fn func(*State)) error {
 	return fsutil.WriteFile(st.path, data, 0o644)
 }
 
-// Device 返回已注册的设备。
+// Device 返回已注册设备的副本。
 func (st *Store) Device(id string) (Device, bool) {
 	var d Device
 	var ok bool
-	st.View(func(s *State) { d, ok = s.Devices[id] })
+	st.View(func(s *State) {
+		var p *Device
+		if p, ok = s.Devices[id]; ok {
+			d = *p
+		}
+	})
 	return d, ok
 }
 
@@ -291,7 +296,7 @@ func minutesOfDay(hhmm string) int {
 }
 
 // ValidateSchedules 校验时段计划列表并填充默认值。
-func ValidateSchedules(list []Schedule, getTemplate func(string) (Template, bool)) error {
+func ValidateSchedules(list []Schedule, templates map[string]Template) error {
 	seen := map[string]bool{}
 	for i := range list {
 		sc := &list[i]
@@ -305,7 +310,7 @@ func ValidateSchedules(list []Schedule, getTemplate func(string) (Template, bool
 			return fmt.Errorf("schedule %q: id 重复", sc.ID)
 		}
 		seen[sc.ID] = true
-		if _, ok := getTemplate(sc.TemplateID); !ok {
+		if _, ok := templates[sc.TemplateID]; !ok {
 			return fmt.Errorf("schedule %q: 模板 %q 不存在", sc.ID, sc.TemplateID)
 		}
 		if !timePattern.MatchString(sc.Start) || !timePattern.MatchString(sc.End) {
@@ -367,8 +372,11 @@ var (
 	backgroundPattern = regexp.MustCompile(`^bg-[0-9a-f]{16}\.png$`)
 )
 
-// IsBackgroundFile 判断 name 是不是底图文件名（bg-<内容 sha256 前 16 位>.png）。
+// IsBackgroundFile 判断 name 是不是底图文件名（见 BackgroundFile）。
 func IsBackgroundFile(name string) bool { return backgroundPattern.MatchString(name) }
+
+// BackgroundFile 是底图的文件名：bg-<内容 sha256（十六进制）前 16 位>.png。按内容命名，换图就换名。
+func BackgroundFile(sha256Hex string) string { return "bg-" + sha256Hex[:16] + ".png" }
 
 // ValidateTemplate 填充默认值并校验模板定义。
 func ValidateTemplate(t *Template) error {
@@ -454,14 +462,6 @@ func ValidateTemplate(t *Template) error {
 		default:
 			return fmt.Errorf("region %q: 非法对齐 %q", r.ID, r.Align)
 		}
-	}
-	return nil
-}
-
-// ValidateDisplay 校验显示配置引用的专属模板。
-func ValidateDisplay(d DisplayConfig, getTemplate func(string) (Template, bool)) error {
-	if _, ok := getTemplate(d.TemplateID); d.TemplateID != "" && !ok {
-		return fmt.Errorf("display: 模板 %q 不存在", d.TemplateID)
 	}
 	return nil
 }

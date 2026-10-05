@@ -53,7 +53,7 @@ func TestAttributesRoundTrip(t *testing.T) {
 
 	// 属性随设备列表返回（后台就靠这个显示和编辑，没有单独的读取接口）
 	w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
-	var statuses []DeviceStatus
+	var statuses []DeviceView
 	json.Unmarshal(w.Body.Bytes(), &statuses)
 	for _, st := range statuses {
 		if st.ID == testDeviceID && (st.Attrs["room"] != "302" || st.Attrs["楼层"] != "3") {

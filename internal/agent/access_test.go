@@ -96,7 +96,7 @@ func TestAccessSettingsApplied(t *testing.T) {
 	if err := e.a.heartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var st []server.DeviceStatus
+	var st []server.DeviceView
 	json.Unmarshal(e.admin(t, "GET", "/api/v1/admin/devices", "").Body.Bytes(), &st)
 	if st[0].Heartbeat == nil || !strings.Contains(st[0].Heartbeat.AccessError, "boom") {
 		t.Fatal("后台应看到访问设置失败的原因")

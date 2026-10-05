@@ -3,6 +3,7 @@ package transcode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image/jpeg"
 	"os"
 	"os/exec"
@@ -42,7 +43,7 @@ func TestPDFRenderPages(t *testing.T) {
 		t.Fatalf("进度回调 %v", done)
 	}
 	for i, want := range [][2]int{{1440, 2037}, {1440, 1018}, {1440, 2037}} {
-		f, err := os.Open(filepath.Join(out, PageName(i+1)))
+		f, err := os.Open(filepath.Join(out, fmt.Sprintf("p%03d.jpg", i+1)))
 		if err != nil {
 			t.Fatal(err)
 		}

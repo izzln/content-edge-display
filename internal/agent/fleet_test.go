@@ -122,9 +122,9 @@ func TestRegisterThenPoll(t *testing.T) {
 	if err := a.heartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var statuses []server.DeviceStatus
+	var statuses []server.DeviceView
 	json.Unmarshal(e.admin(t, "GET", "/api/v1/admin/devices", "").Body.Bytes(), &statuses)
-	if len(statuses) != 1 || statuses[0].ID != a.identity.DeviceID || !statuses[0].Online || statuses[0].HW.AgentVersion != Version {
+	if len(statuses) != 1 || statuses[0].ID != a.identity.DeviceID || !statuses[0].Online || statuses[0].AgentVersion != Version {
 		t.Fatalf("device not online in admin: %+v", statuses)
 	}
 }

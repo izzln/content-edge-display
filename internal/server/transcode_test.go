@@ -122,9 +122,9 @@ func TestVideoUploadIsTranscodedInBackground(t *testing.T) {
 	if strings.Join(res.Accepted, ",") != "a.jpg" {
 		t.Fatalf("图片应立即就绪，得到 %v", res.Accepted)
 	}
-	if strings.Join(res.Transcoding, ",") != "hevc.mp4" || len(res.Rejected) != 0 {
+	if strings.Join(res.Queued, ",") != "hevc.mp4" || len(res.Rejected) != 0 {
 		t.Fatalf("视频应进入转码队列（容器统一为 .mp4），得到 transcoding=%v rejected=%+v",
-			res.Transcoding, res.Rejected)
+			res.Queued, res.Rejected)
 	}
 
 	<-enc.started

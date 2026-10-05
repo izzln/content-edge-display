@@ -71,46 +71,46 @@ func TestBackgroundImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !near(ovl.Image.At(20, 150), red) || !near(ovl.Image.At(5, 5), red) || alphaAt(ovl.Image, 120, 100) != 0 || !near(ovl.Image.At(160, 160), blue) {
+	if !near(ovl.At(20, 150), red) || !near(ovl.At(5, 5), red) || alphaAt(ovl, 120, 100) != 0 || !near(ovl.At(160, 160), blue) {
 		t.Fatalf("叠加图：媒体区透明处露出视频，装饰压在上面，其余是底图：%v %v %v",
-			ovl.Image.At(20, 150), ovl.Image.At(120, 100), ovl.Image.At(160, 160))
+			ovl.At(20, 150), ovl.At(120, 100), ovl.At(160, 160))
 	}
 	full, _ := r.Render(tpl, nil, false, false)
-	if !near(full.Image.At(120, 100), black) || !near(full.Image.At(160, 160), blue) {
+	if !near(full.At(120, 100), black) || !near(full.At(160, 160), blue) {
 		t.Fatal("整屏图：媒体区透明处是底色，装饰照样在")
 	}
-	if share := TransparentShare(CoverImage(mustDecode(t, dir, "bg-0000000000000001.png"), 200, 200), ovl.MediaRegion); share < 0.97 || share > 0.99 {
+	if share := TransparentShare(CoverImage(mustDecode(t, dir, "bg-0000000000000001.png"), 200, 200), image.Rect(100, 0, 200, 200)); share < 0.97 || share > 0.99 {
 		t.Fatalf("媒体区透明比例应约为 98%%：%.3f", share)
 	}
 
 	// 效果预览：内容铺进媒体区，模板（含装饰）盖在上面
 	content := image.NewRGBA(image.Rect(0, 0, 50, 50))
 	draw.Draw(content, content.Bounds(), image.NewUniform(yellow), image.Point{}, draw.Src)
-	pv := Preview(ovl, content)
+	pv := Preview(ovl, image.Rect(100, 0, 200, 200), content)
 	if !near(pv.At(120, 100), yellow) || !near(pv.At(160, 160), blue) || !near(pv.At(20, 150), red) {
 		t.Fatal("预览应是内容在媒体区、装饰与底图在上面")
 	}
 
 	// 对调但没有对调版：原图不翻转——左边的红色不透明部分正好盖住换到左边的媒体区（所以需要对调版）
 	mir, _ := r.Render(tpl, nil, true, true)
-	if !near(mir.Image.At(20, 150), red) {
-		t.Fatalf("没有对调版底图时不应翻转原图：%v", mir.Image.At(20, 150))
+	if !near(mir.At(20, 150), red) {
+		t.Fatalf("没有对调版底图时不应翻转原图：%v", mir.At(20, 150))
 	}
 	tpl.BackgroundImageMirror = "bg-0000000000000002.png"
 	mir, _ = r.Render(tpl, nil, true, true)
-	if alphaAt(mir.Image, 20, 150) != 0 || !near(mir.Image.At(180, 150), green) {
+	if alphaAt(mir, 20, 150) != 0 || !near(mir.At(180, 150), green) {
 		t.Fatal("对调的设备应使用对调版底图")
 	}
 
 	// 底图文件丢了：退回底色，不让清单生成失败
 	tpl.BackgroundImage, tpl.BackgroundImageMirror = "bg-00000000000000ff.png", ""
-	if out, err := r.Render(tpl, nil, false, false); err != nil || !near(out.Image.At(20, 150), black) {
+	if out, err := r.Render(tpl, nil, false, false); err != nil || !near(out.At(20, 150), black) {
 		t.Fatalf("底图缺失时应退回底色：%v", err)
 	}
 
 	// 没有底图的模板：媒体区仍是整块透明
 	tpl.BackgroundImage = ""
-	if plain, _ := r.Render(tpl, nil, false, true); alphaAt(plain.Image, 160, 160) != 0 {
+	if plain, _ := r.Render(tpl, nil, false, true); alphaAt(plain, 160, 160) != 0 {
 		t.Fatal("没有底图时媒体区整块透明")
 	}
 }

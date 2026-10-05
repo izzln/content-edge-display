@@ -12,7 +12,6 @@ import (
 	"image/png"
 	"log"
 	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,12 +30,6 @@ import (
 
 // errUnknownDevice 表示请求里的设备编号没有登记（从未注册，或在后台被删除了）。
 var errUnknownDevice = errors.New("unknown device")
-
-// clientIP 是请求方的 IP（设备在局域网里，看到的就是它自己的地址）。
-func clientIP(r *http.Request) string {
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
-}
 
 // announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳（设备照办，见 manifest.HeaderPollInterval）。
 func (s *Server) announceSchedule(w http.ResponseWriter) {
@@ -105,15 +98,37 @@ func (s *Server) logAuthFailure(key string) bool {
 	return true
 }
 
+// deviceRuntime 是一台设备只在内存里的状态（读写都持有 s.mu）。
+type deviceRuntime struct {
+	lastSeen time.Time           // 最近一次任何签名通过的请求
+	hb       *manifest.Heartbeat // 最近一次心跳
+	// 取内容的进度：设备每次轮询都带着自己已应用的版本（If-None-Match），不用等心跳就知道它显示的是不是最新内容。
+	key      string             // 那次轮询时这台设备显示输入的指纹，见 content.key
+	m        *manifest.Manifest // 按 key 生成的清单：key 不变就直接复用，不再渲染、编码、算哈希
+	applied  string             // 设备当时已应用的版本
+	announce string             // 最近一次记过"新内容下发"日志的版本
+}
+
+// runtime 返回设备的运行时状态，没有就建一个（调用方持有 s.mu）。
+func (s *Server) runtime(id string) *deviceRuntime {
+	rt := s.devices[id]
+	if rt == nil {
+		rt = &deviceRuntime{}
+		s.devices[id] = rt
+	}
+	return rt
+}
+
 // noteContact 记下设备最近一次联系，用于判断在线。任何签名通过的请求都算：轮询、心跳、下载文件——
 // 设备下载大文件时轮询会暂停，只看轮询的话"正在刷新"的设备反而会被判离线。
 func (s *Server) noteContact(dev store.Device, r *http.Request) {
 	now := s.now()
 	s.mu.Lock()
-	seen, known := s.lastSeen[dev.ID]
-	s.lastSeen[dev.ID] = now
+	rt := s.runtime(dev.ID)
+	seen := rt.lastSeen
+	rt.lastSeen = now
 	s.mu.Unlock()
-	if !known || now.Sub(seen) > s.offlineAfter() {
+	if seen.IsZero() || now.Sub(seen) > s.offlineAfter() {
 		log.Printf("device %s online (%s, agent %s)", dev.ID, clientIP(r), cmp.Or(dev.AgentVersion, "?"))
 	}
 }
@@ -142,15 +157,6 @@ func (s *Server) serveDeviceFile(dirOf func(deviceID string, r *http.Request) st
 
 // ---- 清单 ----
 
-// deviceSync 记录设备最近一次取清单时的情况。设备每次轮询都带着自己已应用的版本
-// （If-None-Match），所以不用等心跳就能知道它显示的是不是最新内容。
-type deviceSync struct {
-	key      string             // 那次轮询时这台设备显示输入的指纹，见 content.key
-	m        *manifest.Manifest // 按 key 生成的清单：key 不变就直接复用，不再渲染、编码、算哈希
-	applied  string             // 设备当时已应用的版本
-	announce string             // 最近一次记过"新内容下发"日志的版本
-}
-
 // 设备内容状态（后台"当前显示"列）。
 const (
 	syncOffline = "offline" // 设备离线
@@ -162,14 +168,13 @@ const (
 // syncState 判断设备的内容状态（调用方持有 s.mu）。key 是这台设备显示输入的当前指纹，
 // 与它上次轮询时的不同，说明它该显示的内容变了而它还没来取。只看这台设备自己的输入：
 // 改别的设备、改没被用到的模板都不影响它；时段计划到点切换、测试屏到期也能及时体现。
-func (s *Server) syncState(deviceID string, online bool, key string) string {
-	st, ok := s.sync[deviceID]
+func (s *Server) syncState(rt *deviceRuntime, online bool, key string) string {
 	switch {
 	case !online:
 		return syncOffline
-	case !ok || st.m == nil || st.key != key:
+	case rt == nil || rt.m == nil || rt.key != key:
 		return syncWaiting
-	case st.applied != st.m.Version:
+	case rt.applied != rt.m.Version:
 		return syncSyncing
 	}
 	return syncLatest
@@ -188,13 +193,12 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	applied := strings.Trim(strings.TrimSpace(r.Header.Get("If-None-Match")), `"`)
 	s.mu.Lock()
-	st := s.sync[dev.ID]
-	st.applied = applied
-	announce := applied != m.Version && st.announce != m.Version // 下载失败重试时会重复取同一版本，只记第一次
+	rt := s.runtime(dev.ID)
+	rt.applied = applied
+	announce := applied != m.Version && rt.announce != m.Version // 下载失败重试时会重复取同一版本，只记第一次
 	if announce {
-		st.announce = m.Version
+		rt.announce = m.Version
 	}
-	s.sync[dev.ID] = st
 	s.mu.Unlock()
 
 	w.Header().Set("ETag", `"`+m.Version+`"`)
@@ -225,19 +229,18 @@ func (s *Server) manifestFor(deviceID string) (*manifest.Manifest, error) {
 	}
 	key := c.key()
 	s.mu.Lock()
-	st := s.sync[deviceID]
+	rt := s.runtime(deviceID)
+	cached, cachedKey := rt.m, rt.key
 	s.mu.Unlock()
-	if st.key == key && st.m != nil {
-		return st.m, nil
+	if cached != nil && cachedKey == key {
+		return cached, nil
 	}
 	m, err := s.buildManifest(deviceID, c)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	st = s.sync[deviceID]
-	st.key, st.m = key, m
-	s.sync[deviceID] = st
+	rt.key, rt.m = key, m
 	s.mu.Unlock()
 	return m, nil
 }
@@ -250,16 +253,9 @@ type content struct {
 	Template  store.Template    `json:"template"`
 	Attrs     map[string]string `json:"attrs"`
 	Mirror    bool              `json:"mirror"`
-	Media     []mediaFile       `json:"media"` // 媒体区的播放列表；模板没有媒体区时为空
+	Media     []manifest.File   `json:"media"` // 媒体区的播放列表（带大小与修改时间：同名文件被替换也算变了）
 	Update    *manifest.Update  `json:"update,omitempty"`
 	Access    *manifest.Access  `json:"access,omitempty"`
-}
-
-// mediaFile 是播放列表里的一个文件。带上大小与修改时间：同名文件被替换也算内容变了。
-type mediaFile struct {
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"mtime"`
 }
 
 // content 汇总设备此刻的显示输入：一次读锁取齐状态，再读媒体文件的元数据。不渲染、不算哈希。
@@ -270,32 +266,29 @@ func (s *Server) content(deviceID string, now time.Time) (content, error) {
 		found    bool
 	)
 	s.store.View(func(st *store.State) {
-		c.Attrs = maps.Clone(st.DeviceAttrs[deviceID])
-		c.Update, c.Access = pendingUpdate(st, deviceID, now), deviceAccess(st.Access)
-		if until := st.TestUntil[deviceID]; now.Before(until) {
-			c.TestUntil, c.Source, found = until, "test", true
+		d := st.Devices[deviceID]
+		if d == nil { // 刚被删掉
 			return
 		}
-		disp := st.Displays[deviceID]
-		c.Mirror, playlist = disp.Mirror, disp.Playlist
-		c.Template, c.Source, found = resolveTemplate(st, disp, now.In(s.loc))
+		c.Attrs = maps.Clone(d.Attrs)
+		c.Update, c.Access = pendingUpdate(st, d, now), deviceAccess(st.Access)
+		if now.Before(d.TestUntil) {
+			c.TestUntil, c.Source, found = d.TestUntil, "test", true
+			return
+		}
+		c.Mirror, playlist = d.Display.Mirror, d.Display.Playlist
+		c.Template, c.Source, found = resolveTemplate(st, d.Display, now.In(s.loc))
 	})
 	switch {
 	case !found:
-		return c, errors.New("no usable template (global default template missing)")
+		return c, errors.New("no usable template (device deleted, or global default template missing)")
 	case c.Source == "test":
 		return c, nil
 	}
-	if _, ok := c.Template.MediaRegion(); ok {
-		dir := s.deviceMediaDir(deviceID)
-		names, err := orderPlaylist(dir, playlist)
-		if err != nil {
+	if _, ok := c.Template.MediaRect(false); ok {
+		var err error
+		if c.Media, err = orderPlaylist(s.deviceMediaDir(deviceID), playlist); err != nil {
 			return c, err
-		}
-		for _, n := range names {
-			if fi, err := os.Stat(filepath.Join(dir, n)); err == nil {
-				c.Media = append(c.Media, mediaFile{Name: n, Size: fi.Size(), ModTime: fi.ModTime()})
-			}
 		}
 	}
 	return c, nil
@@ -319,8 +312,7 @@ func resolveTemplate(st *store.State, disp store.DisplayConfig, now time.Time) (
 // key 是 content 的指纹。
 func (c content) key() string {
 	b, _ := json.Marshal(c) // map 按键排序输出，结果确定
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:8])
+	return shortSum(b)
 }
 
 // buildManifest 由显示输入生成设备清单：测试卡，或模板（+ 媒体区播放列表），并附带待执行的程序更新。
@@ -336,28 +328,23 @@ func (s *Server) buildManifest(deviceID string, c content) (*manifest.Manifest, 
 		layout *manifest.Layout
 	)
 	if !c.TestUntil.IsZero() {
-		card, err := s.renderer.RenderTestCard(manifest.CanvasW, manifest.CanvasH, deviceID, c.Attrs, c.TestUntil.In(s.loc))
+		card, err := s.renderer.RenderTestCard(deviceID, c.Attrs, c.TestUntil.In(s.loc))
 		if err != nil {
 			return nil, fmt.Errorf("render test card: %w", err)
 		}
 		img, kind = card, "test"
 	} else {
-		names := make([]string, len(c.Media))
-		for i, f := range c.Media {
-			names[i] = f.Name
-		}
 		var err error
-		media, err = manifest.BuildItems(s.deviceMediaDir(deviceID), deviceID, names, c.Template.ImageDurationS, s.hashes)
+		media, err = manifest.BuildItems(s.deviceMediaDir(deviceID), deviceID, manifest.Names(c.Media), c.Template.ImageDurationS, s.hashes)
 		if err != nil {
 			return nil, err
 		}
-		rendered, err := s.renderer.Render(c.Template, c.Attrs, c.Mirror, len(media) > 0)
-		if err != nil {
+		if img, err = s.renderer.Render(c.Template, c.Attrs, c.Mirror, len(media) > 0); err != nil {
 			return nil, fmt.Errorf("render template %s: %w", c.Template.ID, err)
 		}
-		img, kind = rendered.Image, "tpl"
+		kind = "tpl"
 		if len(media) > 0 {
-			r := rendered.MediaRegion
+			r, _ := c.Template.MediaRect(c.Mirror)
 			kind, layout = "ovl", &manifest.Layout{
 				CanvasW: c.Template.W, CanvasH: c.Template.H,
 				Media: manifest.Rect{X: r.Min.X, Y: r.Min.Y, W: r.Dx(), H: r.Dy()},
@@ -395,12 +382,7 @@ func (s *Server) renderedItem(deviceID, kind string, img image.Image) (manifest.
 	if err := fsutil.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0o644); err != nil {
 		return manifest.Item{}, err
 	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if n := e.Name(); n != name && !strings.HasPrefix(n, ".") { // 隐藏文件是别的请求正在写的
-			os.Remove(filepath.Join(dir, n))
-		}
-	}
+	pruneDir(dir, func(n string, _ os.FileInfo) bool { return n == name || strings.HasPrefix(n, ".") }) // 隐藏文件是别的请求正在写的
 	return manifest.Item{
 		Type:   "image",
 		Name:   name,
@@ -422,15 +404,18 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	s.lastHB[dev.ID] = hb
+	s.runtime(dev.ID).hb = &hb
 	s.mu.Unlock()
 	// 持久化程序版本与 IP（仅变化时写盘）：服务端重启后升级状态仍可判断。
 	if ip := clientIP(r); dev.AgentVersion != hb.AgentVersion || dev.IP != ip {
-		if err := s.store.Update(func(st *store.State) {
-			d := st.Devices[dev.ID]
+		if err := s.store.Update(func(st *store.State) error {
+			d, ok := st.Devices[dev.ID]
+			if !ok {
+				return errNotFound("设备") // 刚被删掉：不再写回
+			}
 			d.AgentVersion, d.IP = hb.AgentVersion, ip
-			st.Devices[dev.ID] = d
-		}); err != nil {
+			return nil
+		}); err != nil && !errors.As(err, new(*httpError)) {
 			log.Printf("saving version/IP of device %s failed: %v", dev.ID, err)
 		}
 	}

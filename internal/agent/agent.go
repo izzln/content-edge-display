@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/fsutil"
@@ -433,7 +432,7 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 	resp, err := a.postJSON(ctx, "/api/v1/device/heartbeat", manifest.Heartbeat{
 		AgentVersion: Version,
 		UptimeS:      uptimeSeconds(),
-		DiskFreeMB:   diskFreeMB(a.cfg.CacheDir),
+		DiskFreeMB:   fsutil.DiskFree(a.cfg.CacheDir) >> 20,
 		TempC:        socTempC(),
 		HWDec:        st.HWDec,
 		OutputW:      st.OutputW,
@@ -485,12 +484,4 @@ func socTempC() int {
 		fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &milli)
 	}
 	return milli / 1000
-}
-
-func diskFreeMB(dir string) int64 {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
-		return -1
-	}
-	return int64(st.Bavail) * int64(st.Bsize) / (1 << 20)
 }

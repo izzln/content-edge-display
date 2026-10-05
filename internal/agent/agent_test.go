@@ -45,12 +45,12 @@ func TestEndToEnd(t *testing.T) {
 	if err := a.heartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var statuses []server.DeviceStatus
+	var statuses []server.DeviceView
 	json.Unmarshal(e.admin(t, "GET", "/api/v1/admin/devices", "").Body.Bytes(), &statuses)
 	if len(statuses) != 1 || !statuses[0].Online || statuses[0].Heartbeat == nil || statuses[0].Heartbeat.AgentVersion != Version {
 		t.Fatalf("device not online with heartbeat in admin view: %+v", statuses)
 	}
-	if statuses[0].HW.IP == "" {
+	if statuses[0].IP == "" {
 		t.Fatal("服务端应从连接上取到设备 IP")
 	}
 

@@ -176,7 +176,7 @@ func (s *Server) syncAdminToken() error {
 	s.store.View(func(st *store.State) { cur = st.Admin })
 	if cur.TokenHash == "" || !checkAdminToken(s.cfg.AdminToken, cur.ConfigHash) {
 		h := hashAdminToken(s.cfg.AdminToken)
-		if err := s.store.Update(func(st *store.State) { st.Admin = store.Admin{TokenHash: h, ConfigHash: h} }); err != nil {
+		if err := s.store.Update(func(st *store.State) error { st.Admin = store.Admin{TokenHash: h, ConfigHash: h}; return nil }); err != nil {
 			return err
 		}
 		if cur.TokenHash != "" {
@@ -213,7 +213,7 @@ func (s *Server) handlePutAdminToken(w http.ResponseWriter, r *http.Request) {
 	}
 	h := hashAdminToken(req.NewToken)
 	now := s.now()
-	if s.update(w, func(st *store.State) { st.Admin.TokenHash, st.Admin.ChangedAt = h, now }) {
+	if s.update(w, func(st *store.State) error { st.Admin.TokenHash, st.Admin.ChangedAt = h, now; return nil }) {
 		s.auth.set(req.NewToken, h)
 		log.Printf("admin token changed in the admin UI (from %s)", clientIP(r))
 		w.WriteHeader(http.StatusNoContent)

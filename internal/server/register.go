@@ -31,22 +31,20 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 
+	hw := store.Hardware{Hostname: req.Hostname, HWSerial: req.HWSerial, MAC: req.MAC, IP: ip, AgentVersion: req.AgentVersion}
 	var conflict, created bool
-	if !s.update(w, func(st *store.State) {
-		d, ok := st.Devices[req.DeviceID]
-		if ok && d.Secret != req.Secret {
+	if !s.update(w, func(st *store.State) error {
+		switch d, ok := st.Devices[req.DeviceID]; {
+		case !ok:
+			created = true
+			st.Devices[req.DeviceID] = &store.Device{ID: req.DeviceID, Secret: req.Secret, RegisteredAt: s.now(), Hardware: hw}
+		case d.Secret != req.Secret:
 			conflict = true
-			d.Rekey = &store.RekeyRequest{
-				Secret: req.Secret, Fingerprint: sign.Fingerprint(req.Secret), At: s.now(),
-				IP: ip, Hostname: req.Hostname, HWSerial: req.HWSerial, MAC: req.MAC,
-			}
-		} else {
-			if !ok {
-				d, created = store.Device{ID: req.DeviceID, Secret: req.Secret, RegisteredAt: s.now()}, true
-			}
-			d.Hostname, d.HWSerial, d.MAC, d.IP, d.AgentVersion = req.Hostname, req.HWSerial, req.MAC, ip, req.AgentVersion
+			d.Rekey = &store.RekeyRequest{Secret: req.Secret, Fingerprint: sign.Fingerprint(req.Secret), At: s.now(), Hardware: hw}
+		default:
+			d.Hardware = hw
 		}
-		st.Devices[req.DeviceID] = d
+		return nil
 	}) {
 		return
 	}
@@ -65,35 +63,22 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 // handleRekey 处理待确认的换密钥请求：{"accept": true} 换成新密钥，false 则丢弃请求。
 func (s *Server) handleRekey(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
 	var req struct {
 		Accept bool `json:"accept"`
 	}
 	if !decodeJSON(w, r, 4<<10, &req) {
 		return
 	}
-	var missing bool
-	if !s.update(w, func(st *store.State) {
-		d := st.Devices[dev.ID]
+	if s.editDevice(w, r.PathValue("id"), func(d *store.Device) error {
 		if d.Rekey == nil {
-			missing = true
-			return
+			return errConflict("该设备没有待确认的换密钥请求")
 		}
 		if req.Accept {
-			d.Secret = d.Rekey.Secret
-			d.Hostname, d.HWSerial, d.MAC, d.IP = d.Rekey.Hostname, d.Rekey.HWSerial, d.Rekey.MAC, d.Rekey.IP
+			d.Secret, d.Hardware = d.Rekey.Secret, d.Rekey.Hardware
 		}
 		d.Rekey = nil
-		st.Devices[dev.ID] = d
+		return nil
 	}) {
-		return
+		w.WriteHeader(http.StatusNoContent)
 	}
-	if missing {
-		http.Error(w, "该设备没有待确认的换密钥请求", http.StatusConflict)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }

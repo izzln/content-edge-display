@@ -48,7 +48,7 @@ func newRenderer(t *testing.T) *Renderer {
 func TestRenderDeterministicAndAttrSensitive(t *testing.T) {
 	r := newRenderer(t)
 	tpl := mediaTemplate()
-	render := func(room string) *Rendered {
+	render := func(room string) *image.RGBA {
 		out, err := r.Render(tpl, map[string]string{"room": room}, false, false)
 		if err != nil {
 			t.Fatal(err)
@@ -57,33 +57,17 @@ func TestRenderDeterministicAndAttrSensitive(t *testing.T) {
 	}
 
 	one := render("302")
-	if got := one.Image.Bounds(); got.Dx() != 1440 || got.Dy() != 900 {
+	if got := one.Bounds(); got.Dx() != 1440 || got.Dy() != 900 {
 		t.Fatalf("wrong canvas size: %v", got)
 	}
-	if sha256.Sum256(encode(t, one.Image)) != sha256.Sum256(encode(t, render("302").Image)) {
+	if sha256.Sum256(encode(t, one)) != sha256.Sum256(encode(t, render("302"))) {
 		t.Fatal("same input should render identical output（版本号稳定依赖于此）")
 	}
-	if sha256.Sum256(encode(t, one.Image)) == sha256.Sum256(encode(t, render("999").Image)) {
+	if sha256.Sum256(encode(t, one)) == sha256.Sum256(encode(t, render("999"))) {
 		t.Fatal("attribute change must change output")
 	}
-	if c := one.Image.RGBAAt(360, 10); c != (color.RGBA{0x1E, 0x3A, 0x8A, 0xFF}) {
+	if c := one.RGBAAt(360, 10); c != (color.RGBA{0x1E, 0x3A, 0x8A, 0xFF}) {
 		t.Fatalf("left region bg wrong: %+v", c)
-	}
-}
-
-func TestRenderWithoutMediaRegion(t *testing.T) {
-	tpl := store.Template{ID: "t", Regions: []store.Region{
-		{ID: "txt", X: 0, Y: 0, W: 1440, H: 900, Type: store.RegionText, Key: "欢迎"},
-	}}
-	if err := store.ValidateTemplate(&tpl); err != nil {
-		t.Fatal(err)
-	}
-	out, err := newRenderer(t).Render(tpl, nil, false, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !out.MediaRegion.Empty() {
-		t.Fatal("模板没有媒体区，MediaRegion 应为空")
 	}
 }
 
@@ -99,17 +83,11 @@ func TestRenderMirror(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := plain.MediaRegion, image.Rect(720, 0, 1440, 900); got != want {
-		t.Fatalf("媒体区位置 = %v, 期望 %v", got, want)
-	}
-	if got, want := flipped.MediaRegion, image.Rect(0, 0, 720, 900); got != want {
-		t.Fatalf("mirror 后媒体区位置 = %v, 期望 %v", got, want)
-	}
 	// 属性底色跟着换到右半边
-	if c := flipped.Image.RGBAAt(1080, 10); c != (color.RGBA{0x1E, 0x3A, 0x8A, 0xFF}) {
+	if c := flipped.RGBAAt(1080, 10); c != (color.RGBA{0x1E, 0x3A, 0x8A, 0xFF}) {
 		t.Fatalf("mirror 后属性区未移到右半边: %+v", c)
 	}
-	if c := plain.Image.RGBAAt(1080, 10); c.A != 0 {
+	if c := plain.RGBAAt(1080, 10); c.A != 0 {
 		t.Fatalf("未 mirror 时右半边应是透明媒体区: %+v", c)
 	}
 }
@@ -122,17 +100,14 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if overlay.MediaRegion.Empty() {
-		t.Fatal("模板有媒体区，MediaRegion 不应为空")
-	}
 	// 叠加图：媒体区全透明（且是预乘 alpha 的全零，显示图层需要）
 	for _, p := range []image.Point{{720, 0}, {1080, 450}, {1439, 899}} {
-		if c := overlay.Image.RGBAAt(p.X, p.Y); c != (color.RGBA{}) {
+		if c := overlay.RGBAAt(p.X, p.Y); c != (color.RGBA{}) {
 			t.Fatalf("叠加图媒体区 (%d,%d) 不透明: %+v", p.X, p.Y, c)
 		}
 	}
 	// 属性区仍然不透明，否则会被视频透出来
-	if c := overlay.Image.RGBAAt(360, 450); c.A != 0xFF {
+	if c := overlay.RGBAAt(360, 450); c.A != 0xFF {
 		t.Fatalf("叠加图属性区应完全不透明: %+v", c)
 	}
 
@@ -141,7 +116,7 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := full.Image.RGBAAt(1080, 450); c != (color.RGBA{0x11, 0x22, 0x33, 0xFF}) {
+	if c := full.RGBAAt(1080, 450); c != (color.RGBA{0x11, 0x22, 0x33, 0xFF}) {
 		t.Fatalf("整屏图媒体区底色错误: %+v", c)
 	}
 }
@@ -149,7 +124,7 @@ func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 func TestRenderTestCard(t *testing.T) {
 	r := newRenderer(t)
 	until := time.Now().Add(5 * time.Minute)
-	img, err := r.RenderTestCard(1440, 900, "dev-001", map[string]string{"room": "302"}, until)
+	img, err := r.RenderTestCard("dev-001", map[string]string{"room": "302"}, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +136,7 @@ func TestRenderTestCard(t *testing.T) {
 		t.Fatalf("test card bg wrong: %+v", c)
 	}
 	// 同输入两次渲染字节一致（保证清单版本稳定）
-	img2, _ := r.RenderTestCard(1440, 900, "dev-001", map[string]string{"room": "302"}, until)
+	img2, _ := r.RenderTestCard("dev-001", map[string]string{"room": "302"}, until)
 	if sha256.Sum256(encode(t, img)) != sha256.Sum256(encode(t, img2)) {
 		t.Fatal("test card render not deterministic")
 	}
@@ -183,7 +158,7 @@ func TestRenderTestCardUsesGivenTimezone(t *testing.T) {
 	}
 	instant := time.Date(2026, 10, 2, 3, 0, 0, 0, time.UTC) // 东京 12:00
 	render := func(at time.Time) [32]byte {
-		img, err := r.RenderTestCard(1440, 900, "dev-001", nil, at)
+		img, err := r.RenderTestCard("dev-001", nil, at)
 		if err != nil {
 			t.Fatal(err)
 		}

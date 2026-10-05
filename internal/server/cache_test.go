@@ -45,7 +45,7 @@ func TestReuploadReusesCachedResult(t *testing.T) {
 	waitMedia(t, h, "转码完成", func(fs []MediaFile) bool { f, ok := byName(fs, "clip.mp4"); return ok && f.Status == mediaReady })
 
 	res := parseUpload(t, uploadMedia(t, h, "dev-002", upload{"clip.mov", fakeVideo}, upload{"a.png", tinyPNG(t)}))
-	if strings.Join(res.Reused, ",") != "clip.mp4,a.png" || strings.Join(res.Accepted, ",") != "clip.mp4,a.png" || len(res.Transcoding) != 0 {
+	if strings.Join(res.Reused, ",") != "clip.mp4,a.png" || strings.Join(res.Accepted, ",") != "clip.mp4,a.png" || len(res.Queued) != 0 {
 		t.Fatalf("同一原片应直接复用、立即就绪：%+v", res)
 	}
 	if enc.calls != 1 {
@@ -95,7 +95,7 @@ func TestDeletedContentStaysCached(t *testing.T) {
 func TestCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	smallGB(s, 1200)
-	s.store.Update(func(st *store.State) { st.CacheQuotaGB = 2 }) // 2400 字节
+	s.store.Update(func(st *store.State) error { st.CacheQuotaGB = 2; return nil }) // 2400 字节
 	file := func(c byte) []byte { return bytes.Repeat([]byte{c}, 600) }
 	for _, n := range []string{"a.jpg", "b.jpg", "c.jpg"} {
 		putMediaFile(t, s, n, file(n[0]))
@@ -122,7 +122,7 @@ func TestCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 
 	// 在用的超过配额也不清
-	s.store.Update(func(st *store.State) { st.CacheQuotaGB = 1 })
+	s.store.Update(func(st *store.State) error { st.CacheQuotaGB = 1; return nil })
 	s.reconcileCache()
 	for _, n := range []string{"c.jpg", "d.jpg", "e.jpg"} {
 		if _, err := os.Stat(devFile(s, testDeviceID, n)); err != nil {

@@ -3,12 +3,15 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,13 +41,13 @@ type Server struct {
 	auth     *adminAuth // 后台口令验证与猜错锁定（adminauth.go）
 
 	mu         sync.Mutex
-	lastSeen   map[string]time.Time
-	lastHB     map[string]manifest.Heartbeat
-	sync       map[string]deviceSync // 设备取内容的进度与清单缓存，见 device.go
-	authLogged map[string]time.Time  // 认证失败日志节流
+	devices    map[string]*deviceRuntime // 设备的在线、心跳与取内容进度（只在内存里），见 device.go
+	authLogged map[string]time.Time      // 认证失败日志节流
 
 	uploadMu  sync.Mutex
-	uploading map[string]bool // 正在上传的 设备/文件名，见 claimMediaName
+	uploading map[string]map[string]bool // 设备 → 正在上传的文件名，见 claimMediaName
+
+	thumbMu sync.Mutex // 生成缩略图与视频抽帧一次一个：同一视频并发请求只抽一次（frames.go）
 
 	stop    context.CancelFunc
 	stopped chan struct{} // 后台协程退出后关闭
@@ -82,11 +85,8 @@ func findTools(ffmpegPath string) tools {
 	return t
 }
 
-// New 创建服务端：加载状态文件、准备数据目录与证书、检测外部程序、启动后台协程。
+// New 创建服务端（cfg 来自 LoadConfig，已校验）：加载状态文件、准备数据目录与证书、检测外部程序、启动后台协程。
 func New(cfg *Config) (*Server, error) {
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
 	return newServer(cfg, findTools(cfg.FFmpegPath))
 }
 
@@ -103,11 +103,10 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	}
 	s := &Server{
 		cfg: cfg, store: st, hashes: manifest.NewHashCache(), loc: loc, tools: t, jobs: newJobQueue(),
-		lastSeen: map[string]time.Time{}, lastHB: map[string]manifest.Heartbeat{},
-		sync: map[string]deviceSync{}, authLogged: map[string]time.Time{}, uploading: map[string]bool{},
+		devices: map[string]*deviceRuntime{}, authLogged: map[string]time.Time{}, uploading: map[string]map[string]bool{},
 		now: time.Now,
 	}
-	// incoming/ 是待处理原片的暂存区：任务只在内存里，重启后它们已无人认领，清掉。
+	// incoming/ 是上传与处理的暂存区（原片、解包、临时文件）：任务只在内存里，重启后已无人认领，清掉。
 	os.RemoveAll(s.incomingDir())
 	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.backgroundsDir(), s.thumbsDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -126,7 +125,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	if cfg.FontPath == "" {
 		log.Printf("warning: font_path is not set; CJK text in templates and test cards will render as boxes (install a CJK font such as fonts-noto-cjk and set font_path)")
 	}
-	if err := s.store.Update(func(st *store.State) {
+	if err := s.store.Update(func(st *store.State) error {
 		if t, seeded := store.SeedDefaultTemplate(st); seeded {
 			log.Printf("first start: created default template %s (%s)", t.ID, t.Name)
 		}
@@ -134,6 +133,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 		if store.EnsureGlobalTemplate(st) {
 			log.Printf("global default template set to %s", st.Global.TemplateID)
 		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
@@ -159,9 +159,13 @@ func (s *Server) Close() {
 	<-s.stopped
 }
 
-func (s *Server) renderedDir() string { return filepath.Join(s.cfg.DataDir, "rendered") }
-func (s *Server) packagesDir() string { return filepath.Join(s.cfg.DataDir, "packages") }
-func (s *Server) incomingDir() string { return filepath.Join(s.cfg.DataDir, "incoming") } // 待处理的原片
+// data_dir 下的目录。
+func (s *Server) renderedDir() string    { return filepath.Join(s.cfg.DataDir, "rendered") }    // 渲染图（叠加图、整屏图、测试卡）
+func (s *Server) packagesDir() string    { return filepath.Join(s.cfg.DataDir, "packages") }    // 设备程序包
+func (s *Server) depsDir() string        { return filepath.Join(s.cfg.DataDir, "deps") }        // 离线依赖仓库
+func (s *Server) backgroundsDir() string { return filepath.Join(s.cfg.DataDir, "backgrounds") } // 模板底图
+func (s *Server) thumbsDir() string      { return filepath.Join(s.cfg.DataDir, "thumbs") }      // 缩略图与视频抽帧
+func (s *Server) incomingDir() string    { return filepath.Join(s.cfg.DataDir, "incoming") }    // 暂存区
 func (s *Server) deviceMediaDir(deviceID string) string {
 	return filepath.Join(s.cfg.MediaRoot, deviceID)
 }
@@ -198,6 +202,18 @@ func tokenOK(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
+// clientIP 是请求方的 IP（设备在局域网里，看到的就是它自己的地址）。
+func clientIP(r *http.Request) string {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return host
+}
+
+// shortSum 是内容 sha256 的前 16 个十六进制字符（文件名、指纹用）。
+func shortSum(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
@@ -208,19 +224,56 @@ func writeJSON(w http.ResponseWriter, v any) {
 // decodeJSON 读取至多 limit 字节的 JSON 请求体；格式不对时回 400 并返回 false。
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(v); err != nil {
-		http.Error(w, "bad body", http.StatusBadRequest)
+		http.Error(w, "请求格式不对", http.StatusBadRequest)
 		return false
 	}
 	return true
 }
 
-// update 修改并持久化状态；写盘失败时回 500 并返回 false。
-func (s *Server) update(w http.ResponseWriter, fn func(*store.State)) bool {
+// httpError 是要原样回给后台的错误（状态码 + 中文说明）。
+type httpError struct {
+	code int
+	msg  string
+}
+
+func (e *httpError) Error() string { return e.msg }
+
+func errBadRequest(format string, a ...any) error {
+	return &httpError{http.StatusBadRequest, fmt.Sprintf(format, a...)}
+}
+func errConflict(format string, a ...any) error {
+	return &httpError{http.StatusConflict, fmt.Sprintf(format, a...)}
+}
+func errNotFound(what string) error { return &httpError{http.StatusNotFound, what + "不存在"} }
+
+// update 在一次写锁内检查并修改状态、持久化：fn 返回 httpError 时按它回复，其余错误（写盘失败）回 500；
+// 出错都不写盘，返回 false。
+func (s *Server) update(w http.ResponseWriter, fn func(*store.State) error) bool {
 	if err := s.store.Update(fn); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return false
 	}
 	return true
+}
+
+// writeError 回复 err：httpError 用它的状态码，其余按 500。
+func writeError(w http.ResponseWriter, err error) {
+	if he, ok := err.(*httpError); ok {
+		http.Error(w, he.msg, he.code)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// editDevice 在写锁内修改一台设备（设备不存在时回 404）。
+func (s *Server) editDevice(w http.ResponseWriter, id string, fn func(*store.Device) error) bool {
+	return s.update(w, func(st *store.State) error {
+		d, ok := st.Devices[id]
+		if !ok {
+			return errNotFound("设备")
+		}
+		return fn(d)
+	})
 }
 
 // sortedByID 返回 map 的全部值，按 id 排序；空 map 返回 []（JSON 输出 [] 而不是 null）。
@@ -230,17 +283,6 @@ func sortedByID[V any](m map[string]V) []V {
 		out = append(out, m[id])
 	}
 	return out
-}
-
-// humanBytes 把字节数格式化成 KB/MB（日志与提示用）。
-func humanBytes(n int64) string {
-	switch {
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1fMB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.0fKB", float64(n)/(1<<10))
-	}
-	return fmt.Sprintf("%dB", n)
 }
 
 // pathPrefix 去掉管理接口路径的公共前缀（日志用）。

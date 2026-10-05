@@ -97,10 +97,10 @@ func uploadMedia(t *testing.T, h http.Handler, deviceID string, files ...upload)
 }
 
 type uploadResult struct {
-	Accepted    []string `json:"accepted"`
-	Reused      []string `json:"reused"`
-	Transcoding []string `json:"transcoding"`
-	Rejected    []struct {
+	Accepted []string `json:"accepted"`
+	Reused   []string `json:"reused"`
+	Queued   []string `json:"queued"`
+	Rejected []struct {
 		Name   string `json:"name"`
 		Reason string `json:"reason"`
 	} `json:"rejected"`

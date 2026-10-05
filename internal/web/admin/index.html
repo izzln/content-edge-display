@@ -635,7 +635,7 @@ function renderDevices() {
     show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
       d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
     if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
-    const agentVer = d.hw.agent_version;
+    const agentVer = d.agent_version;
     let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
     if (d.update_target) {
       const t = d.update_target;
@@ -644,8 +644,8 @@ function renderDevices() {
         : ` → <span class="warn">${esc(t.version)}${t.not_before && new Date(t.not_before) > new Date() ? " (定时 " + esc(fmtTime(t.not_before)) + ")" : " (待更新)"}</span>`;
     }
     ver += "</div>";
-    const hw = `<div class="muted">${esc(d.hw.hostname || "")} ${esc(d.hw.ip || "")}</div>`;
-    const rk = d.hw.rekey;
+    const hw = `<div class="muted">${esc(d.hostname || "")} ${esc(d.ip || "")}</div>`;
+    const rk = d.rekey;
     const rekey = rk ? `<div class="bad-note">⚠ 收到用<b>新密钥</b>的注册请求（key ${esc(rk.fingerprint)}，
         ${esc(rk.hostname || "?")} ${esc(rk.ip || "")}，${esc(fmtTime(rk.at))}），设备在用缓存内容播放、暂时收不到更新。
         <div class="row" style="margin:6px 0 0"><button class="primary sm" onclick="rekeyDialog('${esc(d.id)}')">核对并处理</button></div></div>` : "";
@@ -710,7 +710,7 @@ const doTest = (id, secs) => send("POST", devPath(id) + "/test", { duration_s: s
 // 手工删了 /var/lib/display-agent）就会这样；也可能是另一台机器撞了编号或有人冒充，
 // 所以要人核对：设备日志里会打印 key=xxxx，与这里的指纹一致才是本机。
 function rekeyDialog(id) {
-  const d = devById(id), rk = d.hw.rekey, cur = d.hw;
+  const d = devById(id), rk = d.rekey, cur = d;
   modal(`<h2>换密钥请求 — ${esc(id)}</h2>
     <table>
       <tr><th></th><th>当前登记</th><th>新请求</th></tr>
@@ -873,9 +873,9 @@ const typeOfName = n => IMAGE_RE.test(n) ? "image" : VIDEO_RE.test(n) ? "video" 
 //
 // 每项：{ key, label 显示名, name 服务端文件名（上传完成前为空）, type, size,
 //         state, progress, error, file, xhr, thumb }
-// state：waiting 等待上传 → uploading 上传中 → processing 服务器处理中 →
-//        ready 就绪 | queued 排队转码 → transcoding 转码中 → ready | failed 转码失败；
-//        （PDF 同样走 queued → transcoding，界面上叫"转换"，pages 是页数）
+// state：waiting 等待上传 → uploading 上传中 → finishing 服务器收尾（校验、缩图）→
+//        ready 就绪 | queued 排队转码 → processing 转码中 → ready | failed 转码失败；
+//        （PDF 同样走 queued → processing，界面上叫"转换"，pages 是页数）
 //        rejected 未通过校验（只在本地显示，等运营方移除）
 let plDev = "", plItems = [], plSeq = 0;
 let plImageDur = 10, plMediaAspect = 1; // 当前模板的图片停留秒数、媒体区宽高比（PDF 卡片用）
@@ -886,7 +886,7 @@ let plPollTimer = null;
 let plDrag = null, plNeedsRender = false;
 const thumbCache = new Map();  // "设备/文件名" → object URL（本次打开对话框期间；关闭时全部释放）
 
-const isBusy = it => it.state === "waiting" || it.state === "uploading" || it.state === "processing";
+const isBusy = it => it.state === "waiting" || it.state === "uploading" || it.state === "finishing";
 const isLocal = it => isBusy(it) || it.state === "rejected";
 const readyNames = () => plItems.filter(it => it.state === "ready").map(it => it.name);
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -922,17 +922,17 @@ function applyServer(list) {
 }
 
 // ---- 渲染 ----
-const STATE_TEXT = { waiting: "等待上传", uploading: "上传中", processing: "服务器处理中…",
-  queued: "排队转码", transcoding: "转码中", failed: "转码失败", rejected: "未上传" };
-const DOC_STATE_TEXT = { ...STATE_TEXT, queued: "排队转换", transcoding: "转换中", failed: "转换失败" };
+const STATE_TEXT = { waiting: "等待上传", uploading: "上传中", finishing: "服务器处理中…",
+  queued: "排队转码", processing: "转码中", failed: "转码失败", rejected: "未上传" };
+const DOC_STATE_TEXT = { ...STATE_TEXT, queued: "排队转换", processing: "转换中", failed: "转换失败" };
 const stateText = it => (it.type === "document" ? DOC_STATE_TEXT : STATE_TEXT)[it.state] || it.state;
 const TYPE_TEXT = { image: "图片", video: "视频", document: "PDF" };
 
 // progressText 是进度的文字：PDF 渲染按页数说（"3/12 页"），其余按百分比。
 function progressText(it) {
-  if (it.type === "document" && it.state === "transcoding" && it.pages)
+  if (it.type === "document" && it.state === "processing" && it.pages)
     return ` ${Math.round((it.progress || 0) * it.pages / 100)}/${it.pages} 页`;
-  return (it.state === "uploading" || it.state === "transcoding") ? ` ${it.progress || 0}%` : "";
+  return (it.state === "uploading" || it.state === "processing") ? ` ${it.progress || 0}%` : "";
 }
 
 const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} 秒` : ""}` : `${s} 秒`;
@@ -954,11 +954,11 @@ function rowInner(it, n) {
     meta += `<div class="warn">${it.aspect < 1 ? "竖版页面放进横向媒体区，上下会被裁掉" : "横版页面放进竖向媒体区，左右会被裁掉"}，建议导出${plMediaAspect < 1 ? "竖" : "横"}版</div>`;
   }
   if (it.error) meta += `<div class="bad" title="${esc(it.error)}">${esc(it.error.slice(0, 120))}</div>`;
-  const bar = it.state === "uploading" || it.state === "transcoding" ? `<div class="pbar"><i style="width:${it.progress || 0}%"></i></div>`
-    : it.state === "processing" || it.state === "queued" ? '<div class="pbar indeterminate"><i></i></div>' : "";
-  const btn = it.state === "processing" ? ""
+  const bar = it.state === "uploading" || it.state === "processing" ? `<div class="pbar"><i style="width:${it.progress || 0}%"></i></div>`
+    : it.state === "finishing" || it.state === "queued" ? '<div class="pbar indeterminate"><i></i></div>' : "";
+  const btn = it.state === "finishing" ? ""
     : `<button class="sm ${it.state === "ready" ? "danger" : ""}" data-act="remove">${
-        it.state === "ready" ? "删除" : isBusy(it) || it.state === "queued" || it.state === "transcoding" ? "取消" : "移除"}</button>`;
+        it.state === "ready" ? "删除" : isBusy(it) || it.state === "queued" || it.state === "processing" ? "取消" : "移除"}</button>`;
   return `<span class="grip" tabindex="0" role="button" aria-label="拖动调整顺序，或用上下方向键">⠿</span>
     <span class="thumb">${thumb}</span>
     <span class="info"><span class="nm">${n ? `<b>${n}.</b> ` : ""}${esc(it.label)}</span>
@@ -1036,7 +1036,7 @@ function renderSummary() {
   if (!el) return;
   const c = s => plItems.filter(it => s.includes(it.state)).length;
   const parts = [`共 ${plItems.length - c(["rejected"])} 项`];
-  for (const [label, states, cls] of [["上传中", ["waiting", "uploading", "processing"]], ["处理中", ["queued", "transcoding"]],
+  for (const [label, states, cls] of [["上传中", ["waiting", "uploading", "finishing"]], ["处理中", ["queued", "processing"]],
     ["失败", ["rejected", "failed"], "bad"]]) {
     const n = c(states);
     if (n) parts.push(cls ? `<span class="${cls}">${label} ${n}</span>` : `${label} ${n}`);
@@ -1129,7 +1129,7 @@ function plAddFiles(files) {
 
 // 一次传一个：局域网带宽本来就是瓶颈，并发不会更快，进度反而看不清。
 function pumpUploads() {
-  if (plItems.some(it => it.state === "uploading" || it.state === "processing")) return;
+  if (plItems.some(it => it.state === "uploading" || it.state === "finishing")) return;
   const next = plItems.find(it => it.state === "waiting");
   if (next) uploadOne(next);
 }
@@ -1155,7 +1155,7 @@ async function uploadOne(it) {
     updateRow(it, false);
   };
   // 字节传完后服务端还要校验、缩图，可能要一两秒
-  xhr.upload.onload = () => { it.state = "processing"; updateRow(it, true); };
+  xhr.upload.onload = () => { it.state = "finishing"; updateRow(it, true); };
   const done = () => { it.xhr = null; it.file = null; if (dev === plDev) { renderPlaylist(); pumpUploads(); } };
   xhr.onload = () => {
     if (xhr.status !== 200) {
@@ -1170,7 +1170,7 @@ async function uploadOne(it) {
     if (bad) {
       it.state = "rejected"; it.error = bad.reason;
     } else {
-      it.name = it.label = arr(r.accepted)[0] || arr(r.transcoding)[0]; // 同名时服务端会改名
+      it.name = it.label = arr(r.accepted)[0] || arr(r.queued)[0]; // 同名时服务端会改名
       it.reused = arr(r.reused).includes(it.name);
       it.state = arr(r.accepted).length ? "ready" : "queued";
       if (it.thumb && it.state === "ready") thumbCache.set(dev + "/" + it.name, it.thumb);
@@ -1239,7 +1239,7 @@ function saveOrder(dev, names) {
 // 有转码任务时每 2 秒刷新进度；转码完成的视频会被服务端追加到末尾，applyServer 再按界面顺序提交。
 function schedulePlPoll() {
   clearTimeout(plPollTimer);
-  if (!plItems.some(it => it.state === "queued" || it.state === "transcoding")) return;
+  if (!plItems.some(it => it.state === "queued" || it.state === "processing")) return;
   const dev = plDev;
   plPollTimer = setTimeout(async () => {
     if (dev !== plDev) return;
@@ -1559,12 +1559,12 @@ function templateForm(id) {
       <button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button></div>`);
 }
 function saveTemplateForm(id) {
-  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸与底图
-  saveTemplate(id, Object.assign(splitTemplate({
+  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸（底图由服务端保留）
+  saveTemplate(id, splitTemplate({
     name: $("#f_name").value.trim(), w: t?.w, h: t?.h, mediaLeft: $("#f_side").value === "left",
     key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || undefined,
     color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), image_duration_s: parseInt($("#f_dur").value) || undefined,
-  }), { background_image: t?.background_image, background_image_mirror: t?.background_image_mirror }));
+  }));
 }
 const saveTemplate = (id, tpl) => send(id ? "PUT" : "POST", "/api/v1/admin/templates" + (id ? "/" + encodeURIComponent(id) : ""), tpl, "模板已保存", { close: true });
 
@@ -1641,7 +1641,7 @@ function renderPackages() {
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
     <td data-label="大小">${fmtSize(f.size)}<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
     <td data-label="上传时间">${esc(fmtTime(f.uploaded_at))}</td>
-    <td data-label="覆盖">${devices.filter(d => d.hw.agent_version === f.version).length} / ${devices.length} 台在用</td>
+    <td data-label="覆盖">${devices.filter(d => d.agent_version === f.version).length} / ${devices.length} 台在用</td>
     <td class="acts"><button class="primary" onclick="rolloutDialog('${esc(f.version)}')">下发</button>
         <button class="danger" onclick="deletePackage('${esc(f.version)}')">删除</button></td></tr>`).join("");
   $("#installCmd").textContent =
@@ -1674,7 +1674,7 @@ async function deletePackage(v) {
   send("DELETE", "/api/v1/admin/packages/" + encodeURIComponent(v), undefined, "已删除");
 }
 function rolloutDialog(version) {
-  const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.hw.agent_version || "?")}</span></span></label>`).join("");
+  const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></span></label>`).join("");
   modal(`<h2>下发程序 ${esc(version)}</h2>
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>

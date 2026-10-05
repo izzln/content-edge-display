@@ -7,6 +7,7 @@ package agentpkg
 import (
 	"archive/tar"
 	"compress/gzip"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"io"
@@ -28,7 +29,14 @@ const (
 // MaxExtracted 是解包后的总大小上限：真正的包不到 20MB，挡住解出几十 GB 的压缩炸弹。
 const MaxExtracted = 256 << 20
 
-var versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+// 设备端的目标平台（Orange Pi One = ARMv7）。
+const GOOS, GOARCH = "linux", "arm"
+
+var (
+	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// 构建信息的 -ldflags 里注入的代理版本号
+	versionLdflagPattern = regexp.MustCompile(`-X\s+\S*internal/agent\.Version=(\S+)`)
+)
 
 // FileName 是版本 version 的程序包文件名。
 func FileName(version string) string { return "display-agent-" + version + "-armv7.tar.gz" }
@@ -105,6 +113,37 @@ func Check(dir string) (string, error) {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			return "", fmt.Errorf("package has no %s", name)
 		}
+	}
+	return version, nil
+}
+
+// Inspect 在 Check 之外再确认包里的代理程序是 linux/arm 的 Go 程序、内置版本与 VERSION 一致，返回版本号。
+//
+// 没有这道校验时，本机架构的程序、没注入版本号的程序都会被原样分发到所有设备：设备装上后
+// systemd 执行失败，要连续失败 3 次才触发回滚，期间屏幕是黑的。Go 的构建信息可跨架构读取，
+// 因此这些错误都能在上传时当场挡住。
+func Inspect(dir string) (string, error) {
+	version, err := Check(dir)
+	if err != nil {
+		return "", err
+	}
+	info, err := buildinfo.ReadFile(filepath.Join(dir, Binary))
+	if err != nil {
+		return "", fmt.Errorf("包里的 %s 不是 Go 程序", Binary)
+	}
+	settings := map[string]string{}
+	for _, s := range info.Settings {
+		settings[s.Key] = s.Value
+	}
+	if goos, goarch := settings["GOOS"], settings["GOARCH"]; goos != GOOS || goarch != GOARCH {
+		return "", fmt.Errorf("包里程序的目标平台是 %s/%s，设备需要 %s/%s", goos, goarch, GOOS, GOARCH)
+	}
+	m := versionLdflagPattern.FindStringSubmatch(settings["-ldflags"])
+	if m == nil {
+		return "", errors.New("包里的程序没有注入版本号")
+	}
+	if got := strings.Trim(m[1], `"'`); got != version {
+		return "", fmt.Errorf("程序内置版本是 %q，与包的 %s %q 不一致", got, VersionFile, version)
 	}
 	return version, nil
 }

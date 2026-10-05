@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Item 是清单中的一个播放条目。
@@ -74,9 +75,7 @@ func (m *Manifest) Downloads() []Item {
 	return out
 }
 
-var imageExts = map[string]bool{
-	".jpg": true, ".jpeg": true, ".png": true, ".bmp": true, ".webp": true,
-}
+var imageExts = map[string]bool{".jpg": true, ".jpeg": true, ".png": true}
 
 var videoExts = map[string]bool{
 	".mp4": true, ".mkv": true, ".mov": true, ".avi": true, ".ts": true, ".webm": true, ".m4v": true,
@@ -141,6 +140,23 @@ func FileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// Prune 丢掉文件已经不在的条目（删掉的媒体、换掉的渲染图），每小时维护时调用。
+func (c *HashCache) Prune() {
+	c.mu.Lock()
+	paths := make([]string, 0, len(c.m))
+	for p := range c.m {
+		paths = append(paths, p)
+	}
+	c.mu.Unlock()
+	for _, p := range paths {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			c.mu.Lock()
+			delete(c.m, p)
+			c.mu.Unlock()
+		}
+	}
+}
+
 // Sum 返回文件的 sha256（hex）与大小；大小与修改时间没变时用缓存，不重读文件。
 func (c *HashCache) Sum(path string) (sum string, size int64, err error) {
 	info, err := os.Stat(path)
@@ -187,27 +203,43 @@ func Version(m Manifest) string {
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-// ListMedia 返回 dir 下受支持的媒体文件名，按文件名排序。
+// File 是媒体目录里的一个文件。带着大小与修改时间：同名文件被替换也看得出来。
+type File struct {
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mtime"`
+}
+
+// ListMedia 返回 dir 下受支持的媒体文件，按文件名排序（os.ReadDir 已排好）。
 // 目录不存在视为空目录。隐藏文件（含各种临时文件）与不支持的类型会被跳过。
-func ListMedia(dir string) ([]string, error) {
+func ListMedia(dir string) ([]File, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []string{}, nil
+			return []File{}, nil
 		}
 		return nil, err
 	}
-	out := []string{}
+	out := []File{}
 	for _, e := range entries {
-		if e.IsDir() {
+		name := e.Name()
+		if e.IsDir() || strings.HasPrefix(name, ".") || TypeOf(name) == "" {
 			continue
 		}
-		if name := e.Name(); !strings.HasPrefix(name, ".") && TypeOf(name) != "" {
-			out = append(out, name)
+		if info, err := e.Info(); err == nil {
+			out = append(out, File{Name: name, Size: info.Size(), ModTime: info.ModTime()})
 		}
 	}
-	sort.Strings(out)
 	return out, nil
+}
+
+// Names 返回 files 的文件名。
+func Names(files []File) []string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		out[i] = f.Name
+	}
+	return out
 }
 
 // BuildItems 按给定顺序为 names 构建播放条目。已不存在的文件会被跳过

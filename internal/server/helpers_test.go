@@ -53,8 +53,9 @@ func newAdminTestServer(t *testing.T) (*Server, http.Handler) {
 
 func addTestDevice(t *testing.T, s *Server, id, secret string) {
 	t.Helper()
-	if err := s.store.Update(func(st *store.State) {
-		st.Devices[id] = store.Device{ID: id, Secret: secret, RegisteredAt: s.now()}
+	if err := s.store.Update(func(st *store.State) error {
+		st.Devices[id] = &store.Device{ID: id, Secret: secret, RegisteredAt: s.now()}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,4 +159,10 @@ func state(s *Server) store.State {
 	var out store.State
 	s.store.View(func(st *store.State) { out = *st })
 	return out
+}
+
+// device 返回设备当前的副本（不存在时为零值）。
+func device(s *Server, id string) store.Device {
+	d, _ := s.store.Device(id)
+	return d
 }

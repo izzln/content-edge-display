@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -27,13 +28,30 @@ func TestVideoThumbnail(t *testing.T) {
 	do(t, h, adminReq("GET", thumb, nil), http.StatusNotFound)
 	enc := &fakeEncoder{}
 	s.setEncoder(enc)
-	for range 2 {
-		if w := do(t, h, adminReq("GET", thumb, nil), http.StatusOK); w.Header().Get("Content-Type") != "image/jpeg" {
-			t.Fatal("视频缩略图应是 JPEG")
-		}
+	var wg sync.WaitGroup
+	for range 4 { // 后台列表同时请求：只抽一次
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := do2(t, h, adminReq("GET", thumb, nil)); w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/jpeg" {
+				t.Errorf("视频缩略图应是 JPEG：%d", w.Code)
+			}
+		}()
 	}
+	wg.Wait()
+	w := do(t, h, adminReq("GET", thumb, nil), http.StatusOK)
 	if enc.frames != 1 {
 		t.Fatalf("同一个视频只应抽一次帧，实际 %d 次", enc.frames)
+	}
+
+	// 浏览器带着 ETag 再来：源文件没变就回 304，连缓存都不用看（清掉也不会重新抽帧）
+	os.RemoveAll(s.thumbsDir())
+	os.MkdirAll(s.thumbsDir(), 0o755)
+	r := adminReq("GET", thumb, nil)
+	r.Header.Set("If-None-Match", w.Header().Get("ETag"))
+	do(t, h, r, http.StatusNotModified)
+	if enc.frames != 1 {
+		t.Fatal("304 时不应抽帧")
 	}
 }
 

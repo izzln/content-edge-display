@@ -1,10 +1,6 @@
 package server
 
 import (
-	"bytes"
-	"cmp"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -12,16 +8,17 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/izzln/content-edge-display/internal/fsutil"
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
@@ -41,13 +38,13 @@ const (
 	maxMediaStem        = 100 // 上传文件主名（不含后缀）的最大字符数
 )
 
-// MediaFile 是设备播放列表里的一项。转码中/转码失败的视频也会列出来，
+// MediaFile 是后台播放列表里的一项。处理中/处理失败的视频与 PDF 也会列出来，
 // 让运营方看到进度和失败原因；它们排在已就绪文件之后，不参与排序与播放。
 type MediaFile struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"` // image | video | document
 	Size     int64  `json:"size"`
-	Status   string `json:"status"` // ready | queued | transcoding | failed
+	Status   string `json:"status"` // ready | queued | processing | failed
 	Progress int    `json:"progress,omitempty"`
 	Pages    int    `json:"pages,omitempty"` // 文档的页数（渲染中为已知的总页数）
 	Error    string `json:"error,omitempty"`
@@ -58,28 +55,32 @@ const mediaReady = "ready"
 // playlist 返回设备媒体区的播放顺序（只含已就绪、确实在磁盘上的文件）。
 //
 // 这是唯一的顺序来源，后台列表与设备清单都用它，保证"后台看到的"就是"设备在放的"。
-func (s *Server) playlist(deviceID string) ([]string, error) {
+func (s *Server) playlist(deviceID string) ([]manifest.File, error) {
 	var stored []string
-	s.store.View(func(st *store.State) { stored = st.Displays[deviceID].Playlist })
+	s.store.View(func(st *store.State) {
+		if d := st.Devices[deviceID]; d != nil {
+			stored = d.Display.Playlist
+		}
+	})
 	return orderPlaylist(s.deviceMediaDir(deviceID), stored)
 }
 
 // orderPlaylist 先按记录的顺序（后台上传/拖拽排序写入），再把目录里有、记录里没有的文件
 // （运营方直接拷进 media_root 的）按文件名追加在后面；记录里有、磁盘上没有的跳过。
-func orderPlaylist(dir string, stored []string) ([]string, error) {
+func orderPlaylist(dir string, stored []string) ([]manifest.File, error) {
 	onDisk, err := manifest.ListMedia(dir)
 	if err != nil {
 		return nil, err
 	}
-	present := make(map[string]bool, len(onDisk))
-	for _, n := range onDisk {
-		present[n] = true
+	byName := make(map[string]manifest.File, len(onDisk))
+	for _, f := range onDisk {
+		byName[f.Name] = f
 	}
-	out := make([]string, 0, len(onDisk))
-	for _, n := range append(slices.Clone(stored), onDisk...) {
-		if present[n] {
-			out = append(out, n)
-			delete(present, n) // 去重
+	out := make([]manifest.File, 0, len(onDisk))
+	for _, n := range append(slices.Clone(stored), manifest.Names(onDisk)...) {
+		if f, ok := byName[n]; ok {
+			out = append(out, f)
+			delete(byName, n) // 去重
 		}
 	}
 	return out, nil
@@ -87,27 +88,21 @@ func orderPlaylist(dir string, stored []string) ([]string, error) {
 
 // mediaList 返回后台展示用的播放列表：就绪文件（顺序即播放顺序）+ 处理中/失败的任务。
 func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
-	names, err := s.playlist(deviceID)
+	files, err := s.playlist(deviceID)
 	if err != nil {
 		return nil, err
 	}
 	dir := s.deviceMediaDir(deviceID)
-	out := make([]MediaFile, 0, len(names))
-	for _, name := range names {
-		if info, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			f := MediaFile{Name: name, Type: manifest.TypeOf(name), Size: info.Size(), Status: mediaReady}
-			if f.Type == "document" {
-				f.Pages = len(manifest.Pages(dir, name))
-			}
-			out = append(out, f)
+	out := make([]MediaFile, 0, len(files))
+	for _, f := range files {
+		m := MediaFile{Name: f.Name, Type: manifest.TypeOf(f.Name), Size: f.Size, Status: mediaReady}
+		if m.Type == "document" {
+			m.Pages = len(manifest.Pages(dir, f.Name))
 		}
+		out = append(out, m)
 	}
 	for _, j := range s.jobs.snapshot(deviceID) {
-		var size int64
-		if info, err := os.Stat(j.src); err == nil {
-			size = info.Size()
-		}
-		out = append(out, MediaFile{Name: j.name, Type: j.kind, Size: size,
+		out = append(out, MediaFile{Name: j.name, Type: j.kind, Size: fileSize(j.src),
 			Status: j.status, Progress: j.progress, Pages: j.pages, Error: j.err})
 	}
 	return out, nil
@@ -117,7 +112,7 @@ func (s *Server) mediaList(deviceID string) ([]MediaFile, error) {
 func (s *Server) writeMediaList(w http.ResponseWriter, deviceID string) {
 	files, err := s.mediaList(deviceID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, files)
@@ -127,18 +122,18 @@ func (s *Server) writeMediaList(w http.ResponseWriter, deviceID string) {
 // 读和写在同一把锁里，上传完成与转码完成同时追加也不会互相覆盖。
 func (s *Server) editPlaylist(deviceID string, fn func(current []string) []string) error {
 	dir := s.deviceMediaDir(deviceID)
-	var err error
-	if uerr := s.store.Update(func(st *store.State) {
-		d := st.Displays[deviceID]
-		var current []string
-		if current, err = orderPlaylist(dir, d.Playlist); err == nil {
-			d.Playlist = fn(current)
-			st.Displays[deviceID] = d
+	return s.store.Update(func(st *store.State) error {
+		d, ok := st.Devices[deviceID]
+		if !ok {
+			return errNotFound("设备")
 		}
-	}); uerr != nil {
-		return uerr
-	}
-	return err
+		current, err := orderPlaylist(dir, d.Display.Playlist)
+		if err != nil {
+			return err
+		}
+		d.Display.Playlist = fn(manifest.Names(current))
+		return nil
+	})
 }
 
 // appendPlaylist 把文件按给定顺序追加到设备播放顺序末尾（上传完成、转码完成时用）。
@@ -181,11 +176,11 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 	}
 	mr, err := r.MultipartReader()
 	if err != nil {
-		http.Error(w, "bad multipart body", http.StatusBadRequest)
+		http.Error(w, "上传格式不对", http.StatusBadRequest)
 		return
 	}
 	if err := os.MkdirAll(s.deviceMediaDir(dev.ID), 0o755); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 
@@ -193,9 +188,9 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 		Name   string `json:"name"`
 		Reason string `json:"reason"`
 	}
-	accepted := []string{}    // 已就绪，直接进播放列表
-	reused := []string{}      // 其中复用了缓存区里已处理好的结果的
-	transcoding := []string{} // 已进入转码队列，完成后自动追加到播放列表末尾
+	accepted := []string{} // 已就绪，直接进播放列表
+	reused := []string{}   // 其中复用了缓存区里已处理好的结果的
+	queued := []string{}   // 已进入处理队列（视频转码、PDF 渲染），完成后自动追加到播放列表末尾
 	rejected := []rejection{}
 	for {
 		part, err := mr.NextPart()
@@ -203,7 +198,7 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 			break
 		}
 		if err != nil {
-			http.Error(w, "bad multipart body", http.StatusBadRequest)
+			http.Error(w, "上传中断："+err.Error(), http.StatusBadRequest)
 			return
 		}
 		if part.FormName() != "files" {
@@ -225,7 +220,7 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 		switch outcome {
 		case uploadQueued:
 			log.Printf("upload done: device %s, %s (%s in %s), queued for processing as %s", dev.ID, orig, humanBytes(cr.n), took, name)
-			transcoding = append(transcoding, name)
+			queued = append(queued, name)
 		case uploadReused:
 			log.Printf("upload done: device %s, %s (%s in %s), reused cached result, added to playlist", dev.ID, name, humanBytes(cr.n), took)
 			accepted, reused = append(accepted, name), append(reused, name)
@@ -237,17 +232,17 @@ func (s *Server) handleUploadDeviceMedia(w http.ResponseWriter, r *http.Request)
 
 	if len(accepted) > 0 {
 		if err := s.appendPlaylist(dev.ID, accepted...); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeError(w, err)
 			return
 		}
 	}
 	files, err := s.mediaList(dev.ID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 	s.kickCache()
-	writeJSON(w, map[string]any{"accepted": accepted, "reused": reused, "transcoding": transcoding, "rejected": rejected, "playlist": files})
+	writeJSON(w, map[string]any{"accepted": accepted, "reused": reused, "queued": queued, "rejected": rejected, "playlist": files})
 }
 
 // rejectReason 是拒收原因：ui 显示在后台（中文，告诉运营方怎么办），log 写进控制台（英文）。
@@ -279,18 +274,19 @@ const (
 func (s *Server) saveUploadedMedia(deviceID string, part io.Reader, name string) (string, uploadOutcome, *rejectReason) {
 	name = cleanMediaName(name)
 	kind := manifest.TypeOf(name)
+	var limit int64
 	switch kind {
 	case "image":
-		if ext := strings.ToLower(filepath.Ext(name)); ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
-			return "", 0, reject("图片仅支持 png/jpg", "unsupported image format")
-		}
+		limit = maxImageUploadBytes
 	case "video":
+		limit = maxVideoUploadBytes
 		if s.tools.enc == nil {
 			return "", 0, reject("服务端 ffmpeg 不可用，暂不能上传视频（未转码的视频会让设备过热）；原因见后台顶部提示",
 				"ffmpeg unavailable, videos are not accepted")
 		}
 		name = transcode.OutputName(name)
 	case "document":
+		limit = maxPDFUploadBytes
 		if s.tools.pdf == nil {
 			return "", 0, reject("服务端没装 poppler-utils，暂不能上传 PDF；原因见后台顶部提示",
 				"poppler-utils unavailable, PDFs are not accepted")
@@ -308,40 +304,24 @@ func (s *Server) saveUploadedMedia(deviceID string, part io.Reader, name string)
 	}
 	defer release()
 
-	// 图片直接落在设备目录（处理很快）；视频与 PDF 放进暂存区排队处理
-	dir, stageDir := s.deviceMediaDir(deviceID), s.deviceMediaDir(deviceID)
-	limit := map[string]int64{"image": maxImageUploadBytes, "video": maxVideoUploadBytes, "document": maxPDFUploadBytes}[kind]
-	if kind != "image" {
-		stageDir = filepath.Join(s.incomingDir(), deviceID)
-		if err := os.MkdirAll(stageDir, 0o755); err != nil {
-			return "", 0, rejectErr(err)
-		}
-	}
-	tmp := filepath.Join(stageDir, "."+name+".part")
-	out, err := os.Create(tmp)
-	if err != nil {
-		return "", 0, rejectErr(err)
-	}
-	// 落盘时顺带算原片的 sha256（缓存区复用的依据）；多读 1 字节：读得出来说明超限了。
-	h := sha256.New()
-	n, err := io.Copy(out, io.TeeReader(io.LimitReader(part, limit+1), h))
-	out.Close()
-	fail := func(reason *rejectReason) (string, uploadOutcome, *rejectReason) {
-		os.Remove(tmp)
-		return "", 0, reason
-	}
+	// 原片先落进暂存区，顺带算出 sha256（缓存区复用的依据）
+	tmp, sha, _, err := s.receive(part, limit)
 	switch {
 	case errors.Is(err, io.ErrUnexpectedEOF):
 		// 浏览器没把文件传完就断了：多半是浏览器读不到文件了（iOS 相册临时文件被删、网盘文件没下载），
 		// 或者网络断了。后台会自动重传一次。
-		return fail(reject("上传中断：浏览器没把文件传完", "client stopped sending mid-upload (unexpected EOF)"))
+		return "", 0, reject("上传中断：浏览器没把文件传完", "client stopped sending mid-upload (unexpected EOF)")
+	case errors.Is(err, errTooLarge):
+		return "", 0, reject(fmt.Sprintf("文件超过上限 %dMB", limit>>20), fmt.Sprintf("exceeds the %dMB limit", limit>>20))
 	case err != nil:
-		return fail(reject("写入失败："+err.Error(), "write failed: "+err.Error()))
-	case n > limit:
-		return fail(reject(fmt.Sprintf("文件超过上限 %dMB", limit>>20), fmt.Sprintf("exceeds the %dMB limit", limit>>20)))
+		return "", 0, reject("写入失败："+err.Error(), "write failed: "+err.Error())
+	}
+	fail := func(reason *rejectReason) (string, uploadOutcome, *rejectReason) {
+		os.Remove(tmp)
+		return "", 0, reason
 	}
 
-	key := processKey(kind, hex.EncodeToString(h.Sum(nil)))
+	dir, key := s.deviceMediaDir(deviceID), processKey(kind, sha)
 	if reused, err := s.cacheReuse(dir, name, key); err != nil {
 		log.Printf("cache: reuse failed, processing again: %v", err)
 	} else if reused {
@@ -354,14 +334,14 @@ func (s *Server) saveUploadedMedia(deviceID string, part io.Reader, name string)
 		s.jobs.add(&mediaJob{kind: kind, deviceID: deviceID, name: name, src: tmp, key: key, status: jobQueued})
 		return name, uploadQueued, nil
 	}
-	if reason := checkImage(tmp); reason != nil {
+	if _, _, reason := checkImage(tmp); reason != nil {
 		return fail(reason)
 	}
 	// 文件头能读不代表整张图完好（截断的文件过得了 DecodeConfig），完整解码在这一步才发生
 	if err := transcode.ShrinkImage(tmp, manifest.CanvasW, manifest.CanvasH); err != nil {
 		return fail(reject("图片无法解码（文件损坏或不完整）", "image cannot be decoded"))
 	}
-	if err := os.Rename(tmp, filepath.Join(dir, name)); err != nil {
+	if err := fsutil.MoveFile(tmp, filepath.Join(dir, name)); err != nil { // 暂存区与媒体目录可能不在同一个文件系统
 		return fail(rejectErr(err))
 	}
 	if _, err := s.cacheAdopt(dir, name, key); err != nil {
@@ -419,24 +399,27 @@ func (s *Server) claimMediaName(deviceID, name string) (string, func(), error) {
 	if err != nil {
 		return "", nil, err
 	}
-	taken := map[string]bool{}
-	for _, n := range existing {
-		taken[n] = true
+	taken := maps.Clone(s.uploading[deviceID])
+	if taken == nil {
+		taken = map[string]bool{}
+	}
+	for _, f := range existing {
+		taken[f.Name] = true
 	}
 	for _, j := range s.jobs.snapshot(deviceID) {
 		taken[j.name] = true
 	}
-	prefix := deviceID + "/"
-	for k := range s.uploading {
-		if strings.HasPrefix(k, prefix) {
-			taken[strings.TrimPrefix(k, prefix)] = true
-		}
-	}
 	name = uniqueName(name, taken)
-	s.uploading[prefix+name] = true
+	if s.uploading[deviceID] == nil {
+		s.uploading[deviceID] = map[string]bool{}
+	}
+	s.uploading[deviceID][name] = true
 	return name, func() {
 		s.uploadMu.Lock()
-		delete(s.uploading, prefix+name)
+		delete(s.uploading[deviceID], name)
+		if len(s.uploading[deviceID]) == 0 {
+			delete(s.uploading, deviceID)
+		}
 		s.uploadMu.Unlock()
 	}, nil
 }
@@ -461,23 +444,24 @@ func uploadSizeHint(r *http.Request) string {
 	return "size unknown"
 }
 
-// checkImage 在完整解码之前先读文件头：挡住伪装成图片的文件与超大图（解压炸弹）。
-func checkImage(path string) *rejectReason {
+// checkImage 在完整解码之前先读文件头（媒体图片与模板底图共用）：挡住伪装成图片的文件与超大图（解压炸弹）。
+// 返回尺寸与格式（png | jpeg）。
+func checkImage(path string) (image.Config, string, *rejectReason) {
 	f, err := os.Open(path)
 	if err != nil {
-		return rejectErr(err)
+		return image.Config{}, "", rejectErr(err)
 	}
 	defer f.Close()
-	cfg, _, err := image.DecodeConfig(f)
+	cfg, format, err := image.DecodeConfig(f)
 	if err != nil {
-		return reject("图片无法解码（文件损坏或不是真正的 png/jpg）", "not a decodable png/jpg")
+		return cfg, "", reject("图片无法解码（文件损坏或不是真正的 png/jpg）", "not a decodable png/jpg")
 	}
 	if cfg.Width*cfg.Height > maxImagePixels {
-		return reject(fmt.Sprintf("图片 %d×%d 像素过大（上限约 %d 万像素），请先缩小再上传",
+		return cfg, "", reject(fmt.Sprintf("图片 %d×%d 像素过大（上限约 %d 万像素），请先缩小再上传",
 			cfg.Width, cfg.Height, maxImagePixels/10000),
 			fmt.Sprintf("%dx%d exceeds the pixel limit", cfg.Width, cfg.Height))
 	}
-	return nil
+	return cfg, format, nil
 }
 
 // uniqueName 在同名文件已存在时加后缀，保留原名便于运营方辨认。
@@ -507,12 +491,12 @@ func (s *Server) handleReorderDeviceMedia(w http.ResponseWriter, r *http.Request
 	}
 	onDisk, err := manifest.ListMedia(s.deviceMediaDir(dev.ID))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 	present := map[string]bool{}
-	for _, n := range onDisk {
-		present[n] = true
+	for _, f := range onDisk {
+		present[f.Name] = true
 	}
 	seen := map[string]bool{}
 	order := make([]string, 0, len(names))
@@ -529,69 +513,10 @@ func (s *Server) handleReorderDeviceMedia(w http.ResponseWriter, r *http.Request
 		order = append(order, n)
 	}
 	if err := s.editPlaylist(dev.ID, func([]string) []string { return order }); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 	s.writeMediaList(w, dev.ID)
-}
-
-// handleDeviceMediaThumb 返回播放列表里一张图片的缩略图（后台列表用）；PDF 返回某一页
-// （?page=n，默认第 1 页）。视频没有缩略图，回 404。
-func (s *Server) handleDeviceMediaThumb(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
-	name := r.PathValue("file")
-	if !manifest.SafeFileName(name) {
-		http.NotFound(w, r)
-		return
-	}
-	dir := s.deviceMediaDir(dev.ID)
-	path := filepath.Join(dir, name)
-	etagFrom := "" // 视频的 ETag 按视频文件本身算（抽出来的帧每次取用都会刷新时间）
-	switch manifest.TypeOf(name) {
-	case "image":
-	case "video":
-		frame, err := s.videoFrame(r.Context(), path)
-		if err != nil {
-			http.NotFound(w, r) // 没有 ffmpeg：后台照旧显示 ▶
-			return
-		}
-		etagFrom, path = path, frame
-	case "document":
-		pages := manifest.Pages(dir, name)
-		n, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		n = max(n, 1)
-		if n > len(pages) {
-			http.NotFound(w, r)
-			return
-		}
-		path = filepath.Join(manifest.PagesPath(dir, name), pages[n-1])
-	default:
-		http.NotFound(w, r)
-		return
-	}
-	info, err := os.Stat(cmp.Or(etagFrom, path))
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	// 同名文件可能删了又重新上传，所以用修改时间+大小做 ETag，每次让浏览器来问一下。
-	etag := fmt.Sprintf(`"%x-%x"`, info.ModTime().UnixNano(), info.Size())
-	w.Header().Set("ETag", etag)
-	w.Header().Set("Cache-Control", "private, no-cache")
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	var buf bytes.Buffer
-	if err := transcode.Thumbnail(&buf, path, 240, 160); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Write(buf.Bytes())
 }
 
 // handleDeleteDeviceMedia 删除一个媒体文件及其播放列表项。
@@ -602,7 +527,7 @@ func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request)
 	}
 	name := r.PathValue("file")
 	if !manifest.SafeFileName(name) {
-		http.Error(w, "bad file name", http.StatusBadRequest)
+		http.Error(w, "文件名不对", http.StatusBadRequest)
 		return
 	}
 	if s.jobs.remove(dev.ID, name) { // 处理中的会被取消，失败的直接移除
@@ -611,7 +536,7 @@ func (s *Server) handleDeleteDeviceMedia(w http.ResponseWriter, r *http.Request)
 	s.unlinkMedia(dev.ID, name)
 	// 播放顺序里不在磁盘上的文件本来就会被跳过，这里顺手把记录也整理干净
 	if err := s.editPlaylist(dev.ID, func(current []string) []string { return current }); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
 	s.writeMediaList(w, dev.ID)
