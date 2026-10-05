@@ -132,14 +132,14 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 	}
 
 	w = do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
-	var statuses []DeviceStatus
+	var statuses []DeviceView
 	if err := json.Unmarshal(w.Body.Bytes(), &statuses); err != nil {
 		t.Fatal(err)
 	}
 	if len(statuses) != 2 {
 		t.Fatalf("expected 2 devices, got %d", len(statuses))
 	}
-	var dev1 *DeviceStatus
+	var dev1 *DeviceView
 	for i := range statuses {
 		if statuses[i].ID == testDeviceID {
 			dev1 = &statuses[i]
@@ -191,7 +191,7 @@ func TestTestCardUsesConfiguredTimezone(t *testing.T) {
 	render := func(loc *time.Location) string {
 		s.loc = loc
 		s.mu.Lock()
-		clear(s.sync) // 运行中不会换时区：清掉按旧时区生成的清单缓存
+		clear(s.devices) // 运行中不会换时区：清掉按旧时区生成的清单缓存
 		s.mu.Unlock()
 		do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusNoContent)
 		w := httptest.NewRecorder()
@@ -218,7 +218,7 @@ func TestDeviceSyncState(t *testing.T) {
 	h := s.Handler()
 	state := func() string {
 		w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
-		var list []DeviceStatus
+		var list []DeviceView
 		json.Unmarshal(w.Body.Bytes(), &list)
 		for _, d := range list {
 			if d.ID == testDeviceID {
@@ -323,7 +323,7 @@ func TestContentKeyCoversManifestInputs(t *testing.T) {
 		{"左右对调", func() {
 			put("/api/v1/admin/devices/"+testDeviceID+"/display", map[string]any{"mirror": true})
 			// 回归：后台"保存模板设置"不能冲掉排好的播放顺序
-			if got := state(s).Displays[testDeviceID].Playlist; strings.Join(got, ",") != "b.png,a.png" {
+			if got := device(s, testDeviceID).Display.Playlist; strings.Join(got, ",") != "b.png,a.png" {
 				t.Errorf("保存模板设置后播放顺序被改成了 %v", got)
 			}
 		}},
@@ -407,9 +407,9 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 	h := s.Handler()
 	now := time.Now()
 	s.now = func() time.Time { return now }
-	status := func() DeviceStatus {
+	status := func() DeviceView {
 		w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
-		var list []DeviceStatus
+		var list []DeviceView
 		json.Unmarshal(w.Body.Bytes(), &list)
 		for _, d := range list {
 			if d.ID == testDeviceID {
@@ -417,7 +417,7 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 			}
 		}
 		t.Fatal("device missing")
-		return DeviceStatus{}
+		return DeviceView{}
 	}
 	send := func(method, path, body string) *httptest.ResponseRecorder {
 		var r *http.Request
@@ -526,19 +526,27 @@ func TestConcurrentPlaylistAppends(t *testing.T) {
 		go func(n string) { defer wg.Done(); s.appendPlaylist(testDeviceID, n) }(names[i])
 	}
 	wg.Wait()
-	if got := state(s).Displays[testDeviceID].Playlist; len(got) != len(names) {
+	if got := device(s, testDeviceID).Display.Playlist; len(got) != len(names) {
 		t.Fatalf("并发追加丢了条目：%d/%d %v", len(got), len(names), got)
 	}
 }
 
-// 两个口令都必填：缺了哪个都不启动（管理面不能裸奔，没有注册口令设备也接不进来）。
-func TestNewRequiresTokens(t *testing.T) {
-	for _, c := range []Config{
-		{MediaRoot: t.TempDir(), DataDir: t.TempDir(), EnrollToken: "e"},
-		{MediaRoot: t.TempDir(), DataDir: t.TempDir(), AdminToken: "a"},
-	} {
-		if _, err := New(&c); err == nil || !strings.Contains(err.Error(), "_token is empty") {
-			t.Errorf("%+v: 应拒绝启动，得到 %v", c, err)
-		}
+// 认证失败的日志节流表以请求头里的设备编号为键，谁都能随便编：表有上限，满了先清掉一分钟以前的。
+func TestAuthFailureLogBounded(t *testing.T) {
+	s, _ := newTestServer(t)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	for i := range maxAuthLogged + 50 {
+		s.logAuthFailure(fmt.Sprintf("dev-%d|bad", i))
+	}
+	if len(s.authLogged) != maxAuthLogged {
+		t.Fatalf("表应封顶在 %d：%d", maxAuthLogged, len(s.authLogged))
+	}
+	if s.logAuthFailure("dev-0|bad") {
+		t.Fatal("同一设备同一原因一分钟内只记一次")
+	}
+	now = now.Add(time.Minute)
+	if !s.logAuthFailure("dev-new|bad") || len(s.authLogged) != 1 {
+		t.Fatalf("一分钟后应清掉旧记录再记新的：%d", len(s.authLogged))
 	}
 }

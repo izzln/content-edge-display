@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,16 +13,19 @@ import (
 // Config 是设备代理配置（/etc/display-agent/agent.json，由 install-agent.sh 写入）。
 //
 // 设备一律凭 enroll_token 自注册：编号取自主机名或 SoC 序列号，密钥首启随机生成，
-// 两者持久化在 cache_dir/identity.json。轮询/心跳间隔由服务端规定（见 schedule.go）。
+// 两者持久化在 CacheDir/identity.json。轮询/心跳间隔由服务端规定（见 schedule.go）。
 type Config struct {
 	ServerURL string `json:"server_url"` // https://<服务器>:9001
 	// TLSFingerprint 是服务端证书的公钥指纹（sha256 hex）：设备只认这把公钥，防止局域网里有人冒充服务端。
 	TLSFingerprint string `json:"tls_fingerprint"`
 	EnrollToken    string `json:"enroll_token"`
-	CacheDir       string `json:"cache_dir"`
 	Player         string `json:"player"` // "gst" | "null"
 	// DisplayMode 是显示屏输出分辨率（WxH），见 OutputMode；留空用显示屏的首选模式。
 	DisplayMode string `json:"display_mode"`
+
+	// CacheDir 放身份、缓存与播放状态：systemd 的 StateDirectory（$STATE_DIRECTORY，即 /var/lib/display-agent）。
+	// 不是配置项，测试里直接赋值。
+	CacheDir string `json:"-"`
 }
 
 var displayModePattern = regexp.MustCompile(`^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$`)
@@ -43,7 +47,7 @@ func (c *Config) fillDefaults() error {
 	c.ServerURL = strings.TrimRight(c.ServerURL, "/")
 	c.TLSFingerprint = strings.ToLower(strings.ReplaceAll(c.TLSFingerprint, ":", ""))
 	if c.CacheDir == "" {
-		c.CacheDir = "/var/lib/display-agent"
+		c.CacheDir = cmp.Or(os.Getenv("STATE_DIRECTORY"), "/var/lib/display-agent")
 	}
 	if c.Player == "" {
 		c.Player = "gst"

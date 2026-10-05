@@ -6,7 +6,7 @@ import (
 )
 
 func TestValidateSchedules(t *testing.T) {
-	get := func(id string) (Template, bool) { return Template{ID: id}, id == "day" || id == "night" }
+	get := map[string]Template{"day": {ID: "day"}, "night": {ID: "night"}}
 
 	list := []Schedule{
 		{TemplateID: "day", Days: []int{1, 2, 3, 4, 5}, Start: "08:00", End: "18:00"},

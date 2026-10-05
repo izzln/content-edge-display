@@ -19,11 +19,11 @@ func writeFile(t *testing.T, dir, name, content string) {
 // buildDir 按目录里的文件（文件名顺序）构建条目。
 func buildDir(t *testing.T, dir string, cache *HashCache) []Item {
 	t.Helper()
-	names, err := ListMedia(dir)
+	files, err := ListMedia(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := BuildItems(dir, "d", names, 10, cache)
+	items, err := BuildItems(dir, "d", Names(files), 10, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,12 +37,12 @@ func TestListMediaSkipsJunk(t *testing.T) {
 	writeFile(t, dir, "notes.txt", "ignored")
 	writeFile(t, dir, ".hidden.jpg", "ignored") // 转码半成品等隐藏文件
 	writeFile(t, dir, "c.mp4.part", "ignored")  // 上传中
-	names, err := ListMedia(dir)
+	files, err := ListMedia(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 2 || names[0] != "a_image.jpg" || names[1] != "b_video.mp4" {
-		t.Fatalf("got %v", names)
+	if names := Names(files); len(names) != 2 || names[0] != "a_image.jpg" || names[1] != "b_video.mp4" || files[0].Size != 11 {
+		t.Fatalf("got %+v", files)
 	}
 	if names, err := ListMedia(filepath.Join(dir, "no-such")); err != nil || len(names) != 0 {
 		t.Fatalf("目录不存在应视为空：%v %v", names, err)
@@ -151,7 +151,7 @@ func TestVersionStableAndChanges(t *testing.T) {
 	if Version(Manifest{Items: items, Update: &Update{Version: "2"}}) == v4 {
 		t.Fatal("指令出现必须改变版本号")
 	}
-	l := &Layout{CanvasW: 1440, CanvasH: 900, Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}
+	l := &Layout{Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}
 	withLayout := Version(Manifest{Items: items, Layout: l})
 	if withLayout == v4 {
 		t.Fatal("叠加布局出现必须改变版本号")
@@ -174,5 +174,20 @@ func TestDownloadsIncludeOverlay(t *testing.T) {
 	m.Layout = &Layout{Overlay: Item{Name: "ovl.png"}}
 	if d := m.Downloads(); len(d) != 2 || d[1].Name != "ovl.png" {
 		t.Fatalf("有叠加布局时还要下载叠加图：%+v", d)
+	}
+}
+
+// 维护时丢掉已经不在的文件的哈希缓存。
+func TestHashCachePrune(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a.jpg", "a")
+	writeFile(t, dir, "b.jpg", "b")
+	c := NewHashCache()
+	c.Sum(filepath.Join(dir, "a.jpg"))
+	c.Sum(filepath.Join(dir, "b.jpg"))
+	os.Remove(filepath.Join(dir, "a.jpg"))
+	c.Prune()
+	if _, ok := c.m[filepath.Join(dir, "a.jpg")]; ok || len(c.m) != 1 {
+		t.Fatalf("应只剩还在的文件：%v", c.m)
 	}
 }

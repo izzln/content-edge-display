@@ -2,10 +2,8 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -119,13 +117,7 @@ func ioctl(fd, req, arg uintptr) bool {
 }
 
 // restartGetty 重启 tty1 的登录程序：重新显示 issue（含救援信息），并注销留在上面的会话。
-func restartGetty() error {
-	out, err := exec.Command("systemctl", "restart", rescueGetty).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("restart %s: %v %s", rescueGetty, err, out)
-	}
-	return nil
-}
+func restartGetty() error { return runCommand("", "systemctl", "restart", rescueGetty) }
 
 // vtConsole 用 tty1 显示救援信息：信息写进 agetty 的 issue 文件，重启 tty1 的 getty 让它显示在登录提示上方。
 type vtConsole struct{}

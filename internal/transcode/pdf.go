@@ -68,18 +68,12 @@ func (r *PDFRenderer) Pages(ctx context.Context, src string) (int, error) {
 	return strconv.Atoi(string(m[1]))
 }
 
-// pageStem 是第 n 页（从 1 起）渲染产物去掉 .jpg 的名字（pdftoppm 自己加后缀）。
-func pageStem(n int) string { return fmt.Sprintf("p%03d", n) }
-
-// PageName 是第 n 页（从 1 起）渲染产物的文件名。
-func PageName(n int) string { return pageStem(n) + ".jpg" }
-
 // Render 把 src 的前 pages 页逐页渲染到 dir（p001.jpg …），每完成一页回调一次（可为 nil）。
 // 逐页调用 pdftoppm 而不是一次渲染全部，是为了能报进度、能随时取消。
 func (r *PDFRenderer) Render(ctx context.Context, src, dir string, pages int, onPage func(done int)) error {
 	for n := 1; n <= pages; n++ {
 		page := strconv.Itoa(n)
-		prefix := filepath.Join(dir, pageStem(n))
+		prefix := filepath.Join(dir, fmt.Sprintf("p%03d", n)) // pdftoppm 自己加 .jpg
 		out, err := exec.CommandContext(ctx, r.toppm, "-f", page, "-l", page, "-singlefile",
 			"-jpeg", "-jpegopt", "quality=90", "-scale-to-x", strconv.Itoa(PageWidth), "-scale-to-y", "-1",
 			src, prefix).CombinedOutput()

@@ -43,8 +43,8 @@ func makeTarGz(t *testing.T, entries ...entry) []byte {
 func TestExtractStripsTopDirAndKeepsExecBit(t *testing.T) {
 	pkg := makeTarGz(t,
 		entry{name: "display-agent-1.2.0/", typ: tar.TypeDir, mode: 0o755},
-		entry{name: "display-agent-1.2.0/VERSION", body: "1.2.0\n", mode: 0o644},
 		entry{name: "display-agent-1.2.0/update.sh", body: "#!/bin/sh\n", mode: 0o755},
+		entry{name: "display-agent-1.2.0/install-agent.sh", body: "#!/bin/sh\n", mode: 0o755},
 		entry{name: "display-agent-1.2.0/display-agent", body: "bin", mode: 0o755},
 		entry{name: "display-agent-1.2.0/sub/x.txt", body: "x", mode: 0o644},
 		entry{name: "display-agent-1.2.0/../../escape.txt", body: "nope", mode: 0o644}, // 想跳出解包目录
@@ -53,8 +53,8 @@ func TestExtractStripsTopDirAndKeepsExecBit(t *testing.T) {
 	if err := Extract(bytes.NewReader(pkg), dir); err != nil {
 		t.Fatal(err)
 	}
-	if v, err := Check(dir); err != nil || v != "1.2.0" {
-		t.Fatalf("版本：%q %v", v, err)
+	if err := Check(dir); err != nil {
+		t.Fatal(err)
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "update.sh")); err != nil || fi.Mode()&0o111 == 0 {
 		t.Fatalf("update.sh 应保留可执行权限：%v %v", fi, err)
@@ -79,16 +79,32 @@ func TestExtractRejectsLinksAndGarbage(t *testing.T) {
 
 func TestCheckRequiresFiles(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Check(dir); err == nil || !strings.Contains(err.Error(), VersionFile) {
-		t.Fatalf("缺 VERSION 应报错：%v", err)
+	if err := Check(dir); err == nil || !strings.Contains(err.Error(), Binary) {
+		t.Fatalf("缺程序应报错：%v", err)
 	}
-	os.WriteFile(filepath.Join(dir, VersionFile), []byte("../x\n"), 0o644)
-	if _, err := Check(dir); err == nil {
-		t.Fatal("非法版本号应报错")
-	}
-	os.WriteFile(filepath.Join(dir, VersionFile), []byte("2.0.0\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, Binary), nil, 0o755)
-	if _, err := Check(dir); err == nil || !strings.Contains(err.Error(), UpdateScript) {
+	if err := Check(dir); err == nil || !strings.Contains(err.Error(), UpdateScript) {
 		t.Fatalf("缺 update.sh 应报错：%v", err)
+	}
+	os.WriteFile(filepath.Join(dir, UpdateScript), nil, 0o755)
+	if err := Check(dir); err == nil || !strings.Contains(err.Error(), InstallScript) {
+		t.Fatalf("缺 install-agent.sh 应报错（最新的包也是装机包）：%v", err)
+	}
+	os.WriteFile(filepath.Join(dir, InstallScript), nil, 0o755)
+	if err := Check(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 压缩炸弹：声明的解包总大小超过上限，读到头部就拒绝，不往磁盘写。
+func TestExtractRejectsHugePackage(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	tw.WriteHeader(&tar.Header{Name: "p/huge", Mode: 0o644, Size: MaxExtracted + 1, Typeflag: tar.TypeReg})
+	tw.Flush()
+	gz.Close()
+	if err := Extract(&buf, t.TempDir()); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("超过解包上限应拒绝：%v", err)
 	}
 }

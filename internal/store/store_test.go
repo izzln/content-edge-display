@@ -1,6 +1,8 @@
 package store
 
 import (
+	"errors"
+	"image"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -14,12 +16,12 @@ func TestPersistAndReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(time.Minute).Truncate(time.Second)
-	err = st.Update(func(s *State) {
-		s.DeviceAttrs["dev-001"] = map[string]string{"room": "302"}
+	err = st.Update(func(s *State) error {
 		s.Templates["t1"] = Template{ID: "t1", Name: "T", W: 100, H: 100,
 			Regions: []Region{{ID: "r1", W: 100, H: 100, Type: "text", Key: "x"}}}
-		s.Displays["dev-001"] = DisplayConfig{TemplateID: "t1"}
-		s.TestUntil["dev-001"] = until
+		s.Devices["dev-001"] = &Device{ID: "dev-001", Attrs: map[string]string{"room": "302"},
+			Display: DisplayConfig{TemplateID: "t1"}, TestUntil: until}
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +35,8 @@ func TestPersistAndReload(t *testing.T) {
 		t.Fatal("template not persisted")
 	}
 	st2.View(func(s *State) {
-		if s.DeviceAttrs["dev-001"]["room"] != "302" || s.Displays["dev-001"].TemplateID != "t1" || !s.TestUntil["dev-001"].Equal(until) {
+		d := s.Devices["dev-001"]
+		if d.Attrs["room"] != "302" || d.Display.TemplateID != "t1" || !d.TestUntil.Equal(until) {
 			t.Fatalf("state not persisted: %+v", s)
 		}
 		if s.CacheQuotaGB != DefaultCacheQuotaGB {
@@ -49,9 +52,9 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_ = st.Update(func(s *State) { s.DeviceAttrs["d"] = map[string]string{"n": "1"} })
+			_ = st.Update(func(s *State) error { s.Devices["d"] = &Device{ID: "d"}; return nil })
 		}()
-		go func() { defer wg.Done(); st.View(func(s *State) { _ = s.DeviceAttrs["d"] }) }()
+		go func() { defer wg.Done(); st.View(func(s *State) { _ = s.Devices["d"] }) }()
 	}
 	wg.Wait()
 }
@@ -104,19 +107,20 @@ func TestValidateTemplate(t *testing.T) {
 	}
 }
 
-func TestValidateDisplay(t *testing.T) {
-	get := func(id string) (Template, bool) {
-		if id == "t1" {
-			return Template{ID: "t1", Regions: []Region{{ID: "right", Type: RegionMedia}}}, true
-		}
-		return Template{}, false
+// fn 返回错误时不写盘：重新打开看不到改动。
+func TestUpdateErrorDiscardsWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	st, _ := Open(path)
+	boom := errors.New("boom")
+	if err := st.Update(func(s *State) error { s.Global.TemplateID = "x"; return boom }); err != boom {
+		t.Fatalf("应原样返回 fn 的错误：%v", err)
 	}
-
-	for id, ok := range map[string]bool{"": true /* 跟随全局 */, "t1": true, "missing": false} {
-		if err := ValidateDisplay(DisplayConfig{TemplateID: id}, get); (err == nil) != ok {
-			t.Errorf("template_id %q: err=%v，期望 ok=%v", id, err, ok)
+	st2, _ := Open(path)
+	st2.View(func(s *State) {
+		if s.Global.TemplateID != "" {
+			t.Fatal("出错的修改不应写盘")
 		}
-	}
+	})
 }
 
 // 首启播种：开箱就得有一个能用的左右分屏模板，并被设为全局默认。
@@ -128,7 +132,7 @@ func TestSeedDefaultTemplateAndEnsureGlobal(t *testing.T) {
 	if !seeded || len(st.Templates) != 1 {
 		t.Fatalf("首启应当播种一个模板：seeded=%v templates=%d", seeded, len(st.Templates))
 	}
-	if _, ok := tpl.MediaRegion(); !ok {
+	if _, ok := tpl.MediaRect(false); !ok {
 		t.Fatal("默认模板必须带一个媒体区，否则没法放图片/视频")
 	}
 	if tpl.ID == "" || tpl.ImageDurationS <= 0 {
@@ -172,5 +176,19 @@ func TestMirrored(t *testing.T) {
 	}
 	if c := Mirrored(Region{X: 100, W: 200, Align: "center"}, 1000); c.X != 700 || c.Align != "center" {
 		t.Fatalf("居中对齐不应改变：%+v", c)
+	}
+}
+
+// 媒体区矩形：对调时按画布宽度左右翻过去。
+func TestMediaRect(t *testing.T) {
+	tpl := Template{W: 1440, H: 900, Regions: []Region{{ID: "m", Type: RegionMedia, X: 720, Y: 0, W: 720, H: 900}}}
+	if r, ok := tpl.MediaRect(false); !ok || r != image.Rect(720, 0, 1440, 900) {
+		t.Fatalf("常规：%v %v", r, ok)
+	}
+	if r, _ := tpl.MediaRect(true); r != image.Rect(0, 0, 720, 900) {
+		t.Fatalf("对调：%v", r)
+	}
+	if _, ok := (Template{Regions: []Region{{Type: RegionText}}}).MediaRect(false); ok {
+		t.Fatal("没有媒体区")
 	}
 }

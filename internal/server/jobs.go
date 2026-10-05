@@ -34,7 +34,7 @@ type pdfRenderer interface {
 // 任务状态。
 const (
 	jobQueued  = "queued"
-	jobRunning = "transcoding"
+	jobRunning = "processing"
 	jobFailed  = "failed"
 )
 
@@ -285,11 +285,4 @@ func (s *Server) renderPDF(ctx context.Context, j *mediaJob, dir string) (string
 		return "", "页面渲染失败", err
 	}
 	return fmt.Sprintf("%d pages", pages), "", nil
-}
-
-func fileSize(path string) int64 {
-	if fi, err := os.Stat(path); err == nil {
-		return fi.Size()
-	}
-	return 0
 }

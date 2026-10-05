@@ -4,15 +4,16 @@
 设备经局域网轮询分发、断网照常播放。
 
 - 硬件：Orange Pi One（全志 H3）+ LCD 1440×900（HDMI 驱动板）
-- 已实现：端到端分发、管理后台、模板与时段、上传转码、设备一键装机与自注册、整包 OTA（失败自动回滚）、
-  HTTPS 指纹固定、插键盘现场救援；客户小程序与审核流程在规划中
+- 已实现：端到端分发、管理后台（效果预览、口令管理）、模板（含节日底图）与时段、上传转码与文件缓存区、
+  设备一键装机/插卡即装与自注册、整包 OTA（离线依赖包、失败自动回滚）、HTTPS 指纹固定、设备访问凭据统一管理、
+  插键盘现场救援；客户小程序与审核流程在规划中
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 架构与设计取舍：分发协议、模板渲染与硬件图层、上传处理、OTA 与安全、可靠性、规划 |
-| [docs/deployment.md](docs/deployment.md) | 部署与运维：成品包、服务端配置、设备装机、日常使用、OTA、备份迁移、验机、无外网运行 |
+| [docs/architecture.md](docs/architecture.md) | 架构与设计取舍：分发协议、模板渲染与硬件图层、底图、上传处理、装机与 OTA、安全与访问、可靠性、规划 |
+| [docs/deployment.md](docs/deployment.md) | 部署与运维：成品包、服务端配置、设备装机、日常使用、OTA、排障、备份迁移、验机、无外网运行 |
 | [docs/hardware.md](docs/hardware.md) | 硬件选型依据与候选对比，附二手盒子刷机指南 |
 
 ## 目录结构
@@ -33,7 +34,7 @@ internal/
   fsutil/             原子写入、硬链接等文件操作
   web/                内嵌的管理后台单页
 deploy/agent/         设备端程序包内容：安装/更新/回滚/自检脚本、systemd 单元
-deploy/server/        服务端包内容：systemd 单元、配置样例
+deploy/server/        服务端包内容：systemd 单元、配置样例、插卡即装镜像脚本
 scripts/              构建辅助脚本（口令生成、离线依赖包）
 bin/                  构建产物（gitignore）
 ```
@@ -62,4 +63,4 @@ make test        # go vet + go test ./...
 ```
 
 `.github/workflows/ci.yml`：每次 push 跑 gofmt/vet/测试并上传成品包；推送 `v*` 标签自动发布 Release
-并附上两个包（包名与程序内置版本一致，可直接在后台上传下发）。
+并附上两个包与各 Debian 版本的离线依赖包（包名与程序内置版本一致，可直接在后台上传下发）。

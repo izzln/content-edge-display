@@ -33,7 +33,7 @@ func TestPDFUploadIsRenderedIntoPages(t *testing.T) {
 	doc := testpdf.Make(testpdf.A4Portrait, testpdf.A4Landscape, testpdf.A4Portrait)
 
 	res := parseUpload(t, uploadMedia(t, h, testDeviceID, upload{"a.jpg", tinyPNG(t)}, upload{"季度 报告.pdf", doc}))
-	if strings.Join(res.Transcoding, ",") != "季度 报告.pdf" || len(res.Rejected) != 0 {
+	if strings.Join(res.Queued, ",") != "季度 报告.pdf" || len(res.Rejected) != 0 {
 		t.Fatalf("PDF 应进入后台处理队列：%+v", res)
 	}
 	files := waitMedia(t, h, "PDF 渲染完成", func(fs []MediaFile) bool {
@@ -130,7 +130,7 @@ type blockingPDF struct{ started chan struct{} }
 func (b *blockingPDF) Version() string                            { return "blocking" }
 func (b *blockingPDF) Pages(context.Context, string) (int, error) { return 2, nil }
 func (b *blockingPDF) Render(ctx context.Context, _, dir string, _ int, onPage func(int)) error {
-	os.WriteFile(filepath.Join(dir, transcode.PageName(1)), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "p001.jpg"), []byte("x"), 0o644)
 	onPage(1)
 	close(b.started)
 	<-ctx.Done()

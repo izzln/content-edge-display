@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,7 +15,7 @@ import (
 )
 
 // 离线依赖包（scripts/build-deps.sh 产出的 display-deps-<代号>-armhf.tar.gz）：设备播放所需的 Debian 软件包
-// 连同全部下层依赖，外加 apt 索引。后台与程序包从同一个入口上传，解到 data/deps/<代号>/；设备的 deps.sh（首次安装
+// 连同全部下层依赖，外加 apt 索引。后台与程序包从同一个入口上传，解到 data/deps/<代号>/；设备的 update.sh（首次安装
 // 与每次 OTA）把 HTTPS 端口的 /apt/<代号>/ 当作 apt 仓库，只信任服务端证书，从局域网安装，不访问外网。
 // 里面都是公开的 Debian 软件包，不需要口令。
 
@@ -33,8 +32,6 @@ type DepsRepo struct {
 	UploadedAt time.Time `json:"uploaded_at"`
 }
 
-func (s *Server) depsDir() string { return filepath.Join(s.cfg.DataDir, "deps") }
-
 func isDepsBundle(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, depsCodenameFile))
 	return err == nil
@@ -45,16 +42,16 @@ func (s *Server) installDeps(dir string) (DepsRepo, error) {
 	b, _ := os.ReadFile(filepath.Join(dir, depsCodenameFile))
 	codename := strings.TrimSpace(string(b))
 	if !codenamePattern.MatchString(codename) {
-		return DepsRepo{}, fmt.Errorf("依赖包里的 CODENAME %q 无效", codename)
+		return DepsRepo{}, errBadRequest("依赖包里的 CODENAME %q 无效", codename)
 	}
 	for _, f := range []string{"Packages", "Release"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
-			return DepsRepo{}, fmt.Errorf("依赖包缺少 %s——请上传 scripts/build-deps.sh 产出的包", f)
+			return DepsRepo{}, errBadRequest("依赖包缺少 %s——请上传 scripts/build-deps.sh 产出的包", f)
 		}
 	}
 	// 先把旧的挪开再换上新的：装机脚本任何时候看到的都是一个完整的仓库
 	dst := filepath.Join(s.depsDir(), codename)
-	trash, err := os.MkdirTemp(s.depsDir(), ".old-")
+	trash, err := os.MkdirTemp(s.incomingDir(), "old-deps-")
 	if err != nil {
 		return DepsRepo{}, err
 	}

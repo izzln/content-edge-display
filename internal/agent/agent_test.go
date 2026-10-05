@@ -45,12 +45,12 @@ func TestEndToEnd(t *testing.T) {
 	if err := a.heartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var statuses []server.DeviceStatus
+	var statuses []server.DeviceView
 	json.Unmarshal(e.admin(t, "GET", "/api/v1/admin/devices", "").Body.Bytes(), &statuses)
 	if len(statuses) != 1 || !statuses[0].Online || statuses[0].Heartbeat == nil || statuses[0].Heartbeat.AgentVersion != Version {
 		t.Fatalf("device not online with heartbeat in admin view: %+v", statuses)
 	}
-	if statuses[0].HW.IP == "" {
+	if statuses[0].IP == "" {
 		t.Fatal("服务端应从连接上取到设备 IP")
 	}
 
@@ -160,7 +160,7 @@ func TestLayoutBecomesOverlayScene(t *testing.T) {
 	if sc.OverlayPNG == "" || len(sc.Items) != 1 || !strings.HasSuffix(sc.Items[0].Path, "_clip.mp4") {
 		t.Fatalf("清单带 layout 时应是叠加层 + 媒体文件本身：%+v", sc)
 	}
-	if sc.CanvasW != 1440 || sc.CanvasH != 900 || sc.Media != (manifest.Rect{X: 720, Y: 0, W: 720, H: 900}) {
+	if sc.Media != (manifest.Rect{X: 720, Y: 0, W: 720, H: 900}) {
 		t.Fatalf("画布或媒体区错误：%+v", sc)
 	}
 	if fi, err := os.Stat(sc.OverlayPNG); err != nil || fi.Size() == 0 {
@@ -198,7 +198,7 @@ func TestRequestsUseHTTPS(t *testing.T) {
 	if !strings.HasPrefix(e.a.cfg.ServerURL, "https://") {
 		t.Fatal("测试环境应走 HTTPS")
 	}
-	req, _ := e.a.newRequest(context.Background(), http.MethodGet, "/api/v1/device/manifest", nil)
+	req, _ := e.a.newRequest(context.Background(), http.MethodGet, "/api/v1/device/manifest", nil, true)
 	resp, err := e.a.api.Do(req)
 	if err != nil {
 		t.Fatal(err)

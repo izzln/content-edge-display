@@ -29,10 +29,10 @@ func sshKey(comment string) string {
 func TestAccessSettingsApplied(t *testing.T) {
 	e := newEnv(t, true)
 	ctx := context.Background()
-	os.MkdirAll(filepath.Dir(e.a.acc.sshdDropIn), 0o755) // 装了 sshd
+	os.MkdirAll(filepath.Dir(e.a.accessSys.sshdDropIn), 0o755) // 装了 sshd
 	var calls []string
 	var fail error
-	e.a.acc.run = func(stdin, name string, args ...string) error {
+	e.a.accessSys.run = func(stdin, name string, args ...string) error {
 		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")+" <"+stdin))
 		return fail
 	}
@@ -57,10 +57,10 @@ func TestAccessSettingsApplied(t *testing.T) {
 	if len(calls) != 2 || !strings.HasPrefix(calls[0], "chpasswd -e <root:$6$") || calls[1] != "systemctl try-reload-or-restart ssh <" {
 		t.Fatalf("应写入密码哈希并重载 sshd：%q", calls)
 	}
-	if b, _ := os.ReadFile(e.a.acc.authorizedKeys); string(b) != key+"\n" {
+	if b, _ := os.ReadFile(e.a.accessSys.authorizedKeys); string(b) != key+"\n" {
 		t.Fatalf("authorized_keys 应是后台的公钥：%q", b)
 	}
-	if b, _ := os.ReadFile(e.a.acc.sshdDropIn); !strings.Contains(string(b), "PasswordAuthentication no") {
+	if b, _ := os.ReadFile(e.a.accessSys.sshdDropIn); !strings.Contains(string(b), "PasswordAuthentication no") {
 		t.Fatal("有公钥时应只允许密钥登录")
 	}
 
@@ -71,7 +71,7 @@ func TestAccessSettingsApplied(t *testing.T) {
 	}
 	// 重启后（新代理、同一缓存目录）也不重复执行
 	a2 := New(e.a.cfg, e.p)
-	a2.acc, a2.identity, a2.registered = e.a.acc, e.a.identity, true
+	a2.accessSys, a2.identity, a2.registered = e.a.accessSys, e.a.identity, true
 	if err := a2.step(ctx); err != nil || len(calls) != 0 {
 		t.Fatalf("重启后不应重复执行：%v %v", err, calls)
 	}
@@ -79,10 +79,10 @@ func TestAccessSettingsApplied(t *testing.T) {
 	// 清空公钥：恢复密码 SSH
 	e.admin(t, "PUT", "/api/v1/admin/access", `{"ssh_keys":[]}`)
 	step()
-	if _, err := os.Stat(e.a.acc.sshdDropIn); !os.IsNotExist(err) {
+	if _, err := os.Stat(e.a.accessSys.sshdDropIn); !os.IsNotExist(err) {
 		t.Fatal("公钥清空后应删除只允许密钥登录的配置")
 	}
-	if _, err := os.Stat(e.a.acc.authorizedKeys); !os.IsNotExist(err) {
+	if _, err := os.Stat(e.a.accessSys.authorizedKeys); !os.IsNotExist(err) {
 		t.Fatal("公钥清空后 authorized_keys 也应清掉")
 	}
 
@@ -90,20 +90,20 @@ func TestAccessSettingsApplied(t *testing.T) {
 	fail = errors.New("chpasswd: boom")
 	e.admin(t, "PUT", "/api/v1/admin/access", `{"root_password":"Another-456","ssh_keys":[]}`)
 	step()
-	if e.a.accessErr == "" || !strings.Contains(e.a.accessErr, "boom") {
-		t.Fatalf("失败原因应记下来随心跳上报：%q", e.a.accessErr)
+	if e.a.accRetry.err == "" || !strings.Contains(e.a.accRetry.err, "boom") {
+		t.Fatalf("失败原因应记下来随心跳上报：%q", e.a.accRetry.err)
 	}
 	if err := e.a.heartbeat(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var st []server.DeviceStatus
+	var st []server.DeviceView
 	json.Unmarshal(e.admin(t, "GET", "/api/v1/admin/devices", "").Body.Bytes(), &st)
 	if st[0].Heartbeat == nil || !strings.Contains(st[0].Heartbeat.AccessError, "boom") {
 		t.Fatal("后台应看到访问设置失败的原因")
 	}
-	fail, e.a.accessFailedAt = nil, time.Time{}
+	fail, e.a.accRetry.at = nil, time.Time{}
 	step()
-	if e.a.accessErr != "" {
-		t.Fatalf("重试成功后应清掉错误：%q", e.a.accessErr)
+	if e.a.accRetry.err != "" {
+		t.Fatalf("重试成功后应清掉错误：%q", e.a.accRetry.err)
 	}
 }

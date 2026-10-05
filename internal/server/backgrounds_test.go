@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -15,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/testutil"
 )
 
 // bgPNG 造一张 w×h 的底图：opaqueFrac 指左边多少比例不透明（填 c），其余透明。
@@ -78,18 +79,14 @@ func TestTemplateBackground(t *testing.T) {
 		t.Fatalf("透明不足一半应照收并返回比例：%d %s", w.Code, w.Body.String())
 	}
 	w := uploadBackground(t, h, tplID, false, bgPNG(t, 32, 20, 0.5, red, false))
-	var got struct {
-		File string `json:"file"`
-		W, H int
-	}
-	json.Unmarshal(w.Body.Bytes(), &got)
-	if w.Code != http.StatusOK || !strings.HasPrefix(got.File, "bg-") || got.W != 32 || state(s).Templates[tplID].BackgroundImage != got.File {
+	file := state(s).Templates[tplID].BackgroundImage
+	if w.Code != http.StatusOK || !strings.HasPrefix(file, "bg-") {
 		t.Fatalf("底图应上传成功并写进模板：%d %s", w.Code, w.Body.String())
 	}
 	if after := deviceManifest(t, h).Version; after == before {
 		t.Fatal("换了底图，设备清单版本应变化")
 	}
-	if w := do(t, h, adminReq("GET", "/api/v1/admin/backgrounds/"+got.File, nil), http.StatusOK); w.Body.Len() == 0 {
+	if w := do(t, h, adminReq("GET", "/api/v1/admin/backgrounds/"+file, nil), http.StatusOK); w.Body.Len() == 0 {
 		t.Fatal("后台应能取回底图原图")
 	}
 	if w := uploadBackground(t, h, tplID, true, bgPNG(t, 32, 20, 0.5, green, true)); w.Code != http.StatusOK {
@@ -102,11 +99,12 @@ func TestTemplateBackground(t *testing.T) {
 		t.Fatalf("参考图应是画布尺寸的 PNG：%v", err)
 	}
 
-	// JSON 编辑里引用不存在的底图：拒绝
+	// 底图只由底图接口改：编辑模板（含 JSON 编辑）时忽略请求里的底图字段，保留原值
 	tpl := state(s).Templates[tplID]
-	tpl.BackgroundImage = "bg-00000000000000ff.png"
-	if w := do2(t, h, adminReq("PUT", "/api/v1/admin/templates/"+tplID, tpl)); w.Code != http.StatusBadRequest {
-		t.Fatalf("引用不存在的底图应被拒：%d", w.Code)
+	tpl.BackgroundImage, tpl.Name = "bg-00000000000000ff.png", "改了名"
+	do(t, h, adminReq("PUT", "/api/v1/admin/templates/"+tplID, tpl), http.StatusOK)
+	if got := state(s).Templates[tplID]; got.BackgroundImage != file || got.Name != "改了名" {
+		t.Fatalf("编辑模板应保留底图：%+v", got)
 	}
 
 	// 去掉常规底图：对调版一并去掉；文件过了宽限期后被回收
@@ -126,7 +124,5 @@ func TestTemplateBackground(t *testing.T) {
 	if tpl := state(s).Templates[tplID]; tpl.BackgroundImage != "" || tpl.BackgroundImageMirror != "" {
 		t.Fatalf("去掉常规底图时对调版应一并去掉：%+v", tpl)
 	}
-	if left := files(); len(left) != 0 {
-		t.Fatalf("没有模板引用的底图应被回收：%v", left)
-	}
+	testutil.WaitFor(t, 3*time.Second, "没有模板引用的底图被维护协程回收", func() bool { return len(files()) == 0 })
 }

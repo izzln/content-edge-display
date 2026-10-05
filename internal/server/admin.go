@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"fmt"
 	"image"
 	"image/png"
@@ -64,15 +65,14 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"PUT /api/v1/admin/access":                          s.handlePutAccess,
 		"GET /api/v1/admin/cache":                           s.handleGetCache,
 		"PUT /api/v1/admin/cache":                           s.handlePutCache,
+		"POST /api/v1/admin/devices/{id}/media":             s.handleUploadDeviceMedia,
 	} {
-		mux.HandleFunc(route, s.admin(h, true))
+		mux.HandleFunc(route, s.admin(h))
 	}
-	// 上传接口自己逐个文件记日志
-	mux.HandleFunc("POST /api/v1/admin/devices/{id}/media", s.admin(s.handleUploadDeviceMedia, false))
 }
 
-// admin 校验管理口令（猜错多了按来源 IP 锁定，见 adminauth.go）；logWrites 为真时把写操作（非 GET）记进日志。
-func (s *Server) admin(h http.HandlerFunc, logWrites bool) http.HandlerFunc {
+// admin 校验管理口令（猜错多了按来源 IP 锁定，见 adminauth.go），并把写操作（非 GET）记进日志。
+func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -83,10 +83,10 @@ func (s *Server) admin(h http.HandlerFunc, logWrites bool) http.HandlerFunc {
 			http.Error(w, "口令错误次数过多，请 "+waitText(wait)+"后再试", http.StatusTooManyRequests)
 			return
 		case !ok:
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			http.Error(w, "口令不对", http.StatusUnauthorized)
 			return
 		}
-		if !logWrites || r.Method == http.MethodGet {
+		if r.Method == http.MethodGet {
 			h(w, r)
 			return
 		}
@@ -158,113 +158,104 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 func (s *Server) pathDevice(w http.ResponseWriter, r *http.Request) (store.Device, bool) {
 	dev, ok := s.store.Device(r.PathValue("id"))
 	if !ok {
-		http.Error(w, "unknown device", http.StatusNotFound)
+		writeError(w, errNotFound("设备"))
 	}
 	return dev, ok
 }
 
 // ---- 设备列表 / 删除 / 属性 / 测试 / 显示配置 ----
 
-// DeviceStatus 是管理接口返回的设备状态。
-type DeviceStatus struct {
-	ID           string              `json:"id"`
+// DeviceView 是后台看到的一台设备：注册信息与设置（不含密钥）+ 运行状态。
+type DeviceView struct {
+	ID           string    `json:"id"`
+	RegisteredAt time.Time `json:"registered_at"`
+	store.Hardware
+	Rekey        *rekeyView          `json:"rekey,omitempty"`
+	Attrs        map[string]string   `json:"attrs"`
+	Display      store.DisplayConfig `json:"display"`
+	UpdateTarget *store.UpdateTarget `json:"update_target,omitempty"`
+
 	Online       bool                `json:"online"`
 	LastSeen     *time.Time          `json:"last_seen,omitempty"` // 最近一次任何请求（轮询/心跳/下载）
 	PollS        int                 `json:"poll_interval_s"`     // 设备多久该来一次
 	OfflineS     int                 `json:"offline_after_s"`     // 多久没来算离线
 	Heartbeat    *manifest.Heartbeat `json:"heartbeat,omitempty"`
-	Attrs        map[string]string   `json:"attrs"`
-	Display      store.DisplayConfig `json:"display"`
 	TestUntil    *time.Time          `json:"test_until,omitempty"`
 	ActiveSource string              `json:"active_source"` // test/override/schedule/global
 	ActiveTpl    string              `json:"active_template,omitempty"`
 	Sync         string              `json:"sync"` // offline/waiting/syncing/latest，见 syncState
-	UpdateTarget *store.UpdateTarget `json:"update_target,omitempty"`
-	HW           store.Device        `json:"hw"` // 注册信息（不含密钥）
+}
+
+// rekeyView 是待确认的换密钥请求（不含新密钥本身）。
+type rekeyView struct {
+	Fingerprint string    `json:"fingerprint"`
+	At          time.Time `json:"at"`
+	store.Hardware
 }
 
 func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
-	var statuses []DeviceStatus
+	views := []DeviceView{}
 	s.store.View(func(st *store.State) {
 		for _, d := range sortedByID(st.Devices) {
-			d.Secret = "" // 不向后台暴露密钥
-			if d.Rekey != nil {
-				rk := *d.Rekey
-				rk.Secret = ""
-				d.Rekey = &rk
+			v := DeviceView{ID: d.ID, RegisteredAt: d.RegisteredAt, Hardware: d.Hardware,
+				Attrs: maps.Clone(d.Attrs), Display: d.Display, UpdateTarget: d.Update}
+			if rk := d.Rekey; rk != nil {
+				v.Rekey = &rekeyView{Fingerprint: rk.Fingerprint, At: rk.At, Hardware: rk.Hardware}
 			}
-			ds := DeviceStatus{ID: d.ID, Display: st.Displays[d.ID], HW: d}
-			if u, ok := st.Updates[d.ID]; ok {
-				ds.UpdateTarget = &u
-			}
-			statuses = append(statuses, ds)
+			views = append(views, v)
 		}
 	})
-	keys := make([]string, len(statuses))
-	for i := range statuses { // 读状态与文件元数据，放在 s.mu 外面
-		ds := &statuses[i]
-		c, _ := s.content(ds.ID, now)
-		ds.Attrs, ds.ActiveSource, ds.ActiveTpl, keys[i] = c.Attrs, c.Source, c.Template.ID, c.key()
+	keys := make([]string, len(views))
+	for i := range views { // 读状态与文件元数据，放在 s.mu 外面
+		v := &views[i]
+		c, _ := s.content(v.ID, now)
+		v.ActiveSource, v.ActiveTpl, keys[i] = c.Source, c.Template.ID, c.key()
 		if !c.TestUntil.IsZero() {
-			ds.TestUntil, ds.ActiveTpl = &c.TestUntil, ""
+			v.TestUntil, v.ActiveTpl = &c.TestUntil, ""
 		}
 	}
 	offline := s.offlineAfter()
 	s.mu.Lock()
-	for i := range statuses {
-		ds := &statuses[i]
-		ds.PollS, ds.OfflineS = s.cfg.PollIntervalS, int(offline/time.Second)
-		if seen, ok := s.lastSeen[ds.ID]; ok {
-			ds.LastSeen, ds.Online = &seen, now.Sub(seen) <= offline
+	for i := range views {
+		v, rt := &views[i], s.devices[views[i].ID]
+		v.PollS, v.OfflineS = s.cfg.PollIntervalS, int(offline/time.Second)
+		if rt != nil && !rt.lastSeen.IsZero() {
+			seen := rt.lastSeen
+			v.LastSeen, v.Online, v.Heartbeat = &seen, now.Sub(seen) <= offline, rt.hb
 		}
-		if hb, ok := s.lastHB[ds.ID]; ok {
-			ds.Heartbeat = &hb
-		}
-		ds.Sync = s.syncState(ds.ID, ds.Online, keys[i])
+		v.Sync = s.syncState(rt, v.Online, keys[i])
 	}
 	s.mu.Unlock()
-	if statuses == nil {
-		statuses = []DeviceStatus{}
-	}
-	writeJSON(w, statuses)
+	writeJSON(w, views)
 }
 
-// handleDeleteDevice 删除设备及其属性、显示配置、更新目标与播放内容（设备仍在运行的话会重新注册）。
+// handleDeleteDevice 删除设备及其全部设置与播放内容（设备仍在运行的话会重新注册成一台新设备）。
 func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
-	if !s.update(w, func(st *store.State) {
-		delete(st.Devices, dev.ID)
-		delete(st.DeviceAttrs, dev.ID)
-		delete(st.Displays, dev.ID)
-		delete(st.Updates, dev.ID)
-		delete(st.TestUntil, dev.ID)
+	id := r.PathValue("id")
+	if !s.update(w, func(st *store.State) error {
+		if st.Devices[id] == nil {
+			return errNotFound("设备")
+		}
+		delete(st.Devices, id)
+		return nil
 	}) {
 		return
 	}
 	s.mu.Lock()
-	delete(s.lastSeen, dev.ID)
-	delete(s.lastHB, dev.ID)
-	delete(s.sync, dev.ID)
+	delete(s.devices, id)
 	s.mu.Unlock()
-	s.jobs.removeDevice(dev.ID)
-	names, _ := manifest.ListMedia(s.deviceMediaDir(dev.ID))
-	s.unlinkMedia(dev.ID, names...)
-	os.RemoveAll(s.deviceMediaDir(dev.ID))
-	os.RemoveAll(filepath.Join(s.renderedDir(), dev.ID))
+	s.jobs.removeDevice(id)
+	files, _ := manifest.ListMedia(s.deviceMediaDir(id))
+	s.unlinkMedia(id, manifest.Names(files)...)
+	os.RemoveAll(s.deviceMediaDir(id))
+	os.RemoveAll(filepath.Join(s.renderedDir(), id))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 var attrKeyPattern = regexp.MustCompile(`^[\p{L}\p{N}_-]{1,32}$`)
 
 func (s *Server) handlePutAttrs(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
 	var attrs map[string]string
 	if !decodeJSON(w, r, 64<<10, &attrs) {
 		return
@@ -275,56 +266,46 @@ func (s *Server) handlePutAttrs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.update(w, func(st *store.State) { st.DeviceAttrs[dev.ID] = attrs }) {
+	if s.editDevice(w, r.PathValue("id"), func(d *store.Device) error { d.Attrs = attrs; return nil }) {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-// handleTest 让设备全屏显示测试卡 duration_s 秒；duration_s <= 0 取消。顺手清掉已过期的测试记录。
+// handleTest 让设备全屏显示测试卡 duration_s 秒；duration_s <= 0 取消。
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
-		return
-	}
 	var req struct {
 		DurationS int `json:"duration_s"`
 	}
 	if !decodeJSON(w, r, 4<<10, &req) {
 		return
 	}
-	now := s.now()
-	if s.update(w, func(st *store.State) {
-		for id, until := range st.TestUntil {
-			if !now.Before(until) {
-				delete(st.TestUntil, id)
-			}
-		}
-		delete(st.TestUntil, dev.ID)
-		if req.DurationS > 0 {
-			st.TestUntil[dev.ID] = now.Add(time.Duration(req.DurationS) * time.Second)
-		}
-	}) {
+	var until time.Time
+	if req.DurationS > 0 {
+		until = s.now().Add(time.Duration(req.DurationS) * time.Second)
+	}
+	if s.editDevice(w, r.PathValue("id"), func(d *store.Device) error { d.TestUntil = until; return nil }) {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 // handlePutDisplay 设置设备的专属模板（空 = 跟随全局）与左右对调。播放顺序归播放列表接口管。
 func (s *Server) handlePutDisplay(w http.ResponseWriter, r *http.Request) {
-	dev, ok := s.pathDevice(w, r)
-	if !ok {
+	var req store.DisplayConfig
+	if !decodeJSON(w, r, 64<<10, &req) {
 		return
 	}
-	var d store.DisplayConfig
-	if !decodeJSON(w, r, 64<<10, &d) {
-		return
-	}
-	if err := store.ValidateDisplay(d, s.store.Template); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if s.update(w, func(st *store.State) {
-		d.Playlist = st.Displays[dev.ID].Playlist // 整个替换会把排好的顺序冲掉
-		st.Displays[dev.ID] = d
+	id := r.PathValue("id")
+	if s.update(w, func(st *store.State) error {
+		d, ok := st.Devices[id]
+		switch {
+		case !ok:
+			return errNotFound("设备")
+		case req.TemplateID != "" && st.Templates[req.TemplateID].ID == "":
+			return errBadRequest("模板 %q 不存在", req.TemplateID)
+		}
+		req.Playlist = d.Display.Playlist // 整个替换会把排好的顺序冲掉
+		d.Display = req
+		return nil
 	}) {
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -343,11 +324,13 @@ func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, 4<<10, &g) {
 		return
 	}
-	if _, ok := s.store.Template(g.TemplateID); !ok {
-		http.Error(w, "模板不存在", http.StatusBadRequest)
-		return
-	}
-	if s.update(w, func(st *store.State) { st.Global = g }) {
+	if s.update(w, func(st *store.State) error {
+		if _, ok := st.Templates[g.TemplateID]; !ok {
+			return errBadRequest("模板不存在")
+		}
+		st.Global = g
+		return nil
+	}) {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -367,11 +350,13 @@ func (s *Server) handlePutSchedules(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []store.Schedule{}
 	}
-	if err := store.ValidateSchedules(list, s.store.Template); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if s.update(w, func(st *store.State) { st.Schedules = list }) {
+	if s.update(w, func(st *store.State) error {
+		if err := store.ValidateSchedules(list, st.Templates); err != nil {
+			return errBadRequest("%v", err)
+		}
+		st.Schedules = list
+		return nil
+	}) {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -386,29 +371,22 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 
 // handlePutTemplate 新建或修改模板。模板 ID 由服务端生成：它只是内部标识，
 // 运营方不需要关心，管理后台也不显示——新建时（POST）自动分配。
+// 底图只由底图接口改：修改时保留原来的，新建（包括复制别的模板）时没有底图。
 func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	var t store.Template
 	if !decodeJSON(w, r, 256<<10, &t) {
 		return
 	}
-	if id := r.PathValue("id"); id != "" {
-		t.ID = id
-	}
-	if t.ID == "" {
-		t.ID = store.NewTemplateID()
-	}
-	if err := store.ValidateTemplate(&t); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	for _, f := range []string{t.BackgroundImage, t.BackgroundImageMirror} {
-		if _, err := os.Stat(filepath.Join(s.backgroundsDir(), f)); f != "" && err != nil {
-			http.Error(w, "底图 "+f+" 不存在（请在后台「底图」里上传）", http.StatusBadRequest)
-			return
+	t.ID = cmp.Or(r.PathValue("id"), t.ID, store.NewTemplateID())
+	if s.update(w, func(st *store.State) error {
+		old := st.Templates[t.ID]
+		t.BackgroundImage, t.BackgroundImageMirror = old.BackgroundImage, old.BackgroundImageMirror
+		if err := store.ValidateTemplate(&t); err != nil {
+			return errBadRequest("%v", err)
 		}
-	}
-	if s.update(w, func(st *store.State) { st.Templates[t.ID] = t }) {
-		s.gcBackgrounds()
+		st.Templates[t.ID] = t
+		return nil
+	}) {
 		writeJSON(w, t)
 	}
 }
@@ -420,12 +398,11 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 // 删掉的正好是全局默认模板时不拦——删除后自动改指向剩下的模板。
 func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var inUse []string
-	var last bool
-	s.store.View(func(st *store.State) {
-		for devID, d := range st.Displays {
-			if d.TemplateID == id {
-				inUse = append(inUse, "设备 "+devID)
+	if s.update(w, func(st *store.State) error {
+		var inUse []string
+		for _, d := range sortedByID(st.Devices) {
+			if d.Display.TemplateID == id {
+				inUse = append(inUse, "设备 "+d.ID)
 			}
 		}
 		for _, sc := range st.Schedules {
@@ -433,19 +410,19 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 				inUse = append(inUse, "时段 "+sc.ID)
 			}
 		}
-		_, exists := st.Templates[id]
-		last = exists && len(st.Templates) == 1
-	})
-	switch {
-	case last:
-		http.Error(w, "这是最后一个模板，不能删除（系统始终需要一个全局默认模板）", http.StatusConflict)
-	case len(inUse) > 0:
-		http.Error(w, "模板使用中: "+strings.Join(inUse, ", "), http.StatusConflict)
-	case s.update(w, func(st *store.State) {
+		switch _, ok := st.Templates[id]; {
+		case !ok:
+			return errNotFound("模板")
+		case len(st.Templates) == 1:
+			return errConflict("这是最后一个模板，不能删除（系统始终需要一个全局默认模板）")
+		case len(inUse) > 0:
+			return errConflict("模板使用中: %s", strings.Join(inUse, ", "))
+		}
 		delete(st.Templates, id)
 		store.EnsureGlobalTemplate(st)
-	}):
-		s.gcBackgrounds()
+		return nil
+	}) {
+		s.kickCache() // 维护协程回收它的底图
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -465,27 +442,27 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	)
 	s.store.View(func(st *store.State) {
 		tpl, ok = st.Templates[r.PathValue("id")]
-		if dev != "" {
-			attrs, disp = maps.Clone(st.DeviceAttrs[dev]), st.Displays[dev]
+		if d := st.Devices[dev]; d != nil {
+			attrs, disp = maps.Clone(d.Attrs), d.Display
 			mirror = mirror || disp.Mirror
 		}
 	})
 	if !ok {
-		http.Error(w, "unknown template", http.StatusNotFound)
+		writeError(w, errNotFound("模板"))
 		return
 	}
 	var still image.Image
-	if _, hasMedia := tpl.MediaRegion(); hasMedia && dev != "" {
+	media, hasMedia := tpl.MediaRect(mirror)
+	if hasMedia && dev != "" {
 		still = s.stillImage(r.Context(), dev, disp, q.Get("item"))
 	}
-	rendered, err := s.renderer.Render(tpl, attrs, mirror, still != nil)
+	img, err := s.renderer.Render(tpl, attrs, mirror, still != nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	img := rendered.Image
 	if still != nil {
-		img = render.Preview(rendered, still)
+		img = render.Preview(img, media, still)
 	}
 	w.Header().Set("Content-Type", "image/png")
 	if err := png.Encode(w, img); err != nil {

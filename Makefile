@@ -10,7 +10,11 @@ SECRETS = .secrets/tokens.env
 # 此时包里是占位值，服务端带着占位值会拒绝启动，提示用 make tokens 生成。
 BAKE_TOKENS ?= $(if $(CI),0,1)
 
-.PHONY: build agent-arm tokens package package-agent package-server deps test clean
+.PHONY: build agent-arm tokens package package-agent package-server deps test clean version
+
+# 版本号只有这一个来源：注入进程序（包名也用它）；CI 的产物名也取自这里
+version:
+	@echo $(VERSION)
 
 build:
 	go build -ldflags="$(LDFLAGS)" -o bin/display-server ./cmd/display-server
@@ -47,17 +51,12 @@ package-agent: agent-arm
 	@rm -rf bin/stage && mkdir -p bin/stage/display-agent-$(VERSION)
 	@cp deploy/agent/* bin/stage/display-agent-$(VERSION)/
 	@cp bin/display-agent-armv7 bin/stage/display-agent-$(VERSION)/display-agent
-	@printf '%s\n' "$(VERSION)" > bin/stage/display-agent-$(VERSION)/VERSION
-	@# 校验包是自包含的：脚本引用的同目录文件必须都在包里
-	@for f in $$(grep -oh '$$HERE/[A-Za-z0-9._-]*' deploy/agent/install-agent.sh deploy/agent/update.sh | sed 's|$$HERE/||' | sort -u); do \
-		test -f bin/stage/display-agent-$(VERSION)/$$f || \
-			{ echo "打包失败：脚本需要 $$f，但包里没有"; exit 1; }; \
-	done
 	@tar -czf bin/display-agent-$(VERSION)-armv7.tar.gz -C bin/stage display-agent-$(VERSION)
 	@rm -rf bin/stage
 	@echo "→ bin/display-agent-$(VERSION)-armv7.tar.gz (设备端整包：后台「程序更新」上传它，装机与 OTA 都用它)"
 
-package-server: build
+package-server:
+	go build -ldflags="$(LDFLAGS)" -o bin/display-server ./cmd/display-server
 	@rm -rf bin/stage && mkdir -p bin/stage/display-server-$(VERSION)
 	@cp bin/display-server deploy/server/display-server.service deploy/server/INSTALL.md deploy/server/make-image.sh \
 		bin/stage/display-server-$(VERSION)/

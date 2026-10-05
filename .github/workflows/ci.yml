@@ -62,11 +62,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # 包名、包内 VERSION 与程序内置版本都来自同一个版本号，服务端上传时会核对三者一致
+      # 包名与程序内置版本都来自 Makefile 的同一个版本号（git describe）；服务端上传时从程序的构建信息里读版本
       - run: make package
 
       - id: meta
-        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(make -s version)" >> "$GITHUB_OUTPUT"
 
       - name: 上传成品包
         uses: actions/upload-artifact@v4

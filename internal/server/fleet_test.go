@@ -29,7 +29,7 @@ func registerBody(id, secret, token string) map[string]string {
 }
 
 func TestRegisterFlow(t *testing.T) {
-	_, h := newAdminTestServer(t)
+	s, h := newAdminTestServer(t)
 	secret := strings.Repeat("ab", 32)
 
 	// 错误 token
@@ -50,22 +50,29 @@ func TestRegisterFlow(t *testing.T) {
 
 	// 管理列表可见且标记为自注册；含硬件信息、不含密钥
 	w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
-	var statuses []DeviceStatus
+	var statuses []DeviceView
 	json.Unmarshal(w.Body.Bytes(), &statuses)
-	var found *DeviceStatus
+	var found *DeviceView
 	for i := range statuses {
 		if statuses[i].ID == "scr-0017" {
 			found = &statuses[i]
 		}
 	}
-	if found == nil || found.HW.Hostname != "scr-0017" || found.HW.Secret != "" || found.HW.IP == "" {
+	if found == nil || found.Hostname != "scr-0017" || found.IP == "" || strings.Contains(w.Body.String(), secret) {
 		t.Fatalf("registered device not listed properly: %+v", found)
 	}
 
-	// 删除、删除后可重新注册
+	// 删除（设置一并删掉）、删除后可重新注册成一台新设备
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/scr-0017/attributes", map[string]string{"room": "101"}), http.StatusNoContent)
+	do(t, h, adminReq("POST", "/api/v1/admin/devices/scr-0017/test", map[string]int{"duration_s": 60}), http.StatusNoContent)
 	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/scr-0017", nil), http.StatusNoContent)
+	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/scr-0017", nil), http.StatusNotFound)
+	do(t, h, adminReq("PUT", "/api/v1/admin/devices/scr-0017/attributes", map[string]string{"room": "101"}), http.StatusNotFound)
 	do(t, h, signedAs("scr-0017", secret, "GET", "/api/v1/device/manifest"), http.StatusUnauthorized)
 	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", strings.Repeat("cd", 32), enrollToken)), http.StatusCreated)
+	if d := device(s, "scr-0017"); d.Attrs != nil || !d.TestUntil.IsZero() {
+		t.Fatalf("重新注册的设备不应带着删掉之前的设置：%+v", d)
+	}
 
 	// 设备只有自注册这一种，任何设备都能删除
 	do(t, h, adminReq("DELETE", "/api/v1/admin/devices/"+testDeviceID, nil), http.StatusNoContent)
@@ -106,11 +113,12 @@ func agentBinaryFixture(t *testing.T) []byte {
 	return b
 }
 
-// agentPackage 现造一个设备程序包（与 make package 同样的结构）：VERSION + 程序 +（可选）update.sh。
+// agentPackage 现造一个设备程序包（与 make package 同样的结构）：程序 +（可选）update.sh 与 install-agent.sh。
 func agentPackage(t *testing.T, version string, bin []byte, withUpdate bool) []byte {
-	files := []testutil.File{{Name: "VERSION", Body: version + "\n"}, {Name: "display-agent", Body: string(bin), Exec: true}}
+	files := []testutil.File{{Name: "display-agent", Body: string(bin), Exec: true}}
 	if withUpdate {
-		files = append(files, testutil.File{Name: "update.sh", Body: "#!/bin/sh\nexit 0\n", Exec: true})
+		files = append(files, testutil.File{Name: "update.sh", Body: "#!/bin/sh\nexit 0\n", Exec: true},
+			testutil.File{Name: "install-agent.sh", Body: "#!/bin/sh\n", Exec: true})
 	}
 	return testutil.Package(version, files...)
 }
@@ -162,7 +170,6 @@ func TestPackageUploadRejectsWrongFile(t *testing.T) {
 	}{
 		{"误传裸程序而不是整包", bin, "不是有效的设备程序包"},
 		{"包里是本机架构的程序", agentPackage(t, testAgentVersion, native, true), "目标平台"},
-		{"VERSION 与程序内置版本不一致", agentPackage(t, "1.0.0", bin, true), "内置版本"},
 		{"缺 update.sh", agentPackage(t, testAgentVersion, bin, false), "update.sh"},
 	} {
 		if w := uploadPackageRaw(t, h, c.pkg); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.want) {
@@ -308,7 +315,7 @@ func TestGlobalTemplateAndSchedules(t *testing.T) {
 
 	// 管理列表显示来源
 	w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
-	var statuses []DeviceStatus
+	var statuses []DeviceView
 	json.Unmarshal(w.Body.Bytes(), &statuses)
 	if statuses[0].ActiveSource != "global" && statuses[0].ActiveSource != "schedule" {
 		t.Fatalf("active source not reported: %+v", statuses[0])
@@ -347,12 +354,12 @@ func TestRekeyRequestAcceptAndIgnore(t *testing.T) {
 	if strings.Contains(w.Body.String(), newKey) || strings.Contains(w.Body.String(), oldKey) {
 		t.Fatal("设备列表不得泄露密钥")
 	}
-	var statuses []DeviceStatus
+	var statuses []DeviceView
 	json.Unmarshal(w.Body.Bytes(), &statuses)
-	var rk *store.RekeyRequest
+	var rk *rekeyView
 	for _, st := range statuses {
 		if st.ID == "scr-0017" {
-			rk = st.HW.Rekey
+			rk = st.Rekey
 		}
 	}
 	if rk == nil || rk.Fingerprint != sign.Fingerprint(newKey) || rk.Hostname != "scr-0017" {
@@ -374,7 +381,7 @@ func TestRekeyRequestAcceptAndIgnore(t *testing.T) {
 	do(t, h, jsonReq("POST", "/api/v1/device/register", registerBody("scr-0017", newKey, enrollToken)), http.StatusOK)
 	do(t, h, signedAs("scr-0017", newKey, "GET", "/api/v1/device/manifest"), http.StatusOK)
 	do(t, h, signedAs("scr-0017", oldKey, "GET", "/api/v1/device/manifest"), http.StatusUnauthorized)
-	if state(s).DeviceAttrs["scr-0017"]["room"] != "302" {
+	if device(s, "scr-0017").Attrs["room"] != "302" {
 		t.Fatal("接受新密钥后设备属性应保留")
 	}
 }

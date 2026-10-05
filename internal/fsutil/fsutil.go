@@ -90,9 +90,14 @@ func writeWith(path string, perm os.FileMode, fill func(*os.File) error) error {
 		os.Remove(tmp)
 		return err
 	}
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
+	SyncDir(filepath.Dir(path))
+	return nil
+}
+
+// SyncDir 把目录项（新建、改名）落盘。
+func SyncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
 		d.Sync()
 		d.Close()
 	}
-	return nil
 }

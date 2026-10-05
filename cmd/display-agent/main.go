@@ -32,9 +32,6 @@ func main() {
 	var p player.Player
 	switch cfg.Player {
 	case "gst":
-		if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
-			log.Fatalf("create cache dir: %v", err)
-		}
 		w, h := agent.OutputMode(cfg.DisplayMode)
 		p = player.NewGST(cfg.CacheDir, w, h)
 	case "null":

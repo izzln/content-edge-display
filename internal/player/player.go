@@ -17,15 +17,13 @@ type Item struct {
 // Scene 是设备当前应呈现的完整画面。
 //
 // OverlayPNG 为空时整屏播放 Items（测试卡、以及已渲染成整屏图的模板）。
-// 不为空时它是贴在画面之上的模板叠加图（服务端渲染的整屏 PNG，媒体区透明）：播放区被限制在
+// 不为空时它是贴在画面之上的模板叠加图（服务端按模板画布渲染的 PNG，媒体区透明）：播放区被限制在
 // Media 矩形内并按 cover 撑满，属性、文字变了只需换一张叠加图，播放内容不受影响。
-// 叠加图只给路径，不给尺寸：要按显示屏的实际输出分辨率重新光栅化，这件事只有播放器知道。
+// 叠加图与 Media 都按画布坐标给出：显示屏的实际输出分辨率只有播放器知道，由它换算（见 rasterize）。
 type Scene struct {
 	Items      []Item
 	OverlayPNG string
 	Media      manifest.Rect // 播放区在画布中的位置（有叠加图时有效）
-	CanvasW    int
-	CanvasH    int
 }
 
 // Player 是播放器统一接口。
