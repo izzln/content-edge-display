@@ -161,14 +161,13 @@
   #alert .btns button { flex:1; height:44px; margin:0; border-radius:0; background:none; font-size:16px; font-weight:400; }
   #alert .btns button + button { border-left:.5px solid var(--sep); }
   #alert .btns button.default { font-weight:600; }
-  #alert .btns button.destructive { color:var(--red); }
+  #alert .btns button.destructive, .menu-group button.destructive { color:var(--red); }
   /* 动作菜单 */
   #alert.sheet-menu { width:100%; max-width:400px; background:none; box-shadow:none; overflow:visible; }
   .menu-group { background:var(--elev); border-radius:14px; overflow:hidden; margin-bottom:8px; }
   .menu-group .ttl { padding:12px 16px; font-size:13px; color:var(--label2); border-bottom:.5px solid var(--sep); }
   .menu-group button { display:flex; width:100%; height:56px; margin:0; border-radius:0; background:none; font-size:18px; font-weight:400; border-bottom:.5px solid var(--sep); }
   .menu-group button:last-child { border-bottom:none; }
-  .menu-group button.destructive { color:var(--red); }
   .menu-group.cancel button { font-weight:600; }
 
   /* HUD 提示 */
@@ -225,10 +224,9 @@
 
   .cachebar { display:flex; height:8px; border-radius:4px; overflow:hidden; background:var(--fill); margin:12px 0 8px; max-width:640px; }
   .cachebar i { display:block; height:100%; }
-  .cachebar .inuse { background:var(--blue); }
-  .cachebar .cached { background:var(--blue-soft); }
+  .cachebar .inuse, .legend .inuse { background:var(--blue); }
+  .cachebar .cached, .legend .cached { background:var(--blue-soft); }
   .legend span { display:inline-block; margin-right:14px; }
-  .legend .inuse { background:var(--blue); } .legend .cached { background:var(--blue-soft); }
   .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:4px; vertical-align:-1px; }
   pre.cmd { background:#1c1c1e; color:#f2f2f7; padding:12px 14px; border-radius:10px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; user-select:all; -webkit-user-select:all;
     font:13px/1.5 ui-monospace,"SF Mono",Menlo,monospace; margin:10px 0; }
@@ -292,7 +290,7 @@
     <button class="tab" data-tab="packages">程序更新</button>
     <button class="tab" data-tab="storage">存储</button>
   </nav>
-  <span class="right"><button class="sm" onclick="setToken()">设置 Token</button> <button class="sm" onclick="logout()">退出</button></span>
+  <span class="right"><button class="sm" onclick="setToken()">输入口令</button> <button class="sm" onclick="logout()">退出</button></span>
 </header>
 <main>
   <div id="tab-devices">
@@ -349,7 +347,7 @@
         离线依赖包：<code>make deps</code> 产出的 <code>display-deps-&lt;代号&gt;-armhf.tar.gz</code>，上传一次，之后装机与 OTA 新增的依赖都从这里装、不访问外网。</span>
     </div>
     <table id="pkgTable" class="cards"></table>
-    <h2 class="sec">离线依赖包 <span class="muted">设备的 Debian 版本代号（/etc/os-release）与之一致时使用，否则装机时在线安装</span></h2>
+    <h2 class="sec">离线依赖包 <span class="muted">设备的 Debian 版本代号（/etc/os-release）与之一致时，装机与 OTA 都从这里装依赖；否则在线安装</span></h2>
     <table id="depsTable" class="cards"></table>
   </div>
   <div id="tab-storage" style="display:none"><div id="storageBox" class="card">读取中…</div></div>
@@ -422,15 +420,21 @@ async function showImg(target, url) {
   revokeImgs(box);
   box.innerHTML = `<img class="preview" data-blob src="${src}">`;
 }
-const revokeImgs = el => el.querySelectorAll("img[data-blob]").forEach(im => URL.revokeObjectURL(im.src));
+const revokeImgs = el => el.querySelectorAll("img[data-blob]").forEach(im => { URL.revokeObjectURL(im.src); im.removeAttribute("data-blob"); });
 const J = body => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-// send 发一个写请求（JSON 体），成功后提示、（可选）关对话框、刷新列表；失败时 api 已提示原因。
+// send 发一个写请求（JSON 或 FormData 体）：成功后提示（msg 可以是按服务端回复生成提示的函数）、（可选）关对话框、
+// 等列表刷新完，返回服务端的回复（没有内容时为 true）；失败时 api 已提示原因，返回 null。
 async function send(method, path, body, msg, { close = false } = {}) {
-  try { await api(path, { method, ...(body === undefined ? {} : J(body)) }); } catch { return false; }
-  if (msg) toast(msg);
+  let res;
+  try { res = await api(path, { method, ...(body instanceof FormData ? { body } : body === undefined ? {} : J(body)) }); } catch { return null; }
+  if (msg) toast(typeof msg === "function" ? msg(res) : msg);
   if (close) closeModal();
-  refresh();
-  return true;
+  await refresh();
+  return res || true;
+}
+// confirmSend 确认后发 DELETE（删设备、模板、程序包、依赖包、底图）。
+async function confirmSend(title, detail, path, { ok = "删除", msg = "已删除" } = {}) {
+  return await confirmDialog(title, detail, { ok, danger: true }) && send("DELETE", path, undefined, msg);
 }
 let toastTimer;
 function toast(msg) {
@@ -438,10 +442,12 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
 }
 let modalGuard = null; // 关闭前的检查（如还有文件在上传），返回 false（或 Promise<false>）则不关
-function modal(html) {
+const CLOSE = '<button onclick="closeModal()">关闭</button>', CANCEL = '<button onclick="closeModal()">取消</button>';
+// modal(标题, 内容, 底部按钮)：标题与内容是 HTML（调用方已转义）；按钮默认只有"关闭"。
+function modal(title, body, buttons = CLOSE) {
   modalGuard = null;
   revokeImgs($("#modal"));
-  $("#modal").innerHTML = `<div class="grabber"></div>${html}`;
+  $("#modal").innerHTML = `<div class="grabber"></div><h2>${title}</h2>${body}<div class="actions">${buttons}</div>`;
   $("#modal").scrollTop = 0;
   $("#overlay").classList.add("show");
 }
@@ -601,11 +607,16 @@ const SYNC = {
 };
 
 function renderDevices() {
-  const g = tplById(global.template_id);
-  let bar = g
-    ? `当前全局默认模板：<b>${esc(g.name)}</b>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}
-       <span class="muted">各设备的播放内容在"内容"里单独指定</span>`
-    : `<span class="warn">尚未设置全局模板</span>——到"模板与时段"页设置。`;
+  $("#globalBar").innerHTML = globalBar();
+  $("#devTable").innerHTML = `<tr class="head"><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${devices.map(deviceRow).join("") ||
+    '<tr><td colspan="5" class="muted">暂无设备。新设备装机（见「程序更新」页）后会自动注册出现在这里。</td></tr>'}`;
+  tickContact();
+}
+
+// globalBar 是设备页顶部：全局模板，以及服务器时钟、ffmpeg、poppler 这些影响全局的问题。
+function globalBar() {
+  let bar = `当前全局默认模板：<b>${esc(tplById(global.template_id)?.name)}</b>${schedules.length ? `，另有 ${schedules.length} 条时段计划` : ""}
+    <span class="muted">各设备的播放内容在"内容"里单独指定</span>`;
   // 服务器时钟偏差：时段计划按服务器时间切换。离线环境下服务器没有 NTP，漂移不会有人察觉；
   // 浏览器所在的电脑通常时间是准的，拿它比一下。
   const skewMin = Math.round((info.server_time - infoFetchedAt) / 60000);
@@ -622,48 +633,47 @@ function renderDevices() {
     bar += `<div class="muted">服务端没装 poppler-utils，暂时不能上传 PDF（apt install poppler-utils 后重启服务端）：
       <code>${esc(info.pdf_error)}</code></div>`;
   }
-  $("#globalBar").innerHTML = bar;
-  const rows = devices.map(d => {
-    const st = d.online
-      ? `<span class="dot on"></span>在线<div class="contact" data-seen="${Date.parse(d.last_seen)}"
-          data-poll="${d.poll_interval_s}" data-offline="${d.offline_after_s}"></div>`
-      : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
-    const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<span class="badge">${esc(k)}=${esc(v)}</span>`).join("") || '<span class="muted">-</span>';
-    const [syncText, syncTip] = SYNC[d.sync] || [d.sync || "-", ""];
-    let show = `<span class="sync ${esc(d.sync)}" title="${esc(syncTip)}">${esc(syncText)}</span>`;
-    const tplName = tplById(d.active_template)?.name || d.active_template;
-    show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
-      d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
-    if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
-    const agentVer = d.agent_version;
-    let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
-    if (d.update_target) {
-      const t = d.update_target;
-      ver += agentVer === t.version
-        ? ` <span class="okc">✓ 已更新到 ${esc(t.version)}</span>`
-        : ` → <span class="warn">${esc(t.version)}${t.not_before && new Date(t.not_before) > new Date() ? " (定时 " + esc(fmtTime(t.not_before)) + ")" : " (待更新)"}</span>`;
-    }
-    ver += "</div>";
-    const hw = `<div class="muted">${esc(d.hostname || "")} ${esc(d.ip || "")}</div>`;
-    const rk = d.rekey;
-    const rekey = rk ? `<div class="bad-note">⚠ 收到用<b>新密钥</b>的注册请求（key ${esc(rk.fingerprint)}，
-        ${esc(rk.hostname || "?")} ${esc(rk.ip || "")}，${esc(fmtTime(rk.at))}），设备在用缓存内容播放、暂时收不到更新。
-        <div class="row" style="margin:6px 0 0"><button class="primary sm" onclick="rekeyDialog('${esc(d.id)}')">核对并处理</button></div></div>` : "";
-    return `<tr>
-      <td>${st}</td>
-      <td><b>${esc(d.id)}</b>${hw}${ver}${d.heartbeat ? healthLine(d) : ""}${rekey}</td>
-      <td data-label="属性">${attrs}</td>
-      <td data-label="当前显示">${show}</td>
-      <td class="acts">
-        <button class="primary" onclick="contentDialog('${esc(d.id)}')">内容</button>
-        <button class="wide" onclick="attrsDialog('${esc(d.id)}')">属性</button>
-        <button class="wide" onclick="testDialog('${esc(d.id)}')">测试</button>
-        <button class="wide danger" onclick="deleteDevice('${esc(d.id)}')">删除</button>
-        <button class="narrow" onclick="deviceMenu('${esc(d.id)}')" aria-label="更多操作">更多…</button>
-      </td></tr>`;
-  }).join("");
-  $("#devTable").innerHTML = `<tr class="head"><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">暂无设备。新设备装机（见「程序更新」页）后会自动注册出现在这里。</td></tr>'}`;
-  tickContact();
+  return bar;
+}
+
+function deviceRow(d) {
+  const st = d.online
+    ? `<span class="dot on"></span>在线<div class="contact" data-seen="${Date.parse(d.last_seen)}"
+        data-poll="${d.poll_interval_s}" data-offline="${d.offline_after_s}"></div>`
+    : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
+  const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<span class="badge">${esc(k)}=${esc(v)}</span>`).join("") || '<span class="muted">-</span>';
+  const [syncText, syncTip] = SYNC[d.sync] || [d.sync || "-", ""];
+  let show = `<span class="sync ${esc(d.sync)}" title="${esc(syncTip)}">${esc(syncText)}</span>`;
+  const tplName = tplById(d.active_template)?.name || d.active_template;
+  show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
+    d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
+  if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
+  const agentVer = d.agent_version;
+  let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
+  if (d.update_target) {
+    const t = d.update_target;
+    ver += agentVer === t.version
+      ? ` <span class="okc">✓ 已更新到 ${esc(t.version)}</span>`
+      : ` → <span class="warn">${esc(t.version)}${t.not_before && new Date(t.not_before) > new Date() ? " (定时 " + esc(fmtTime(t.not_before)) + ")" : " (待更新)"}</span>`;
+  }
+  ver += "</div>";
+  const hw = `<div class="muted">${esc(d.hostname || "")} ${esc(d.ip || "")}</div>`;
+  const rk = d.rekey;
+  const rekey = rk ? `<div class="bad-note">⚠ 收到用<b>新密钥</b>的注册请求（key ${esc(rk.fingerprint)}，
+      ${esc(rk.hostname || "?")} ${esc(rk.ip || "")}，${esc(fmtTime(rk.at))}），设备在用缓存内容播放、暂时收不到更新。
+      <div class="row" style="margin:6px 0 0"><button class="primary sm" onclick="rekeyDialog('${esc(d.id)}')">核对并处理</button></div></div>` : "";
+  return `<tr>
+    <td>${st}</td>
+    <td><b>${esc(d.id)}</b>${hw}${ver}${d.heartbeat ? healthLine(d) : ""}${rekey}</td>
+    <td data-label="属性">${attrs}</td>
+    <td data-label="当前显示">${show}</td>
+    <td class="acts">
+      <button class="primary" onclick="contentDialog('${esc(d.id)}')">内容</button>
+      <button class="wide" onclick="attrsDialog('${esc(d.id)}')">属性</button>
+      <button class="wide" onclick="testDialog('${esc(d.id)}')">测试</button>
+      <button class="wide danger" onclick="deleteDevice('${esc(d.id)}')">删除</button>
+      <button class="narrow" onclick="deviceMenu('${esc(d.id)}')" aria-label="更多操作">更多…</button>
+    </td></tr>`;
 }
 
 // tickContact 每秒刷新状态列里"设备多久前联系过"：一直等不到刷新时，让人知道设备是还没轮到，还是已经不来了。
@@ -694,14 +704,14 @@ function deviceMenu(id) {
 }
 
 function testDialog(id) {
-  modal(`<h2>测试屏 — ${esc(id)}</h2>
+  modal(`测试屏 — ${esc(id)}`, `
     <p>设备显示屏将全屏显示"测试"卡片（含设备名/属性），用于现场定位。生效与恢复各需等待一个轮询周期。</p>
     <div class="row">
       <button class="primary" onclick="doTest('${esc(id)}',60)">1 分钟</button>
       <button class="primary" onclick="doTest('${esc(id)}',300)">5 分钟</button>
       <button class="primary" onclick="doTest('${esc(id)}',900)">15 分钟</button>
       <button class="danger" onclick="doTest('${esc(id)}',0)">取消测试</button>
-    </div><div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+    </div>`);
 }
 const devPath = id => `/api/v1/admin/devices/${encodeURIComponent(id)}`;
 const mediaURL = (dev, name) => devPath(dev) + "/media" + (name ? "/" + encodeURIComponent(name) : "");
@@ -711,7 +721,7 @@ const doTest = (id, secs) => send("POST", devPath(id) + "/test", { duration_s: s
 // 所以要人核对：设备日志里会打印 key=xxxx，与这里的指纹一致才是本机。
 function rekeyDialog(id) {
   const d = devById(id), rk = d.rekey, cur = d;
-  modal(`<h2>换密钥请求 — ${esc(id)}</h2>
+  modal(`换密钥请求 — ${esc(id)}`, `
     <table>
       <tr><th></th><th>当前登记</th><th>新请求</th></tr>
       <tr><td>主机名</td><td>${esc(cur.hostname || "-")}</td><td>${esc(rk.hostname || "-")}</td></tr>
@@ -722,24 +732,20 @@ function rekeyDialog(id) {
     </table>
     <p>硬件序列号 / MAC 与当前登记一致、且设备日志（<code>journalctl -u display-agent</code>）里的
       <code>key=</code> 与上面的指纹相同，就是这台设备自己丢了身份文件，可以放心接受：属性、播放列表等配置都会保留。</p>
-    <p class="muted">不一致则可能是另一台机器撞了编号（给其中一台改主机名）或有人冒充，请忽略。</p>
-    <div class="actions"><button onclick="closeModal()">取消</button>
-      <button class="danger" onclick="doRekey('${esc(id)}', false)">忽略</button>
-      <button class="primary" onclick="doRekey('${esc(id)}', true)">接受新密钥</button></div>`);
+    <p class="muted">不一致则可能是另一台机器撞了编号（给其中一台改主机名）或有人冒充，请忽略。</p>`,
+    `${CANCEL}<button class="danger" onclick="doRekey('${esc(id)}', false)">忽略</button>
+      <button class="primary" onclick="doRekey('${esc(id)}', true)">接受新密钥</button>`);
 }
 const doRekey = (id, accept) => send("POST", devPath(id) + "/rekey", { accept }, accept ? "已接受：设备一分钟内会重新注册成功" : "已忽略", { close: true });
-async function deleteDevice(id) {
-  if (!await confirmDialog(`删除设备 ${id}？`, "属性、播放内容、更新目标一并删除；设备若仍在线，会自动重新注册成一台新设备。", { ok: "删除", danger: true })) return;
-  send("DELETE", devPath(id), undefined, "已删除");
-}
+const deleteDevice = id => confirmSend(`删除设备 ${id}？`, "属性、播放内容、更新目标一并删除；设备若仍在线，会自动重新注册成一台新设备。", devPath(id));
 
 // ---- 属性 ----
 function attrsDialog(id) {
   const d = devById(id);
   const rows = Object.entries(d.attrs || {}).map(([k, v]) => attrRow(k, v)).join("");
-  modal(`<h2>设备属性 — ${esc(id)}</h2><div id="attrRows">${rows}</div>
-    <p><button onclick="addAttrRow()">+ 添加属性</button> <span class="muted">如 room=302；模板的 attribute 区域按 key 显示对应值</span></p>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveAttrs('${esc(id)}')">保存</button></div>`);
+  modal(`设备属性 — ${esc(id)}`, `<div id="attrRows">${rows}</div>
+    <p><button onclick="addAttrRow()">+ 添加属性</button> <span class="muted">如 room=302；模板的 attribute 区域按 key 显示对应值</span></p>`,
+    `${CANCEL}<button class="primary" onclick="saveAttrs('${esc(id)}')">保存</button>`);
 }
 const attrRow = (k = "", v = "") => `<div class="row attr-row"><input type="text" class="k" value="${esc(k)}" placeholder="key"><input type="text" class="v" value="${esc(v)}" placeholder="value"><button onclick="this.parentNode.remove()">删</button></div>`;
 function addAttrRow() { $("#attrRows").insertAdjacentHTML("beforeend", attrRow()); }
@@ -752,9 +758,9 @@ async function saveAttrs(id) {
 // ---- 内容：模板选择 + 左右对调 + 播放列表 ----
 // 一台设备要配的东西都在这一个对话框里。播放列表的增删、排序即时生效（自动保存）；
 // 模板与左右对调要点"保存"。
-const mediaRegionOf = tid => (tplById(tid)?.regions || []).find(r => r.type === "media");
-// 内容对话框里选的是不是专属模板
+// 内容对话框里选的是不是专属模板；选中的模板
 const ownTemplate = () => document.querySelector('input[name=mode]:checked').value === "template";
+const selectedTpl = () => tplById(ownTemplate() ? $("#ovSel").value : global.template_id);
 
 async function contentDialog(id) {
   const d = devById(id);
@@ -762,9 +768,9 @@ async function contentDialog(id) {
   try { list = await api(mediaURL(id)); } catch { /* 显示空列表 */ }
   plOpen(id, list);
   const own = !!d.display.template_id;
-  modal(`<h2>内容 — ${esc(d.id)}</h2>
+  modal(`内容 — ${esc(d.id)}`, `
     <div class="row"><label><input type="radio" name="mode" value="global" ${own ? "" : "checked"} onchange="onModeChange()">
-        跟随全局模板<span class="muted">（${esc(tplById(global.template_id)?.name || "未设置")}）</span></label></div>
+        跟随全局模板<span class="muted">（${esc(tplById(global.template_id)?.name)}）</span></label></div>
     <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
       <select id="ovSel" ${own ? "" : "disabled"} onchange="renderContentBody()">${tplOptions(d.display.template_id)}</select>
       <button class="sm" onclick="copyGlobalTemplate()">复制全局模板再改</button></div>
@@ -774,15 +780,15 @@ async function contentDialog(id) {
     <hr>
     <div id="contentBody"></div>
     <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button>
-      <select id="pvItem" hidden onchange="previewDevice('${esc(id)}')" aria-label="预览播放列表里的哪一项"></select></div><div id="previewBox"></div>
-    <div class="actions"><button onclick="closeModal()">关闭</button><button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button></div>`);
+      <select id="pvItem" hidden onchange="previewDevice('${esc(id)}')" aria-label="预览播放列表里的哪一项"></select></div><div id="previewBox"></div>`,
+    `${CLOSE}<button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button>`);
   modalGuard = plCloseGuard;
   renderContentBody();
 }
 
 // updateMirrorWarn 对调的设备用的模板有底图却没有对调版时提示（会用常规版原图，媒体区与底图的留空对不上）。
 function updateMirrorWarn() {
-  const tpl = tplById(ownTemplate() ? $("#ovSel").value : global.template_id);
+  const tpl = selectedTpl();
   $("#mirrorWarn").innerHTML = $("#mirrorChk").checked && tpl?.background_image && !tpl.background_image_mirror
     ? `<p class="warn">模板「${esc(tpl.name)}」有底图但没有对调版：对调后底图的留空与媒体区对不上。到"模板与时段"页的【底图】上传对调版。</p>` : "";
 }
@@ -792,10 +798,10 @@ function onModeChange() {
 }
 
 // copyGlobalTemplate 以全局模板为蓝本建一个副本，供这台设备单独改。
+// 底图不复制（服务端新建的模板没有底图）。
 async function copyGlobalTemplate() {
-  const g = tplById(global.template_id);
-  if (!g) { toast("尚无全局模板"); return; }
-  const copy = { ...g, name: g.name + " 副本" };
+  const copy = { ...tplById(global.template_id) };
+  copy.name += " 副本";
   delete copy.id; // 由服务端生成
   let created;
   try { created = await api("/api/v1/admin/templates", { method: "POST", ...J(copy) }); } catch { return; }
@@ -812,13 +818,8 @@ async function copyGlobalTemplate() {
 function renderContentBody() {
   const box = $("#contentBody");
   if (!box) return;
-  const tid = ownTemplate() ? $("#ovSel").value : global.template_id;
-  const tpl = tplById(tid), region = mediaRegionOf(tid);
+  const tpl = selectedTpl(), region = mediaRect(tpl);
   updateMirrorWarn();
-  if (!tpl) {
-    box.innerHTML = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
-    return;
-  }
   if (!region) {
     box.innerHTML = `<p class="muted">模板「${esc(tpl.name)}」没有媒体区，这台设备不播放列表内容。
       要放图片/视频，请换一个带媒体区的模板。</p>`;
@@ -830,7 +831,7 @@ function renderContentBody() {
       <span class="muted">按顺序循环播放；图片与 PDF 每页停留 ${esc(tpl.image_duration_s)} 秒（写在模板里），视频播完即切</span></div>
     <label class="pl-drop" id="plDrop">
       <input type="file" id="plFiles" multiple hidden accept="${esc(plAccept())}">
-      <b>点击选择${["图片", info.transcode && "视频", info.pdf && "PDF"].filter(Boolean).join("、")}</b>，或把文件拖到这里
+      <b>点击选择${enabledTypes().map(t => t.label).join("、")}</b>，或把文件拖到这里
       <div class="muted">${uploadHint()}</div>
     </label>
     <div class="pl-head"><span id="plSum"></span><span class="sp"></span><span id="plSaveState" class="muted"></span></div>
@@ -841,11 +842,7 @@ function renderContentBody() {
   renderPlaylist();
 }
 
-function plAccept() {
-  return ["image/png,image/jpeg,.png,.jpg,.jpeg",
-    info.transcode && "video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ts",
-    info.pdf && "application/pdf,.pdf"].filter(Boolean).join(",");
-}
+const plAccept = () => enabledTypes().map(t => t.accept).join(",");
 
 function uploadHint() {
   let h = `图片 png/jpg，单张不超过 ${info.limits.image_mb}MB，过大的会自动缩到屏幕尺寸。`;
@@ -863,8 +860,16 @@ function uploadHint() {
   return h + " 上传、处理过程中可以随时拖动调整顺序。";
 }
 
-const IMAGE_RE = /\.(png|jpe?g)$/i, VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v|ts)$/i, PDF_RE = /\.pdf$/i;
-const typeOfName = n => IMAGE_RE.test(n) ? "image" : VIDEO_RE.test(n) ? "video" : PDF_RE.test(n) ? "document" : "";
+// 能上传的文件类型：选择框的 accept、上传前的检查、提示文案都按它（视频、PDF 要服务端装了 ffmpeg、poppler 才收）
+const FILE_TYPES = {
+  image: { re: /\.(png|jpe?g)$/i, accept: "image/png,image/jpeg,.png,.jpg,.jpeg", label: "图片", limit: "image_mb" },
+  video: { re: /\.(mp4|mov|mkv|webm|avi|m4v|ts)$/i, accept: "video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.ts", label: "视频", limit: "video_mb",
+    needs: "transcode", missing: "服务端 ffmpeg 不可用，暂不能上传视频" },
+  document: { re: /\.pdf$/i, accept: "application/pdf,.pdf", label: "PDF", limit: "pdf_mb",
+    needs: "pdf", missing: "服务端没装 poppler-utils，暂不能上传 PDF" },
+};
+const enabledTypes = () => Object.values(FILE_TYPES).filter(t => !t.needs || info[t.needs]);
+const typeOfName = n => Object.keys(FILE_TYPES).find(k => FILE_TYPES[k].re.test(n)) || "";
 
 // ---- 播放列表模型 ----
 // plItems 是界面上的完整列表，顺序即播放顺序：已就绪的、正在上传的、转码中的都在里面，
@@ -1079,13 +1084,10 @@ function dropThumb(it) {
 
 // ---- 上传：选中即入列，逐个上传，各自显示进度 ----
 function plPrecheck(f, type) {
-  if (!type) return "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等，PDF）";
-  if (type === "image" && f.size > info.limits.image_mb << 20) return `图片超过 ${info.limits.image_mb}MB`;
-  if (type === "video" && !info.transcode) return "服务端 ffmpeg 不可用，暂不能上传视频";
-  if (type === "video" && f.size > info.limits.video_mb << 20) return `视频超过 ${info.limits.video_mb}MB`;
-  if (type === "document" && !info.pdf) return "服务端没装 poppler-utils，暂不能上传 PDF";
-  if (type === "document" && f.size > info.limits.pdf_mb << 20) return `PDF 超过 ${info.limits.pdf_mb}MB`;
-  return "";
+  const t = FILE_TYPES[type], mb = t && info.limits[t.limit];
+  if (!t) return "不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等，PDF）";
+  if (t.needs && !info[t.needs]) return t.missing;
+  return f.size > mb << 20 ? `${t.label}超过 ${mb}MB` : "";
 }
 
 // 选择框每次换一个新的，而不是清空 value：清空会让 iOS/iPadOS 删掉刚选的照片（见 snapshot）。
@@ -1157,28 +1159,7 @@ async function uploadOne(it) {
   // 字节传完后服务端还要校验、缩图，可能要一两秒
   xhr.upload.onload = () => { it.state = "finishing"; updateRow(it, true); };
   const done = () => { it.xhr = null; it.file = null; if (dev === plDev) { renderPlaylist(); pumpUploads(); } };
-  xhr.onload = () => {
-    if (xhr.status !== 200) {
-      it.state = "rejected";
-      const t = (xhr.responseText || "HTTP " + xhr.status).trim();
-      it.error = authFail(xhr.status, t) ? "口令不对或已被锁定，重新输入口令后再传" : t;
-      return done();
-    }
-    let r;
-    try { r = JSON.parse(xhr.responseText); } catch { it.state = "rejected"; it.error = "服务器响应异常"; return done(); }
-    const bad = arr(r.rejected)[0];
-    if (bad) {
-      it.state = "rejected"; it.error = bad.reason;
-    } else {
-      it.name = it.label = arr(r.accepted)[0] || arr(r.queued)[0]; // 同名时服务端会改名
-      it.reused = arr(r.reused).includes(it.name);
-      it.state = arr(r.accepted).length ? "ready" : "queued";
-      if (it.thumb && it.state === "ready") thumbCache.set(dev + "/" + it.name, it.thumb);
-    }
-    it.file = null;
-    if (dev === plDev) { plEpoch++; applyServer(r.playlist); }
-    done();
-  };
+  xhr.onload = () => { applyUpload(it, dev, xhr); done(); };
   xhr.onerror = () => {
     if (!it.retried) { // 网络抖一下很常见：自动重传一次
       it.retried = true; it.xhr = null; it.state = "waiting";
@@ -1189,6 +1170,28 @@ async function uploadOne(it) {
     done();
   };
   xhr.send(fd);
+}
+
+// applyUpload 按上传的回复更新这一项（就绪 / 进入处理队列 / 被拒及原因），并同步服务端的列表。
+function applyUpload(it, dev, xhr) {
+  let r;
+  if (xhr.status !== 200) {
+    const t = (xhr.responseText || "HTTP " + xhr.status).trim();
+    it.state = "rejected";
+    it.error = authFail(xhr.status, t) ? "口令不对或已被锁定，重新输入口令后再传" : t;
+    return;
+  }
+  try { r = JSON.parse(xhr.responseText); } catch { it.state = "rejected"; it.error = "服务器响应异常"; return; }
+  const bad = arr(r.rejected)[0];
+  if (bad) {
+    it.state = "rejected"; it.error = bad.reason;
+  } else {
+    it.name = it.label = arr(r.accepted)[0] || arr(r.queued)[0]; // 同名时服务端会改名
+    it.reused = arr(r.reused).includes(it.name);
+    it.state = arr(r.accepted).length ? "ready" : "queued";
+    if (it.thumb && it.state === "ready") thumbCache.set(dev + "/" + it.name, it.thumb);
+  }
+  if (dev === plDev) { plEpoch++; applyServer(r.playlist); }
 }
 
 async function plRemove(key) {
@@ -1434,17 +1437,16 @@ async function saveContent(id) {
 
 async function previewDevice(id) {
   const d = devById(id);
-  const tid = d.active_template || (d.display.template_id || global.template_id);
-  if (!tid) { toast("该设备当前没有模板"); return; }
+  const tid = d.active_template || d.display.template_id || global.template_id;
   // 媒体区里放播放列表的一项（默认第一项），与设备上看到的一致；多于一项时可以选
   const sel = $("#pvItem"), cur = sel.value, ready = plItems.filter(it => it.state === "ready" && it.name);
   sel.innerHTML = ready.map(it => `<option value="${esc(it.name)}" ${it.name === cur ? "selected" : ""}>${esc(it.label)}</option>`).join("");
   sel.hidden = ready.length < 2;
   const item = sel.value ? "&item=" + encodeURIComponent(sel.value) : "";
-  await showPreview(`/api/v1/admin/templates/${tid}/preview?device=${encodeURIComponent(id)}${item}`, "#previewBox");
+  await showPreview(`${tplPath(tid)}/preview?device=${encodeURIComponent(id)}${item}`, "#previewBox");
 }
 function showPreview(url, target) {
-  if (!target) modal(`<h2>预览</h2><div id="pvModal"></div><div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+  if (!target) modal("预览", '<div id="pvModal"></div>');
   return showImg(target || "#pvModal", url);
 }
 
@@ -1458,7 +1460,7 @@ function renderTemplates() {
     <td data-label="区域">${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
     <td class="acts">
       ${global.template_id === t.id ? "" : `<button onclick="setGlobal('${esc(t.id)}')">设为全局</button>`}
-      <button onclick="showPreview('/api/v1/admin/templates/${esc(t.id)}/preview')">预览</button>
+      <button onclick="showPreview(tplPath('${esc(t.id)}') + '/preview')">预览</button>
       <button onclick="templateForm('${esc(t.id)}')">编辑</button>
       <button onclick="backgroundDialog('${esc(t.id)}')">底图</button>
       <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
@@ -1468,18 +1470,19 @@ function renderTemplates() {
 }
 function setGlobal(id) { $("#globalSel").value = id; saveGlobal(); }
 
-// ---- 模板底图：节日主题等模板画不出来的画面，垫在最下面 ----
-// mediaRect 返回模板的媒体区（mirror 时是对调后的位置）
+// ---- 模板底图：节日主题等模板画不出来的画面，压在播放内容上方 ----
+const tplPath = id => `/api/v1/admin/templates/${encodeURIComponent(id)}`;
+// mediaRect 返回模板的媒体区（mirror 时是对调后的位置）；没有媒体区时为 undefined
 const mediaRect = (t, mirror) => { const m = t.regions.find(r => r.type === "media"); return m && (mirror ? { ...m, x: t.w - m.x - m.w } : m); };
 const rectText = r => r ? `x=${r.x} y=${r.y}，${r.w}×${r.h}` : "（这个模板没有媒体区）";
 // mirroredMissing 返回开了左右对调、正在用模板 t、而 t 有底图却没有对调版的设备
 const mirroredMissing = t => t.background_image && !t.background_image_mirror ? devices.filter(d => d.display.mirror && d.active_template === t.id) : [];
-const bgPath = (id, mirror) => `/api/v1/admin/templates/${encodeURIComponent(id)}/background${mirror ? "?mirror=1" : ""}`;
+const bgPath = (id, mirror) => `${tplPath(id)}/background${mirror ? "?mirror=1" : ""}`;
 function backgroundDialog(id) {
   const t = tplById(id);
   const files = [t.background_image, t.background_image_mirror];
   const covering = t.regions.filter(r => r.type !== "media" && r.bg); // 设了底色的区域会盖住底图
-  modal(`<h2>底图 — ${esc(t.name)}</h2>
+  modal(`底图 — ${esc(t.name)}`, `
     <p>底图放节日主题等模板画不出来的画面，<b>压在播放内容上方</b>。尺寸 <b>${t.w}×${t.h}</b> 像素，只收 PNG（比例不同时铺满后居中裁切）。</p>
     <p><b>媒体区里底图要透明</b>，视频/图片从透明处露出；不透明的装饰（相框、灯笼等）会压在视频上。
       媒体区位置：常规版 ${rectText(mediaRect(t, false))}；对调版 ${rectText(mediaRect(t, true))}。
@@ -1489,15 +1492,14 @@ function backgroundDialog(id) {
     ${["常规版", "对调版（开了左右对调的设备用）"].map((label, i) => `<div class="card"><h3>${label}</h3>
       <div class="row"><button onclick="downloadGuide('${esc(id)}', ${!!i})">下载参考图</button>
         ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png" onchange="uploadBg('${esc(id)}', ${!!i}, this)">`}
-        ${files[i] ? `<button onclick="showPreview('/api/v1/admin/templates/${esc(id)}/preview${i ? "?mirror=1" : ""}', '#bgBox${i}')">预览效果</button>
+        ${files[i] ? `<button onclick="showPreview(tplPath('${esc(id)}') + '/preview${i ? "?mirror=1" : ""}', '#bgBox${i}')">预览效果</button>
           <button class="danger" onclick="removeBg('${esc(id)}', ${!!i})">移除</button>` : ""}</div>
       <div id="bgBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
-    <p class="muted">没有对调版时，对调的设备用常规版原图（不翻转）。</p>
-    <div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+    <p class="muted">没有对调版时，对调的设备用常规版原图（不翻转）。</p>`);
   files.forEach((f, i) => f && showImg("#bgBox" + i, "/api/v1/admin/backgrounds/" + f));
 }
 async function downloadGuide(id, mirror) {
-  const src = await blobURL(`/api/v1/admin/templates/${encodeURIComponent(id)}/guide${mirror ? "?mirror=1" : ""}`);
+  const src = await blobURL(`${tplPath(id)}/guide${mirror ? "?mirror=1" : ""}`);
   if (!src) return;
   const a = document.createElement("a");
   a.href = src;
@@ -1509,17 +1511,13 @@ async function downloadGuide(id, mirror) {
 async function uploadBg(id, mirror, input) {
   const fd = new FormData(); fd.append("file", input.files[0]);
   toast("上传中…");
-  let res;
-  try { res = await api(bgPath(id, mirror), { method: "POST", body: fd }); } catch { input.value = ""; return; }
-  toast(res.media_transparent < 0.5
-    ? `底图已更新；但媒体区只有 ${Math.round(res.media_transparent * 100)}% 透明，视频大部分会被盖住` : "底图已更新");
-  await refresh(); backgroundDialog(id);
+  if (await send("POST", bgPath(id, mirror), fd, r => r.media_transparent < 0.5
+    ? `底图已更新；但媒体区只有 ${Math.round(r.media_transparent * 100)}% 透明，视频大部分会被盖住` : "底图已更新")) backgroundDialog(id);
+  else input.value = "";
 }
 async function removeBg(id, mirror) {
-  if (!await confirmDialog(mirror ? "移除对调版底图？" : "移除底图？", mirror ? "" : "对调版会一起移除。", { ok: "移除", danger: true })) return;
-  try { await api(bgPath(id, mirror), { method: "DELETE" }); } catch { return; }
-  toast("已移除");
-  await refresh(); backgroundDialog(id);
+  if (await confirmSend(mirror ? "移除对调版底图？" : "移除底图？", mirror ? "" : "对调版会一起移除。", bgPath(id, mirror), { ok: "移除", msg: "已移除" }))
+    backgroundDialog(id);
 }
 const saveGlobal = () => send("PUT", "/api/v1/admin/global", { template_id: $("#globalSel").value }, "已保存");
 // splitTemplate 生成"一半属性、一半播放内容"的模板（画布 w×h）：表单新建/保存与 JSON 示例共用。
@@ -1539,7 +1537,7 @@ function templateForm(id) {
   if (t && !splitShape(t)) { editTemplateJSON(id); return; }
   const def = splitTemplate(), attr = (t || def).regions.find(r => r.type === "attribute");
   const mediaLeft = t ? t.regions.find(r => r.type === "media").x === 0 : false;
-  modal(`<h2>${t ? "编辑模板" : "新建模板"}</h2>
+  modal(t ? "编辑模板" : "新建模板", `
     <div class="row">名称 <input type="text" id="f_name" value="${esc(t?.name || def.name)}"></div>
     <div class="row">左右版式
       <select id="f_side">
@@ -1554,9 +1552,8 @@ function templateForm(id) {
       底色 <input type="text" id="f_bg" value="${esc(attr.bg)}" placeholder="透明" style="width:7em">
       <span class="muted">留空 = 透明（透出底图）</span></div>
     <div class="row">图片停留 <input type="number" id="f_dur" min="1" max="3600" style="width:5em" value="${esc(t?.image_duration_s || def.image_duration_s)}"> 秒
-      <span class="muted">视频按自身长度播完即切</span></div>
-    <div class="actions"><button onclick="closeModal()">取消</button>
-      <button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button></div>`);
+      <span class="muted">视频按自身长度播完即切</span></div>`,
+    `${CANCEL}<button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button>`);
 }
 function saveTemplateForm(id) {
   const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸（底图由服务端保留）
@@ -1566,23 +1563,20 @@ function saveTemplateForm(id) {
     color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), image_duration_s: parseInt($("#f_dur").value) || undefined,
   }));
 }
-const saveTemplate = (id, tpl) => send(id ? "PUT" : "POST", "/api/v1/admin/templates" + (id ? "/" + encodeURIComponent(id) : ""), tpl, "模板已保存", { close: true });
+const saveTemplate = (id, tpl) => send(id ? "PUT" : "POST", id ? tplPath(id) : "/api/v1/admin/templates", tpl, "模板已保存", { close: true });
 
 // editTemplateJSON 高级编辑：表单表达不了的版式（多区域、局部媒体区等）在这里直接改。
 function editTemplateJSON(id) {
   const t = tplById(id);
-  modal(`<h2>${t ? "编辑" : "新建"}模板 (JSON)</h2><textarea id="tplJSON">${esc(JSON.stringify(t || splitTemplate({ name: "示例" }), null, 2))}</textarea>
-    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、media（设备播放的图片/视频，每个模板至多一个）。</p>
-    <div class="actions"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button></div>`);
+  modal(`${t ? "编辑" : "新建"}模板 (JSON)`, `<textarea id="tplJSON">${esc(JSON.stringify(t || splitTemplate({ name: "示例" }), null, 2))}</textarea>
+    <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、media（设备播放的图片/视频，每个模板至多一个）。底图在【底图】里管理，这里改不了。</p>`,
+    `${CANCEL}<button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button>`);
 }
 function saveTemplateJSON(id) {
   let tpl; try { tpl = JSON.parse($("#tplJSON").value); } catch (e) { toast("JSON 语法错误: " + e.message); return; }
   saveTemplate(id, tpl);
 }
-async function deleteTemplate(id) {
-  if (!await confirmDialog(`删除模板「${tplById(id)?.name || id}」？`, "", { ok: "删除", danger: true })) return;
-  send("DELETE", "/api/v1/admin/templates/" + encodeURIComponent(id), undefined, "已删除");
-}
+const deleteTemplate = id => confirmSend(`删除模板「${tplById(id)?.name || id}」？`, "", tplPath(id));
 
 // ---- 时段计划（整表编辑）----
 let schEdit = null;
@@ -1601,7 +1595,6 @@ function renderSchedules() {
 function toggleDay(i, k, on) { const d = schEdit[i].days; const idx = d.indexOf(k); if (on && idx < 0) d.push(k); if (!on && idx >= 0) d.splice(idx, 1); }
 function moveSch(i, delta) { const j = i + delta; if (j < 0 || j >= schEdit.length) return; [schEdit[i], schEdit[j]] = [schEdit[j], schEdit[i]]; renderSchedules(); }
 function addSchedule() {
-  if (!templates.length) { toast("请先创建模板"); return; }
   schEdit.push({ template_id: templates[0].id, days: [], start: "08:00", end: "18:00" }); renderSchedules();
 }
 async function saveSchedules() {
@@ -1653,38 +1646,31 @@ function renderPackages() {
     <td data-label="内容">${r.packages} 个软件包 · ${fmtSize(r.size)}</td>
     <td data-label="上传时间">${esc(fmtTime(r.uploaded_at))}</td>
     <td class="acts"><button class="danger" onclick="deleteDeps('${esc(r.codename)}')">删除</button></td></tr>`).join("");
-  $("#depsTable").innerHTML = `<tr class="head"><th>代号</th><th>内容</th><th>上传时间</th><th>操作</th></tr>${depRows || '<tr><td colspan="4" class="muted">尚未上传：装机时设备从外网 apt 安装依赖（较慢）</td></tr>'}`;
+  $("#depsTable").innerHTML = `<tr class="head"><th>代号</th><th>内容</th><th>上传时间</th><th>操作</th></tr>${depRows || '<tr><td colspan="4" class="muted">尚未上传：装机与 OTA 时设备从外网 apt 安装依赖（较慢，且要能上外网）</td></tr>'}`;
 }
 async function uploadPackage() {
   const f = $("#pkgFile").files[0];
   if (!f) { toast("请选择要上传的包"); return; }
   const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#pkgNotes").value);
   toast("上传中…");
-  let p;
-  try { p = await api("/api/v1/admin/packages", { method: "POST", body: fd }); } catch { return; }
-  toast(p.codename ? "已上传离线依赖包 " + p.codename : "已上传 " + p.version);
-  $("#pkgFile").value = ""; $("#pkgNotes").value = ""; refresh();
+  if (await send("POST", "/api/v1/admin/packages", fd, p => p.codename ? "已上传离线依赖包 " + p.codename : "已上传 " + p.version)) {
+    $("#pkgFile").value = ""; $("#pkgNotes").value = "";
+  }
 }
-async function deleteDeps(c) {
-  if (!await confirmDialog(`删除离线依赖包 ${c}？`, "之后该版本的设备装机改为在线安装依赖。", { ok: "删除", danger: true })) return;
-  send("DELETE", "/api/v1/admin/deps/" + encodeURIComponent(c), undefined, "已删除");
-}
-async function deletePackage(v) {
-  if (!await confirmDialog(`删除程序版本 ${v}？`, "", { ok: "删除", danger: true })) return;
-  send("DELETE", "/api/v1/admin/packages/" + encodeURIComponent(v), undefined, "已删除");
-}
+const deleteDeps = c => confirmSend(`删除离线依赖包 ${c}？`, "之后这个 Debian 版本的设备装机与 OTA 改为在线安装依赖。", "/api/v1/admin/deps/" + encodeURIComponent(c));
+const deletePackage = v => confirmSend(`删除程序版本 ${v}？`, "", "/api/v1/admin/packages/" + encodeURIComponent(v));
 function rolloutDialog(version) {
   const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></span></label>`).join("");
-  modal(`<h2>下发程序 ${esc(version)}</h2>
+  modal(`下发程序 ${esc(version)}`, `
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
       <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>
     <div class="row"><label><input type="radio" name="who" value="all" checked> 全部设备</label>
       <label><input type="radio" name="who" value="some"> 指定设备：</label></div>
     <div class="checklist">${devOpts || '<label class="muted">暂无设备</label>'}</div>
-    <p class="muted">设备下载整包、执行包内 update.sh 后切换；新版本连续 3 次启动失败自动回滚，失败原因显示在设备列表里。</p>
-    <div class="actions"><button onclick="closeModal()">取消</button>
-      <button class="danger" onclick="doRollout('', true)">取消所有待更新</button>
-      <button class="primary" onclick="doRollout('${esc(version)}')">下发</button></div>`);
+    <p class="muted">设备下载整包、执行包内 update.sh（会安装新版本新增的依赖，最长 15 分钟）后切换；新版本连续 3 次启动失败
+      自动回滚、不再重试这个版本。失败原因显示在设备列表里。</p>`,
+    `${CANCEL}<button class="danger" onclick="doRollout('', true)">取消所有待更新</button>
+      <button class="primary" onclick="doRollout('${esc(version)}')">下发</button>`);
 }
 async function doRollout(version, cancel = false) {
   const body = { version };
