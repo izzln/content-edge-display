@@ -200,6 +200,7 @@
   .pl-item .thumb { flex:none; width:64px; height:40px; border-radius:6px; background:var(--fill); overflow:hidden; display:flex; align-items:center; justify-content:center; color:var(--label2); position:relative; }
   .pl-item .thumb img { width:100%; height:100%; object-fit:cover; pointer-events:none; -webkit-user-drag:none; }
   .pl-item .thumb .vid { font-size:16px; }
+  .pl-item .thumb img + .vid { position:absolute; left:2px; bottom:2px; font-size:9px; line-height:1; padding:2px 3px; border-radius:3px; background:rgba(0,0,0,.65); color:#fff; }
   .pl-item .thumb .pg { position:absolute; right:2px; bottom:2px; background:rgba(0,0,0,.65); color:#fff; font-size:10px; line-height:1; padding:2px 3px; border-radius:3px; }
   .pl-item .info { flex:1; min-width:0; display:flex; flex-direction:column; }
   .pl-item .nm { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -745,7 +746,8 @@ async function contentDialog(id) {
     <div id="mirrorWarn"></div>
     <hr>
     <div id="contentBody"></div>
-    <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
+    <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button>
+      <select id="pvItem" hidden onchange="previewDevice('${esc(id)}')" aria-label="预览播放列表里的哪一项"></select></div><div id="previewBox"></div>
     <div class="actions"><button onclick="closeModal()">关闭</button><button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button></div>`);
   modalGuard = plCloseGuard;
   renderContentBody();
@@ -910,7 +912,7 @@ const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)} 分${s % 60 ? ` ${s % 60} �
 
 function rowInner(it, n) {
   const img = it.thumb ? `<img src="${esc(it.thumb)}" alt="" draggable="false" onerror="this.remove()">` : "";
-  const thumb = it.type === "video" ? '<span class="vid">▶</span>'
+  const thumb = it.type === "video" ? img + '<span class="vid">▶</span>'
     : it.type === "document" ? img + (it.pages ? `<span class="pg">${it.pages} 页</span>` : "") : img;
   let meta = `${TYPE_TEXT[it.type] || "文件"} · ${esc(fmtSize(it.size || 0))}`;
   if (it.type === "document" && it.state === "ready" && it.pages) {
@@ -1024,7 +1026,7 @@ let thumbLoading = 0;
 function loadThumbs() {
   for (const it of plItems) {
     if (thumbLoading >= 4) return;
-    if (it.type === "video" || it.thumb || it.thumbTried || it.state !== "ready") continue;
+    if (it.thumb || it.thumbTried || it.state !== "ready") continue; // 视频的缩略图是服务端抽的一帧（没有 ffmpeg 时 404，显示 ▶）
     const k = plDev + "/" + it.name;
     if (thumbCache.has(k)) { it.thumb = thumbCache.get(k); noteAspect(it); continue; }
     it.thumbTried = true; thumbLoading++;
@@ -1403,7 +1405,12 @@ async function previewDevice(id) {
   const d = devById(id);
   const tid = d.active_template || (d.display.template_id || global.template_id);
   if (!tid) { toast("该设备当前没有模板"); return; }
-  await showPreview(`/api/v1/admin/templates/${tid}/preview?device=${id}`, "#previewBox");
+  // 媒体区里放播放列表的一项（默认第一项），与设备上看到的一致；多于一项时可以选
+  const sel = $("#pvItem"), cur = sel.value, ready = plItems.filter(it => it.state === "ready" && it.name);
+  sel.innerHTML = ready.map(it => `<option value="${esc(it.name)}" ${it.name === cur ? "selected" : ""}>${esc(it.label)}</option>`).join("");
+  sel.hidden = ready.length < 2;
+  const item = sel.value ? "&item=" + encodeURIComponent(sel.value) : "";
+  await showPreview(`/api/v1/admin/templates/${tid}/preview?device=${encodeURIComponent(id)}${item}`, "#previewBox");
 }
 async function showPreview(url, target) {
   const r = await authFetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
@@ -1446,14 +1453,15 @@ function backgroundDialog(id) {
   const files = [t.background_image, t.background_image_mirror];
   const covering = t.regions.filter(r => r.type !== "media" && r.bg); // 设了底色的区域会盖住底图
   modal(`<h2>底图 — ${esc(t.name)}</h2>
-    <p>底图垫在模板最下面，放节日主题等模板画不出来的画面。尺寸 <b>${t.w}×${t.h}</b> 像素，PNG 或 JPG（比例不同时铺满后居中裁切）。</p>
-    <p><b>媒体区会被视频/图片完全盖住，底图的这块要留空</b>：常规版 ${rectText(mediaRect(t, false))}；对调版 ${rectText(mediaRect(t, true))}。
-      属性/文字区域不设底色时是透明的，会透出底图。下载参考图（媒体区标红、各区域标框）当作参考图层来做底图。</p>
+    <p>底图放节日主题等模板画不出来的画面，<b>压在播放内容上方</b>。尺寸 <b>${t.w}×${t.h}</b> 像素，只收 PNG（比例不同时铺满后居中裁切）。</p>
+    <p><b>媒体区里底图要透明</b>，视频/图片从透明处露出；不透明的装饰（相框、灯笼等）会压在视频上。
+      媒体区位置：常规版 ${rectText(mediaRect(t, false))}；对调版 ${rectText(mediaRect(t, true))}。
+      属性/文字显示在底图之上；它们的区域不设底色时透明，透出底图。下载参考图（媒体区标红、各区域标框）当作参考图层来做底图。</p>
     ${covering.length ? `<p class="warn">${covering.map(r => `${esc(REGION_LABEL[r.type] || r.type)}区域${r.type === "attribute" ? "（" + esc(r.key) + "）" : ""}设了底色 ${esc(r.bg)}`).join("、")}，
       会盖住底图的这块：在模板【编辑】里把底色留空即透明。</p>` : ""}
     ${["常规版", "对调版（开了左右对调的设备用）"].map((label, i) => `<div class="card"><h3>${label}</h3>
       <div class="row"><button onclick="downloadGuide('${esc(id)}', ${!!i})">下载参考图</button>
-        ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png,image/jpeg" onchange="uploadBg('${esc(id)}', ${!!i}, this)">`}
+        ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png" onchange="uploadBg('${esc(id)}', ${!!i}, this)">`}
         ${files[i] ? `<button onclick="showPreview('/api/v1/admin/templates/${esc(id)}/preview${i ? "?mirror=1" : ""}', '#bgBox${i}')">预览效果</button>
           <button class="danger" onclick="removeBg('${esc(id)}', ${!!i})">移除</button>` : ""}</div>
       <div id="bgBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
@@ -1478,8 +1486,10 @@ async function downloadGuide(id, mirror) {
 async function uploadBg(id, mirror, input) {
   const fd = new FormData(); fd.append("file", input.files[0]);
   toast("上传中…");
-  try { await api(bgPath(id, mirror), { method: "POST", body: fd }); } catch { input.value = ""; return; }
-  toast("底图已更新");
+  let res;
+  try { res = await api(bgPath(id, mirror), { method: "POST", body: fd }); } catch { input.value = ""; return; }
+  toast(res.media_transparent < 0.5
+    ? `底图已更新；但媒体区只有 ${Math.round(res.media_transparent * 100)}% 透明，视频大部分会被盖住` : "底图已更新");
   await refresh(); backgroundDialog(id);
 }
 async function removeBg(id, mirror) {

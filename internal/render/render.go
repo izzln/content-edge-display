@@ -102,13 +102,32 @@ type Rendered struct {
 // mirror 为真时所有区域左右对调（属性在左还是在右，用同一个模板即可覆盖两种设备）。
 //
 // overlayMode 决定媒体区怎么画：
-//   - true：留全透明，作为叠加图交给设备端贴在视频之上（Go 的 image.RGBA 本身是预乘 alpha，
+//   - true：留透明，作为叠加图交给设备端贴在视频之上（Go 的 image.RGBA 本身是预乘 alpha，
 //     正是显示图层要的格式）
 //   - false：填上自己的底色，得到一张整屏静态图——用于模板没有媒体区、或媒体区还没有内容的情形
+//
+// 底图（PNG）在媒体区之后、文字之前整张叠上去：媒体区里它透明的地方露出视频，不透明的装饰压在视频上。
 func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, overlayMode bool) (*Rendered, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
 	out := &Rendered{Image: canvas}
 	fill(canvas, canvas.Bounds(), parseColor(tpl.Background))
+	regions := make([]store.Region, len(tpl.Regions))
+	for i, reg := range tpl.Regions {
+		if mirror {
+			reg = store.Mirrored(reg, tpl.W)
+		}
+		regions[i] = reg
+		if reg.Type != store.RegionMedia {
+			continue
+		}
+		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
+		out.MediaRegion = rect
+		if overlayMode {
+			draw.Draw(canvas, rect, image.NewUniform(color.RGBA{}), image.Point{}, draw.Src) // 设备端的视频从这里透出来
+		} else if reg.Bg != "" {
+			fill(canvas, rect, parseColor(reg.Bg))
+		}
+	}
 	if file := tpl.BackgroundFor(mirror); file != "" {
 		// 底图丢了不让整个清单生成失败（设备会一直拿不到新内容）：退回纯底色并记下原因
 		if bg, err := r.background(file, tpl.W, tpl.H); err != nil {
@@ -118,23 +137,11 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 		}
 	}
 
-	for _, reg := range tpl.Regions {
-		if mirror {
-			reg = store.Mirrored(reg, tpl.W)
-		}
-		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
-
+	for _, reg := range regions {
 		if reg.Type == store.RegionMedia {
-			out.MediaRegion = rect
-			if overlayMode {
-				// 挖洞：透明黑，设备端的视频从这里透出来
-				draw.Draw(canvas, rect, image.NewUniform(color.RGBA{}), image.Point{}, draw.Src)
-			} else if reg.Bg != "" {
-				fill(canvas, rect, parseColor(reg.Bg))
-			}
 			continue
 		}
-
+		rect := image.Rect(reg.X, reg.Y, reg.X+reg.W, reg.Y+reg.H)
 		if reg.Bg != "" {
 			fill(canvas, rect, parseColor(reg.Bg))
 		}
@@ -174,12 +181,7 @@ func (r *Renderer) background(file string, w, h int) (*image.RGBA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode %s: %w", file, err)
 	}
-	sb := src.Bounds()
-	scale := math.Max(float64(w)/float64(sb.Dx()), float64(h)/float64(sb.Dy()))
-	cw, ch := min(sb.Dx(), int(math.Round(float64(w)/scale))), min(sb.Dy(), int(math.Round(float64(h)/scale)))
-	crop := image.Rect(0, 0, cw, ch).Add(sb.Min).Add(image.Pt((sb.Dx()-cw)/2, (sb.Dy()-ch)/2))
-	img = image.NewRGBA(image.Rect(0, 0, w, h))
-	xdraw.CatmullRom.Scale(img, img.Bounds(), src, crop, xdraw.Src, nil)
+	img = CoverImage(src, w, h)
 	r.mu.Lock()
 	if len(r.bgs) >= maxCachedBackgrounds {
 		clear(r.bgs)
@@ -189,8 +191,52 @@ func (r *Renderer) background(file string, w, h int) (*image.RGBA, error) {
 	return img, nil
 }
 
-// RenderGuide 生成底图设计参考图（画布原尺寸）：浅灰底，媒体区是红块并写明位置——那里会被视频/图片完全盖住，
-// 底图在这块要留空；文字/属性区域描边并标注（区域没设底色时透明，透出底图）。mirror 出对调版。
+// cover 把 src 等比缩放到刚好盖住 dst 里的 rect，居中裁掉多出来的一边（设备端放图片、视频也是这样）。
+func cover(dst *image.RGBA, rect image.Rectangle, src image.Image) {
+	sb := src.Bounds()
+	scale := math.Max(float64(rect.Dx())/float64(sb.Dx()), float64(rect.Dy())/float64(sb.Dy()))
+	cw, ch := min(sb.Dx(), int(math.Round(float64(rect.Dx())/scale))), min(sb.Dy(), int(math.Round(float64(rect.Dy())/scale)))
+	crop := image.Rect(0, 0, cw, ch).Add(sb.Min).Add(image.Pt((sb.Dx()-cw)/2, (sb.Dy()-ch)/2))
+	xdraw.CatmullRom.Scale(dst, rect, src, crop, xdraw.Src, nil)
+}
+
+// CoverImage 返回铺满 w×h 的 src（保留透明通道）。
+func CoverImage(src image.Image, w, h int) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	cover(img, img.Bounds(), src)
+	return img
+}
+
+// TransparentShare 返回 img 在 rect 里透明（alpha 低于一半）像素的比例。
+func TransparentShare(img *image.RGBA, rect image.Rectangle) float64 {
+	rect = rect.Intersect(img.Bounds())
+	if rect.Empty() {
+		return 1
+	}
+	n := 0
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		row := img.Pix[img.PixOffset(rect.Min.X, y):img.PixOffset(rect.Max.X, y)]
+		for i := 3; i < len(row); i += 4 {
+			if row[i] < 128 {
+				n++
+			}
+		}
+	}
+	return float64(n) / float64(rect.Dx()*rect.Dy())
+}
+
+// Preview 把播放内容的一帧 content 按设备的方式铺进媒体区，再盖上叠加模式渲染出的模板 overlay，
+// 得到与设备上一致的画面（含压在媒体区上的底图装饰）。
+func Preview(overlay *Rendered, content image.Image) *image.RGBA {
+	out := image.NewRGBA(overlay.Image.Bounds())
+	fill(out, out.Bounds(), color.RGBA{A: 0xFF})
+	cover(out, overlay.MediaRegion, content)
+	draw.Draw(out, out.Bounds(), overlay.Image, image.Point{}, draw.Over)
+	return out
+}
+
+// RenderGuide 生成底图设计参考图（画布原尺寸）：浅灰底，媒体区是红块并写明位置——底图在这块要透明，视频/图片
+// 从透明处露出，装饰可以压进来；文字/属性区域描边并标注（区域没设底色时透明，透出底图）。mirror 出对调版。
 func (r *Renderer) RenderGuide(tpl store.Template, mirror bool) (*image.RGBA, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
 	fill(canvas, canvas.Bounds(), color.RGBA{0xE5, 0xE5, 0xEA, 0xFF})
@@ -205,8 +251,8 @@ func (r *Renderer) RenderGuide(tpl store.Template, mirror bool) (*image.RGBA, er
 		case store.RegionMedia:
 			c = color.RGBA{0xFF, 0x3B, 0x30, 0xFF}
 			fill(canvas, rect, c)
-			lines = []string{"媒体区：留空", fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H),
-				"会被视频/图片完全盖住", fmt.Sprintf("画布 %d×%d", tpl.W, tpl.H)}
+			lines = []string{"媒体区：底图在这里要透明", fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H),
+				"视频/图片从透明处露出", "装饰可以压进来", fmt.Sprintf("画布 %d×%d", tpl.W, tpl.H)}
 			c = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
 		case store.RegionAttribute:
 			c = color.RGBA{0x00, 0x7A, 0xFF, 0xFF}

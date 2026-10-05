@@ -238,10 +238,16 @@ def pick_planes(planes, crtc_bit=1):
     return (up["id"] if up else -1), (down["id"] if down else -1)
 
 
+# VEIL[a] 是透明度通道的查找表：叠加图的像素盖在透明度为 a 的黑幕上之后的透明度。
+# 预乘格式下黑幕不贡献颜色，所以 rgb 不变，只有 alpha 从 p 变成 p + a·(255−p)/255。
+VEIL = [bytes(p + (a * (255 - p) + 127) // 255 for p in range(256)) for a in range(256)]
+
+
 def paint(buf, pitch, width, base, hole, alpha, full):
     """把一帧上层画面画进 buf（每行 pitch 字节，宽 width 像素，BGRA 预乘）。
 
-    full 时先整幅铺上 base；然后洞里填 alpha 的黑（预乘即 0,0,0,a），alpha 为 0 时洞里还原 base。"""
+    full 时先整幅铺上 base；然后洞里叠一层 alpha 的黑幕——黑幕在叠加图之下：洞里透明的地方变暗（视频淡出），
+    底图压进媒体区的装饰保持不动。alpha 为 0 时洞里还原 base。只改透明度通道、按行查表，走的是 C 实现。"""
     row = width * 4
     src = memoryview(base)
     if full:
@@ -253,10 +259,37 @@ def paint(buf, pitch, width, base, hole, alpha, full):
         if not alpha:
             return
     x, y, w, h = hole
-    fill = bytes((0, 0, 0, alpha)) * w if alpha else None
-    for r in range(y, y + h):
-        o, s = r * pitch + x * 4, r * row + x * 4
-        buf[o:o + w * 4] = fill if fill else src[s:s + w * 4]
+    if not alpha:
+        for r in range(y, y + h):
+            o, s = r * pitch + x * 4, r * row + x * 4
+            buf[o:o + w * 4] = src[s:s + w * 4]
+        return
+    fill, lut = bytes((0, 0, 0, alpha)) * w, VEIL[alpha]
+    for r, span in zip(range(y, y + h), _deco_spans(base, row, hole)):
+        o = r * pitch + x * 4
+        buf[o:o + w * 4] = fill  # 洞里透明的地方：黑幕本身
+        if span:  # 这一行有压进媒体区的装饰：只对这一段查表
+            a, b = span
+            s = r * row + (x + a) * 4
+            seg = bytearray(src[s:s + (b - a) * 4])
+            seg[3::4] = seg[3::4].translate(lut)
+            buf[o + a * 4:o + b * 4] = seg
+
+
+_spans = {"base": None, "hole": None, "spans": None}
+
+
+def _deco_spans(base, row, hole):
+    """洞里每一行不透明像素所在的列范围 (起, 止)，没有就是 None。同一画面只算一次（淡入淡出每帧都要用）。"""
+    if _spans["base"] is not base or _spans["hole"] != hole:
+        x, y, w, h = hole
+        spans = []
+        for r in range(y, y + h):
+            a = base[r * row + x * 4 + 3:r * row + (x + w) * 4:4]
+            lead = w - len(a.lstrip(b"\0"))
+            spans.append(None if lead == w else (lead, len(a.rstrip(b"\0"))))
+        _spans.update(base=base, hole=hole, spans=spans)
+    return _spans["spans"]
 
 
 class Display:

@@ -199,6 +199,25 @@ func (e *Encoder) Duration(ctx context.Context, src string) float64 {
 	return parseDuration(string(out))
 }
 
+// Frame 从视频 src 里抽一帧存成 JPEG 到 dst（后台缩略图与效果预览用）：取第 1 秒，短视频取中间。
+func (e *Encoder) Frame(ctx context.Context, src, dst string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	at := 1.0
+	if d := e.Duration(ctx, src); d > 0 && d < 2 {
+		at = d / 2
+	}
+	out, err := exec.CommandContext(ctx, e.bin, "-hide_banner", "-nostdin", "-loglevel", "error",
+		"-ss", strconv.FormatFloat(at, 'f', 2, 64), "-i", src, "-frames:v", "1", "-q:v", "3", "-y", dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg frame: %v: %s", err, firstLine(out))
+	}
+	if fi, err := os.Stat(dst); err != nil || fi.Size() == 0 {
+		return fmt.Errorf("ffmpeg frame: no image produced")
+	}
+	return nil
+}
+
 func parseDuration(s string) float64 {
 	i := strings.Index(s, "Duration: ")
 	if i < 0 {

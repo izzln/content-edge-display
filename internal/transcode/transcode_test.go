@@ -234,3 +234,27 @@ func TestFindReportsWhy(t *testing.T) {
 		t.Fatalf("运行失败：应带上 ffmpeg 自己的报错，得到 %v", err)
 	}
 }
+
+// 抽帧：长视频取第 1 秒，不到 2 秒的取中间；坏文件报错。
+func TestFrame(t *testing.T) {
+	e := needFFmpeg(t)
+	dir := t.TempDir()
+	for _, c := range []struct{ name, dur string }{{"long.mp4", "3"}, {"short.mp4", "0.5"}} {
+		src := makeClip(t, dir, c.name, "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration="+c.dur, "-pix_fmt", "yuv420p")
+		dst := filepath.Join(dir, c.name+".jpg")
+		if err := e.Frame(context.Background(), src, dst); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		f, _ := os.Open(dst)
+		cfg, format, err := image.DecodeConfig(f)
+		f.Close()
+		if err != nil || format != "jpeg" || cfg.Width != 320 || cfg.Height != 240 {
+			t.Fatalf("%s: 应抽出一张 320×240 的 JPEG：%v %s %+v", c.name, err, format, cfg)
+		}
+	}
+	bad := filepath.Join(dir, "bad.mp4")
+	os.WriteFile(bad, []byte("not a video"), 0o644)
+	if err := e.Frame(context.Background(), bad, filepath.Join(dir, "bad.jpg")); err == nil {
+		t.Fatal("坏文件应报错")
+	}
+}

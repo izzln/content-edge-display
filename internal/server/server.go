@@ -109,7 +109,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	}
 	// incoming/ 是待处理原片的暂存区：任务只在内存里，重启后它们已无人认领，清掉。
 	os.RemoveAll(s.incomingDir())
-	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.backgroundsDir(), s.incomingDir()} {
+	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.backgroundsDir(), s.thumbsDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}

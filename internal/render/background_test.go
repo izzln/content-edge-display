@@ -12,12 +12,13 @@ import (
 	"github.com/izzln/content-edge-display/internal/store"
 )
 
-// writeBackground 写一张 w×h 的底图：左半 left 色、右半 right 色。
-func writeBackground(t *testing.T, dir, name string, w, h int, left, right color.RGBA) {
+// writeBackground 写一张 w×h 的透明 PNG，再按 rects 填色（底图在媒体区要透明，装饰可以压进来）。
+func writeBackground(t *testing.T, dir, name string, w, h int, rects map[image.Rectangle]color.RGBA) {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(img, image.Rect(0, 0, w/2, h), image.NewUniform(left), image.Point{}, draw.Src)
-	draw.Draw(img, image.Rect(w/2, 0, w, h), image.NewUniform(right), image.Point{}, draw.Src)
+	for r, c := range rects {
+		draw.Draw(img, r, image.NewUniform(c), image.Point{}, draw.Src)
+	}
 	f, err := os.Create(filepath.Join(dir, name))
 	if err != nil {
 		t.Fatal(err)
@@ -29,9 +30,11 @@ func writeBackground(t *testing.T, dir, name string, w, h int, left, right color
 }
 
 var (
-	red   = color.RGBA{0xFF, 0, 0, 0xFF}
-	blue  = color.RGBA{0, 0, 0xFF, 0xFF}
-	green = color.RGBA{0, 0xFF, 0, 0xFF}
+	red    = color.RGBA{0xFF, 0, 0, 0xFF}
+	blue   = color.RGBA{0, 0, 0xFF, 0xFF}
+	green  = color.RGBA{0, 0xFF, 0, 0xFF}
+	yellow = color.RGBA{0xFF, 0xFF, 0, 0xFF}
+	black  = color.RGBA{0, 0, 0, 0xFF}
 )
 
 func near(c color.Color, want color.RGBA) bool {
@@ -40,17 +43,22 @@ func near(c color.Color, want color.RGBA) bool {
 	return d(r, want.R) && d(g, want.G) && d(b, want.B) && d(a, want.A)
 }
 
-// 底图垫在最下面：按比例铺满画布、居中裁切；区域不设底色时透明、透出底图；叠加模式下媒体区仍是透明的洞。
-// 对调的设备用对调版底图，没有对调版时用原图、不翻转。
+func alphaAt(img image.Image, x, y int) uint32 { _, _, _, a := img.At(x, y).RGBA(); return a }
+
+// 底图压在媒体区上方：媒体区里底图透明的地方露出视频，不透明的装饰盖在视频上；底图铺满画布、居中裁切；
+// 区域不设底色时透出底图。对调的设备用对调版底图，没有对调版时用原图、不翻转。
 func TestBackgroundImage(t *testing.T) {
 	dir := t.TempDir()
 	r, err := New("", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 2:1 的底图放进 1:1 的画布：裁掉左右各四分之一，画布左半红、右半蓝
-	writeBackground(t, dir, "bg-0000000000000001.png", 400, 200, red, blue)
-	writeBackground(t, dir, "bg-0000000000000002.png", 200, 200, green, green)
+	// 画布 200×200，媒体区在右半边。底图 400×200（2:1）放进 1:1 画布：左右各裁掉四分之一，
+	// 所以底图里 x∈[100,300) 对应画布 [0,200)：左半红（不透明），右半透明，媒体区里 (150..170) 有一块蓝色装饰
+	writeBackground(t, dir, "bg-0000000000000001.png", 400, 200, map[image.Rectangle]color.RGBA{
+		image.Rect(0, 0, 200, 200): red, image.Rect(250, 150, 270, 170): blue})
+	writeBackground(t, dir, "bg-0000000000000002.png", 200, 200, map[image.Rectangle]color.RGBA{
+		image.Rect(100, 0, 200, 200): green}) // 对调版：媒体区在左，左半透明
 	tpl := store.Template{ID: "t", W: 200, H: 200, BackgroundImage: "bg-0000000000000001.png", Regions: []store.Region{
 		{ID: "a", X: 0, Y: 0, W: 100, H: 40, Type: store.RegionAttribute, Key: "room"}, // 没有底色：透明
 		{ID: "m", X: 100, Y: 0, W: 100, H: 200, Type: store.RegionMedia},
@@ -59,37 +67,66 @@ func TestBackgroundImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	full, err := r.Render(tpl, nil, false, false)
+	ovl, err := r.Render(tpl, nil, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !near(full.Image.At(20, 150), red) || !near(full.Image.At(180, 150), blue) || !near(full.Image.At(5, 5), red) {
-		t.Fatalf("底图应铺满画布、居中裁切，且透出无底色的区域：%v %v %v", full.Image.At(20, 150), full.Image.At(180, 150), full.Image.At(5, 5))
+	if !near(ovl.Image.At(20, 150), red) || !near(ovl.Image.At(5, 5), red) || alphaAt(ovl.Image, 120, 100) != 0 || !near(ovl.Image.At(160, 160), blue) {
+		t.Fatalf("叠加图：媒体区透明处露出视频，装饰压在上面，其余是底图：%v %v %v",
+			ovl.Image.At(20, 150), ovl.Image.At(120, 100), ovl.Image.At(160, 160))
 	}
-	ovl, _ := r.Render(tpl, nil, false, true)
-	if _, _, _, a := ovl.Image.At(150, 150).RGBA(); a != 0 || !near(ovl.Image.At(20, 150), red) {
-		t.Fatal("叠加模式下媒体区必须是透明的洞，其余部分是底图")
+	full, _ := r.Render(tpl, nil, false, false)
+	if !near(full.Image.At(120, 100), black) || !near(full.Image.At(160, 160), blue) {
+		t.Fatal("整屏图：媒体区透明处是底色，装饰照样在")
+	}
+	if share := TransparentShare(CoverImage(mustDecode(t, dir, "bg-0000000000000001.png"), 200, 200), ovl.MediaRegion); share < 0.97 || share > 0.99 {
+		t.Fatalf("媒体区透明比例应约为 98%%：%.3f", share)
 	}
 
-	// 对调但没有对调版：原图不翻转（左边仍是红，右边——现在是属性区——仍是蓝）
-	mir, _ := r.Render(tpl, nil, true, true)
-	if !near(mir.Image.At(180, 150), blue) {
-		t.Fatalf("没有对调版底图时不应翻转原图：%v", mir.Image.At(180, 150))
+	// 效果预览：内容铺进媒体区，模板（含装饰）盖在上面
+	content := image.NewRGBA(image.Rect(0, 0, 50, 50))
+	draw.Draw(content, content.Bounds(), image.NewUniform(yellow), image.Point{}, draw.Src)
+	pv := Preview(ovl, content)
+	if !near(pv.At(120, 100), yellow) || !near(pv.At(160, 160), blue) || !near(pv.At(20, 150), red) {
+		t.Fatal("预览应是内容在媒体区、装饰与底图在上面")
 	}
-	if _, _, _, a := mir.Image.At(50, 150).RGBA(); a != 0 {
-		t.Fatal("对调后媒体区在左边，应为透明")
+
+	// 对调但没有对调版：原图不翻转——左边的红色不透明部分正好盖住换到左边的媒体区（所以需要对调版）
+	mir, _ := r.Render(tpl, nil, true, true)
+	if !near(mir.Image.At(20, 150), red) {
+		t.Fatalf("没有对调版底图时不应翻转原图：%v", mir.Image.At(20, 150))
 	}
 	tpl.BackgroundImageMirror = "bg-0000000000000002.png"
 	mir, _ = r.Render(tpl, nil, true, true)
-	if !near(mir.Image.At(180, 150), green) {
-		t.Fatalf("对调的设备应使用对调版底图：%v", mir.Image.At(180, 150))
+	if alphaAt(mir.Image, 20, 150) != 0 || !near(mir.Image.At(180, 150), green) {
+		t.Fatal("对调的设备应使用对调版底图")
 	}
 
 	// 底图文件丢了：退回底色，不让清单生成失败
 	tpl.BackgroundImage, tpl.BackgroundImageMirror = "bg-00000000000000ff.png", ""
-	if out, err := r.Render(tpl, nil, false, false); err != nil || !near(out.Image.At(20, 150), color.RGBA{0, 0, 0, 0xFF}) {
-		t.Fatalf("底图缺失时应退回底色：%v %v", err, out.Image.At(20, 150))
+	if out, err := r.Render(tpl, nil, false, false); err != nil || !near(out.Image.At(20, 150), black) {
+		t.Fatalf("底图缺失时应退回底色：%v", err)
 	}
+
+	// 没有底图的模板：媒体区仍是整块透明
+	tpl.BackgroundImage = ""
+	if plain, _ := r.Render(tpl, nil, false, true); alphaAt(plain.Image, 160, 160) != 0 {
+		t.Fatal("没有底图时媒体区整块透明")
+	}
+}
+
+func mustDecode(t *testing.T, dir, name string) image.Image {
+	t.Helper()
+	f, err := os.Open(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return img
 }
 
 // 设计参考图：画布原尺寸，媒体区标红（对调版标在另一边），其余是浅灰。

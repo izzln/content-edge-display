@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"image"
 	"image/png"
 	"log"
 	"maps"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
+	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/store"
 	"github.com/izzln/content-edge-display/internal/transcode"
 	"github.com/izzln/content-edge-display/internal/web"
@@ -448,33 +450,45 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePreview 渲染模板预览图。
-// ?device= 用某台设备的属性与左右对调设置；?mirror=1 单独预览对调后的版式。
-// 预览始终出整屏图（媒体区填自己的底色），这样在后台里能直接看到版式。
+// handlePreview 渲染模板预览图。?mirror=1 单独预览对调后的版式。
+// ?device= 用某台设备的属性、左右对调与播放列表：把播放列表里 ?item=（默认第一项）的一帧按设备的方式铺进媒体区，
+// 再盖上模板，与设备上看到的一致（含压在媒体区上的底图装饰）。没有播放内容时出整屏图（媒体区填自己的底色）。
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	var (
 		tpl    store.Template
 		ok     bool
 		attrs  map[string]string
-		mirror = r.URL.Query().Get("mirror") == "1"
+		disp   store.DisplayConfig
+		dev    = q.Get("device")
+		mirror = q.Get("mirror") == "1"
 	)
 	s.store.View(func(st *store.State) {
 		tpl, ok = st.Templates[r.PathValue("id")]
-		if dev := r.URL.Query().Get("device"); dev != "" {
-			attrs, mirror = maps.Clone(st.DeviceAttrs[dev]), mirror || st.Displays[dev].Mirror
+		if dev != "" {
+			attrs, disp = maps.Clone(st.DeviceAttrs[dev]), st.Displays[dev]
+			mirror = mirror || disp.Mirror
 		}
 	})
 	if !ok {
 		http.Error(w, "unknown template", http.StatusNotFound)
 		return
 	}
-	rendered, err := s.renderer.Render(tpl, attrs, mirror, false)
+	var still image.Image
+	if _, hasMedia := tpl.MediaRegion(); hasMedia && dev != "" {
+		still = s.stillImage(r.Context(), dev, disp, q.Get("item"))
+	}
+	rendered, err := s.renderer.Render(tpl, attrs, mirror, still != nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	img := rendered.Image
+	if still != nil {
+		img = render.Preview(rendered, still)
+	}
 	w.Header().Set("Content-Type", "image/png")
-	if err := png.Encode(w, rendered.Image); err != nil {
+	if err := png.Encode(w, img); err != nil {
 		log.Printf("writing preview failed: %v", err)
 	}
 }

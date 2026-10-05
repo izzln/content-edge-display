@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,9 +27,25 @@ type fakeEncoder struct {
 	block   chan struct{} // 非 nil 时 Video 会等它关闭（或 ctx 取消）
 	started chan struct{}
 	calls   int
+	frames  int // Frame 被调用的次数
 }
 
-func (f *fakeEncoder) Version() string                          { return "fake ffmpeg" }
+func (f *fakeEncoder) Version() string { return "fake ffmpeg" }
+
+// Frame 写一张绿色的小 JPEG，并记下调用次数。
+func (f *fakeEncoder) Frame(_ context.Context, _, dst string) error {
+	f.mu.Lock()
+	f.frames++
+	f.mu.Unlock()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 40))
+	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{0, 0xC0, 0, 0xFF}), image.Point{}, draw.Src)
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	return jpeg.Encode(out, img, nil)
+}
 func (f *fakeEncoder) Duration(context.Context, string) float64 { return 10 }
 func (f *fakeEncoder) Video(ctx context.Context, src, dst string, _ transcode.Spec, onProgress func(float64)) error {
 	f.mu.Lock()
