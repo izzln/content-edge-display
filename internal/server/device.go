@@ -76,14 +76,33 @@ func (s *Server) deviceAuth(w http.ResponseWriter, r *http.Request) (store.Devic
 		reason = "bad signature: device key does not match the registered key"
 	}
 	kind, _, _ := strings.Cut(reason, ":")
-	s.mu.Lock()
-	if key := id + "|" + kind; s.now().Sub(s.authLogged[key]) >= time.Minute {
-		s.authLogged[key] = s.now()
+	if s.logAuthFailure(id + "|" + kind) {
 		log.Printf("auth rejected: device %q %s %s: %s", id, r.Method, r.URL.Path, reason)
 	}
-	s.mu.Unlock()
 	http.Error(w, "unauthorized: "+reason, http.StatusUnauthorized)
 	return store.Device{}, false
+}
+
+// maxAuthLogged 是认证失败日志节流表的上限：键里的设备编号来自请求头，谁都能随便编。
+const maxAuthLogged = 256
+
+// logAuthFailure 判断这条认证失败要不要写日志：同一设备、同一原因每分钟只记一次。
+// 表满时先清掉一分钟以前的；仍然满（一分钟内来了大量不同编号）就不再记新的。
+func (s *Server) logAuthFailure(key string) bool {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now.Sub(s.authLogged[key]) < time.Minute {
+		return false
+	}
+	if len(s.authLogged) >= maxAuthLogged {
+		maps.DeleteFunc(s.authLogged, func(_ string, t time.Time) bool { return now.Sub(t) >= time.Minute })
+	}
+	if len(s.authLogged) >= maxAuthLogged {
+		return false
+	}
+	s.authLogged[key] = now
+	return true
 }
 
 // noteContact 记下设备最近一次联系，用于判断在线。任何签名通过的请求都算：轮询、心跳、下载文件——

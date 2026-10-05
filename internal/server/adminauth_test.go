@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,6 +52,45 @@ func TestAdminLockout(t *testing.T) {
 	}
 	if _, wait := try("fresh-wrong"); wait != 0 {
 		t.Fatal("成功后计数应清零")
+	}
+}
+
+// 错误计数不是永久的：锁定过去且 24 小时没再猜错就清零，维护时删掉这样的记录。
+func TestAdminFailuresExpire(t *testing.T) {
+	a := newAdminAuth(hashAdminToken("Right123"))
+	now := time.Unix(1_000_000, 0)
+	for i := range 6 {
+		a.check("wrong-"+string(rune('a'+i)), "10.0.0.9", now)
+	}
+	now = now.Add(forgetAfter)
+	if _, wait := a.check("wrong-again", "10.0.0.9", now); wait != 0 {
+		t.Fatalf("安静 24 小时后应从头计数，不应锁定：%s", wait)
+	}
+	a.check("other", "10.0.0.8", now)
+	a.prune(now.Add(forgetAfter))
+	if len(a.ips) != 0 {
+		t.Fatalf("维护时应删掉过期记录：%d", len(a.ips))
+	}
+}
+
+// 刚重启时后台页面并发好几个请求：只算一次 PBKDF2，其余等它算完直接命中。
+func TestAdminAuthHashesOnce(t *testing.T) {
+	a := newAdminAuth(hashAdminToken("Right123"))
+	var calls atomic.Int32
+	a.verify = func(tok, hash string) bool { calls.Add(1); return checkAdminToken(tok, hash) }
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ok, _ := a.check("Right123", "10.0.0.9", time.Now()); !ok {
+				t.Error("口令对应通过")
+			}
+		}()
+	}
+	wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("并发的同一个口令应只算一次哈希，算了 %d 次", n)
 	}
 }
 

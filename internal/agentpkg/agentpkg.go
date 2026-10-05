@@ -19,10 +19,14 @@ import (
 
 // 包内的固定文件。
 const (
-	Binary       = "display-agent" // 代理程序（linux/arm）
-	VersionFile  = "VERSION"       // 版本号，与程序内置版本一致
-	UpdateScript = "update.sh"     // 安装步骤：首次安装与 OTA 都执行
+	Binary        = "display-agent"    // 代理程序（linux/arm）
+	VersionFile   = "VERSION"          // 版本号，与程序内置版本一致
+	UpdateScript  = "update.sh"        // 安装步骤：首次安装与 OTA 都执行
+	InstallScript = "install-agent.sh" // 装机入口（install.sh 下载最新的包后执行）
 )
+
+// MaxExtracted 是解包后的总大小上限：真正的包不到 20MB，挡住解出几十 GB 的压缩炸弹。
+const MaxExtracted = 256 << 20
 
 var versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
@@ -30,7 +34,7 @@ var versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 func FileName(version string) string { return "display-agent-" + version + "-armv7.tar.gz" }
 
 // Extract 把包解到 dir（不存在会创建），保留文件的可执行权限。只接受普通文件与目录，
-// 路径一律收在 dir 之内。
+// 路径一律收在 dir 之内，总大小不超过 MaxExtracted。
 func Extract(r io.Reader, dir string) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -38,6 +42,7 @@ func Extract(r io.Reader, dir string) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	var total int64
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -57,6 +62,9 @@ func Extract(r io.Reader, dir string) error {
 		_, name, ok := strings.Cut(strings.TrimPrefix(path.Clean("/"+h.Name), "/"), "/")
 		if !ok {
 			continue
+		}
+		if total += h.Size; total > MaxExtracted {
+			return fmt.Errorf("package unpacks to more than %dMB", MaxExtracted>>20)
 		}
 		if err := writeEntry(filepath.Join(dir, filepath.FromSlash(name)), h, tr); err != nil {
 			return err
@@ -83,7 +91,7 @@ func writeEntry(dst string, h *tar.Header, body io.Reader) error {
 	return err
 }
 
-// Check 检查解开后的包是否齐全（VERSION、代理程序、update.sh），返回版本号。
+// Check 检查解开后的包是否齐全（VERSION、代理程序、update.sh、install-agent.sh），返回版本号。
 func Check(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, VersionFile))
 	if err != nil {
@@ -93,7 +101,7 @@ func Check(dir string) (string, error) {
 	if !versionPattern.MatchString(version) {
 		return "", fmt.Errorf("package %s %q is invalid", VersionFile, version)
 	}
-	for _, name := range []string{Binary, UpdateScript} {
+	for _, name := range []string{Binary, UpdateScript, InstallScript} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			return "", fmt.Errorf("package has no %s", name)
 		}

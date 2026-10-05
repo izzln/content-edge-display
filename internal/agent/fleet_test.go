@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,6 +213,7 @@ func (e *testEnv) offer(t *testing.T, version, pkgVersion, updateScript string) 
 		testutil.File{Name: "VERSION", Body: pkgVersion + "\n"},
 		testutil.File{Name: "display-agent", Body: "new-binary-" + pkgVersion, Exec: true},
 		testutil.File{Name: "update.sh", Body: updateScript, Exec: true},
+		testutil.File{Name: "install-agent.sh", Body: "#!/bin/sh\n", Exec: true},
 		testutil.File{Name: "check-display.sh", Body: "#!/bin/sh\n", Exec: true})
 	name := "pkg-" + version + ".mp4"
 	os.WriteFile(filepath.Join(e.devDir, name), pkg, 0o644)
@@ -261,6 +263,48 @@ func TestApplyUpdateSwitchesSymlinks(t *testing.T) {
 	}
 	if strings.Join(left, ",") != "1.0.0,2.0.0" {
 		t.Fatalf("确认后只应保留 current 与 previous：%v", left)
+	}
+}
+
+// 新版本连续 3 次启动失败：rollback-check.sh 把 current 指回旧版本并记下失败的版本；代理不再自动重试它
+// （否则下载、切换、启动失败、回滚周而复始），心跳报原因；撤销后、或换个版本号就恢复正常。
+func TestRolledBackVersionIsNotRetried(t *testing.T) {
+	e := otaEnv(t)
+	a, l, ctx := e.a, e.a.install, context.Background()
+	script, _ := os.ReadFile("../../deploy/agent/rollback-check.sh")
+	os.WriteFile(l.path("rollback-check.sh"), script, 0o755)
+	const countRuns = "#!/bin/sh\necho run >>\"$1/runs\"\n"
+
+	e.offer(t, "2.0.0", "2.0.0", countRuns)
+	if err := a.applyPendingUpdate(ctx); !errors.Is(err, ErrRestartForUpdate) {
+		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, a.updateErr)
+	}
+	for range 3 { // 新版本三次都没能心跳确认
+		if out, err := exec.Command(l.path("rollback-check.sh")).CombinedOutput(); err != nil {
+			t.Fatalf("rollback-check.sh: %v %s", err, out)
+		}
+	}
+	if cur, _ := os.Readlink(l.current()); cur != l.versionDir("1.0.0") {
+		t.Fatalf("应回滚到旧版本：%s", cur)
+	}
+
+	// 代理重启后清单里还是 2.0.0：不再重试，报原因
+	a.update, a.updateErr = nil, ""
+	e.offer(t, "2.0.0", "2.0.0", countRuns)
+	if err := a.applyPendingUpdate(ctx); err != nil || !strings.Contains(a.updateErr, "已回滚") {
+		t.Fatalf("回滚掉的版本应报原因而不重试：%v %q", err, a.updateErr)
+	}
+	if runs, _ := os.ReadFile(l.path("runs")); strings.Count(string(runs), "run") != 1 {
+		t.Fatalf("回滚掉的版本不应再装：%q", runs)
+	}
+
+	// 换个版本号重新下发：照常更新，回滚记录清掉
+	e.offer(t, "2.0.1", "2.0.1", countRuns)
+	if err := a.applyPendingUpdate(ctx); !errors.Is(err, ErrRestartForUpdate) {
+		t.Fatalf("新版本号应照常更新：%v (%s)", err, a.updateErr)
+	}
+	if l.rolledBack() != "" {
+		t.Fatal("开始装别的版本后应清掉回滚记录")
 	}
 }
 

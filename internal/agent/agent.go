@@ -135,6 +135,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 		case <-hbTimer.C:
 			sdNotify("WATCHDOG=1")
+			a.writeStatus(a.player.Stats()) // 连不上服务端时现场自检最需要它，与心跳成败无关
 			if a.registered {
 				err := retrySkew(func() error { return a.heartbeat(ctx) })
 				a.link.record(err)
@@ -447,7 +448,6 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("heartbeat: %w", statusError(resp))
 	}
-	a.writeStatus(st)
 	if !a.verified {
 		a.verified = true
 		a.commitUpdate()
@@ -455,8 +455,8 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 	return nil
 }
 
-// writeStatus 把播放状态留一份在本地（仅变化时写盘），现场自检脚本 check-display.sh 据此报告
-// 解码方式与输出分辨率。
+// writeStatus 在每个心跳周期把播放状态留一份在本地（仅变化时写盘），现场自检脚本 check-display.sh
+// 据此报告解码方式与输出分辨率。
 func (a *Agent) writeStatus(st player.Stats) {
 	data, _ := json.Marshal(map[string]any{"hwdec": st.HWDec, "output_w": st.OutputW, "output_h": st.OutputH})
 	if bytes.Equal(data, a.status) {

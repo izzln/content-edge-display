@@ -18,12 +18,13 @@ WANT="${WANT:-1440x900}"
 WANT_W="${WANT%x*}" WANT_H="${WANT#*x}"
 
 echo "=== 1. 内核输出模式 ==="
-MODES=$(for c in /sys/class/drm/card*-*; do [ "$(cat "$c/status" 2>/dev/null)" = connected ] && cat "$c/modes"; done | head -3)
+# 全部逐行扫描模式（去重、保持 EDID 顺序，第一个是首选；隔行模式如 1920x1080i 播放进程不用）
+MODES=$(for c in /sys/class/drm/card*-*; do [ "$(cat "$c/status" 2>/dev/null)" = connected ] && cat "$c/modes"; done | grep -x '[0-9]*x[0-9]*' | awk '!seen[$0]++')
 CUR=$(echo "$MODES" | head -1)
 if [ -z "$CUR" ]; then
 	fail "显示接口" "没有已连接的显示屏（/sys/class/drm/card*-*/status 都不是 connected：HDMI 没接？驱动没加载？）"
 else
-	say "可用模式" "$(echo "$MODES" | tr '\n' ' ')"
+	say "可用模式" "$(echo "$MODES" | head -6 | tr '\n' ' ')"
 	if echo "$MODES" | grep -qx "${WANT_W}x${WANT_H}"; then
 		say "目标模式" "${WANT_W}x${WANT_H} 可用 ✓"
 	else

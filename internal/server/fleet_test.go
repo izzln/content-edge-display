@@ -106,11 +106,12 @@ func agentBinaryFixture(t *testing.T) []byte {
 	return b
 }
 
-// agentPackage 现造一个设备程序包（与 make package 同样的结构）：VERSION + 程序 +（可选）update.sh。
+// agentPackage 现造一个设备程序包（与 make package 同样的结构）：VERSION + 程序 +（可选）update.sh 与 install-agent.sh。
 func agentPackage(t *testing.T, version string, bin []byte, withUpdate bool) []byte {
 	files := []testutil.File{{Name: "VERSION", Body: version + "\n"}, {Name: "display-agent", Body: string(bin), Exec: true}}
 	if withUpdate {
-		files = append(files, testutil.File{Name: "update.sh", Body: "#!/bin/sh\nexit 0\n", Exec: true})
+		files = append(files, testutil.File{Name: "update.sh", Body: "#!/bin/sh\nexit 0\n", Exec: true},
+			testutil.File{Name: "install-agent.sh", Body: "#!/bin/sh\n", Exec: true})
 	}
 	return testutil.Package(version, files...)
 }

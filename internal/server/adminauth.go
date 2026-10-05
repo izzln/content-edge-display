@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,7 +35,8 @@ func init() {
 }
 
 const (
-	lockFreeTries = 5 // 前几个错误口令不锁
+	lockFreeTries = 5              // 前几个错误口令不锁
+	forgetAfter   = 24 * time.Hour // 这么久没再猜错，错误计数清零
 	maxSeenTokens = 64
 )
 
@@ -66,44 +68,43 @@ func checkAdminToken(tok, stored string) bool {
 
 // adminAuth 验证管理口令并按来源 IP 记录猜错的次数。
 type adminAuth struct {
-	mu    sync.Mutex
-	hash  string   // 当前口令的哈希（与 state.json 同步）
-	okSum [32]byte // 最近验证通过的口令的 sha256：每个请求都带口令，命中它就不必再算一遍 PBKDF2
-	okSet bool
-	ips   map[string]*ipFailures
+	mu     sync.Mutex
+	hash   string   // 当前口令的哈希（与 state.json 同步）
+	okSum  [32]byte // 最近验证通过的口令的 sha256：每个请求都带口令，命中它就不必再算一遍 PBKDF2
+	okSet  bool
+	ips    map[string]*ipFailures
+	slow   sync.Mutex                  // 一次只算一个 PBKDF2（见 check）
+	verify func(tok, hash string) bool // checkAdminToken；测试里换成计数的
 }
 
 type ipFailures struct {
 	seen  map[[32]byte]bool // 猜过的错误口令：同一个错口令重复出现（如后台页面拿着旧口令自动刷新）不算新的一次
 	count int
+	last  time.Time // 最近一次猜错
 	until time.Time // 锁到什么时候
 }
 
 func newAdminAuth(hash string) *adminAuth {
-	return &adminAuth{hash: hash, ips: map[string]*ipFailures{}}
+	return &adminAuth{hash: hash, ips: map[string]*ipFailures{}, verify: checkAdminToken}
 }
 
 // check 验证 ip 发来的口令。锁定期间一律不通过（口令对也不行），并返回还要等多久。
 func (a *adminAuth) check(tok, ip string, now time.Time) (ok bool, wait time.Duration) {
 	sum := sha256.Sum256([]byte(tok))
-	a.mu.Lock()
-	f := a.ips[ip]
-	switch {
-	case f != nil && now.Before(f.until):
-		a.mu.Unlock()
-		return false, f.until.Sub(now)
-	case a.okSet && subtle.ConstantTimeCompare(sum[:], a.okSum[:]) == 1:
-		delete(a.ips, ip)
-		a.mu.Unlock()
-		return true, 0
-	case tok == "" || f != nil && f.seen[sum]:
-		a.mu.Unlock() // 没带口令、或重复的错口令：不计数，也不再算哈希
-		return false, 0
+	if ok, wait, done := a.quickCheck(sum, tok == "", ip, now); done {
+		return ok, wait
 	}
+	// 慢路径排队：服务端刚重启时后台页面并发好几个请求，后面的等第一个算完，直接命中 okSum。
+	a.slow.Lock()
+	defer a.slow.Unlock()
+	if ok, wait, done := a.quickCheck(sum, false, ip, now); done {
+		return ok, wait
+	}
+	a.mu.Lock()
 	hash := a.hash
 	a.mu.Unlock()
+	good := a.verify(tok, hash) // 慢，不持 mu
 
-	good := checkAdminToken(tok, hash) // 慢，不持锁
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if good {
@@ -113,17 +114,16 @@ func (a *adminAuth) check(tok, ip string, now time.Time) (ok bool, wait time.Dur
 		delete(a.ips, ip)
 		return true, 0
 	}
-	if f = a.ips[ip]; f == nil {
+	f := a.ips[ip]
+	if f == nil {
 		f = &ipFailures{seen: map[[32]byte]bool{}}
 		a.ips[ip] = f
-	}
-	if f.seen[sum] {
-		return false, 0 // 并发的几个请求带着同一个错口令：只算一次、只记一次
 	}
 	if len(f.seen) < maxSeenTokens {
 		f.seen[sum] = true
 	}
 	f.count++
+	f.last = now
 	if f.count <= lockFreeTries {
 		log.Printf("admin auth failed from %s (%d wrong token(s))", ip, f.count)
 		return false, 0
@@ -132,6 +132,34 @@ func (a *adminAuth) check(tok, ip string, now time.Time) (ok bool, wait time.Dur
 	f.until = now.Add(d)
 	log.Printf("admin auth failed from %s (%d wrong tokens): locked out for %s", ip, f.count, d)
 	return false, d
+}
+
+// quickCheck 不算哈希能判定的情况（done = true）：锁定中、命中最近通过的口令、没带口令、重复的错口令。
+func (a *adminAuth) quickCheck(sum [32]byte, empty bool, ip string, now time.Time) (ok bool, wait time.Duration, done bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	f := a.ips[ip]
+	if f != nil && now.Sub(f.last) >= forgetAfter {
+		delete(a.ips, ip)
+		f = nil
+	}
+	switch {
+	case f != nil && now.Before(f.until):
+		return false, f.until.Sub(now), true
+	case a.okSet && subtle.ConstantTimeCompare(sum[:], a.okSum[:]) == 1:
+		delete(a.ips, ip)
+		return true, 0, true
+	case empty || f != nil && f.seen[sum]:
+		return false, 0, true // 不计数，也不再算哈希
+	}
+	return false, 0, false
+}
+
+// prune 删掉很久没再猜错的 IP（每小时维护时调用）。
+func (a *adminAuth) prune(now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	maps.DeleteFunc(a.ips, func(_ string, f *ipFailures) bool { return now.Sub(f.last) >= forgetAfter })
 }
 
 // set 换成新口令（哈希 hash）。旧口令立即失效。

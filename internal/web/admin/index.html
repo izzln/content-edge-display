@@ -393,17 +393,36 @@ function setToken(msg = "服务端 server.json 里的 admin_token，或在后台
 function logout() { saveToken(""); location.reload(); }
 // 所有管理接口都要带口令；图片（缩略图、预览）也走这里取 blob
 const authFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { "X-Admin-Token": token(), ...opts.headers } });
+// authFail 处理口令不对（401）与被锁定（429，text 是服务端说的还要等多久）：停止自动刷新、弹出口令框。
+function authFail(status, text) {
+  if (status !== 401 && status !== 429) return false;
+  const msg = status === 401 ? "口令不对，请重新输入（连续输错多次会被锁定一段时间）" : text;
+  if (!authBlocked) { authBlocked = true; toast(msg); setToken(msg); }
+  return true;
+}
 async function api(path, opts = {}) {
   const r = await authFetch(path, opts);
-  if (r.status === 401 || r.status === 429) {
-    const msg = r.status === 401 ? "口令不对，请重新输入（连续输错多次会被锁定一段时间）" : await r.text();
-    if (!authBlocked) { authBlocked = true; toast(msg); setToken(msg); }
-    throw new Error("unauthorized");
-  }
-  if (!r.ok) { const t = await r.text(); toast(t); throw new Error(t); }
+  if (!r.ok) { const t = (await r.text()).trim(); if (!authFail(r.status, t)) toast(t); throw new Error(t); }
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
 }
+// blobURL 取一张要带口令的图片，返回 object URL（用完要 URL.revokeObjectURL）；失败返回 null，quiet 时不提示。
+async function blobURL(url, quiet = false) {
+  try {
+    const r = await authFetch(url);
+    if (!r.ok) { const t = (await r.text()).trim(); if (!authFail(r.status, t) && !quiet) toast(t); return null; }
+    return URL.createObjectURL(await r.blob());
+  } catch { return null; }
+}
+// showImg 把图片接口的画面显示进对话框里的 target；对话框换内容或关闭时释放（见 modal）。
+async function showImg(target, url) {
+  const src = await blobURL(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
+  const box = $(target);
+  if (!src || !box) { if (src) URL.revokeObjectURL(src); return; }
+  revokeImgs(box);
+  box.innerHTML = `<img class="preview" data-blob src="${src}">`;
+}
+const revokeImgs = el => el.querySelectorAll("img[data-blob]").forEach(im => URL.revokeObjectURL(im.src));
 const J = body => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 // send 发一个写请求（JSON 体），成功后提示、（可选）关对话框、刷新列表；失败时 api 已提示原因。
 async function send(method, path, body, msg, { close = false } = {}) {
@@ -413,10 +432,15 @@ async function send(method, path, body, msg, { close = false } = {}) {
   refresh();
   return true;
 }
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 3500); }
+let toastTimer;
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
+}
 let modalGuard = null; // 关闭前的检查（如还有文件在上传），返回 false（或 Promise<false>）则不关
 function modal(html) {
   modalGuard = null;
+  revokeImgs($("#modal"));
   $("#modal").innerHTML = `<div class="grabber"></div>${html}`;
   $("#modal").scrollTop = 0;
   $("#overlay").classList.add("show");
@@ -424,6 +448,7 @@ function modal(html) {
 async function closeModal() {
   if (modalGuard && !(await modalGuard())) return;
   modalGuard = null;
+  revokeImgs($("#modal"));
   $("#overlay").classList.remove("show");
 }
 $("#overlay").addEventListener("click", e => { if (e.target.id === "overlay") closeModal(); });
@@ -486,7 +511,8 @@ const fmtSize = n => !n ? "0" : n >= 1 << 30 ? (n / (1 << 30)).toFixed(1) + " GB
 const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段", global: "全局" };
 
 const arr = v => Array.isArray(v) ? v : [];
-async function refresh() {
+// refresh 重新读取并重画。edits=false（定时刷新）时不动正在编辑的全局模板与时段，免得冲掉没保存的修改。
+async function refresh({ edits = true } = {}) {
   if (authBlocked) return;
   try {
     const [d, t, g, s, f, dp, i] = await Promise.all([
@@ -498,7 +524,8 @@ async function refresh() {
     infoFetchedAt = Date.now();
   } catch { return; }
   try {
-    renderDevices(); renderTemplates(); renderSchedules(); renderPackages();
+    renderDevices(); renderTemplates(); renderPackages();
+    if (edits) { $("#globalSel").innerHTML = tplOptions(global.template_id); renderSchedules(); }
   } catch (e) {
     console.error(e);
     toast("界面渲染出错: " + e.message);
@@ -702,7 +729,7 @@ function rekeyDialog(id) {
 }
 const doRekey = (id, accept) => send("POST", devPath(id) + "/rekey", { accept }, accept ? "已接受：设备一分钟内会重新注册成功" : "已忽略", { close: true });
 async function deleteDevice(id) {
-  if (!await confirmDialog(`删除设备 ${id}？`, "属性、播放内容、更新目标一并删除；设备若仍在线会用新密钥重新注册。", { ok: "删除", danger: true })) return;
+  if (!await confirmDialog(`删除设备 ${id}？`, "属性、播放内容、更新目标一并删除；设备若仍在线，会自动重新注册成一台新设备。", { ok: "删除", danger: true })) return;
   send("DELETE", devPath(id), undefined, "已删除");
 }
 
@@ -857,7 +884,7 @@ let plEpoch = 0;               // 每次用写操作的响应更新列表就加�
 let plSaveTimer = null, plSaveChain = Promise.resolve();
 let plPollTimer = null;
 let plDrag = null, plNeedsRender = false;
-const thumbCache = new Map();  // "设备/文件名" → object URL
+const thumbCache = new Map();  // "设备/文件名" → object URL（本次打开对话框期间；关闭时全部释放）
 
 const isBusy = it => it.state === "waiting" || it.state === "uploading" || it.state === "processing";
 const isLocal = it => isBusy(it) || it.state === "rejected";
@@ -948,8 +975,7 @@ function pageStrip(it) {
 // thumbURL 是缩略图接口地址；PDF 可带页码。
 const thumbURL = (name, page) => mediaURL(plDev, name) + "/thumb" +
   (page ? `?page=${page}` : "");
-const fetchThumb = url => authFetch(url)
-  .then(r => r.ok ? r.blob() : null).then(b => b && URL.createObjectURL(b)).catch(() => null);
+const fetchThumb = url => blobURL(url, true); // 视频没有 ffmpeg 时 404：不提示，显示 ▶
 
 // loadPages 逐页取缩略图（一次一页，不把服务器压垮），取到一页就更新那一格。
 async function loadPages(it) {
@@ -1134,7 +1160,8 @@ async function uploadOne(it) {
   xhr.onload = () => {
     if (xhr.status !== 200) {
       it.state = "rejected";
-      it.error = xhr.status === 401 ? "Token 无效，请重新设置后再传" : (xhr.responseText || "HTTP " + xhr.status).trim();
+      const t = (xhr.responseText || "HTTP " + xhr.status).trim();
+      it.error = authFail(xhr.status, t) ? "口令不对或已被锁定，重新输入口令后再传" : t;
       return done();
     }
     let r;
@@ -1232,7 +1259,11 @@ async function plCloseGuard() {
   busy.forEach(abortUpload);
   if (plSaveTimer) saveOrder(plDev, readyNames());
   clearTimeout(plPollTimer);
-  for (const it of plItems) if (it.thumb && !thumbCache.has(plDev + "/" + it.name)) URL.revokeObjectURL(it.thumb);
+  // 释放这次打开对话框取过的所有缩略图（重新打开时再取，浏览器有 HTTP 缓存）
+  const urls = new Set(thumbCache.values());
+  for (const it of plItems) [it.thumb, ...(it.pageThumbs || [])].forEach(u => u && urls.add(u));
+  urls.forEach(u => URL.revokeObjectURL(u));
+  thumbCache.clear();
   plDev = ""; plItems = [];
   setTimeout(refresh, 300); // 让设备列表的"当前显示"状态跟上
   return true;
@@ -1412,18 +1443,14 @@ async function previewDevice(id) {
   const item = sel.value ? "&item=" + encodeURIComponent(sel.value) : "";
   await showPreview(`/api/v1/admin/templates/${tid}/preview?device=${encodeURIComponent(id)}${item}`, "#previewBox");
 }
-async function showPreview(url, target) {
-  const r = await authFetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
-  if (!r.ok) { toast(await r.text()); return; }
-  const blob = await r.blob();
-  const html = `<img class="preview" src="${URL.createObjectURL(blob)}">`;
-  if (target) $(target).innerHTML = html; else modal(`<h2>预览</h2>${html}<div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+function showPreview(url, target) {
+  if (!target) modal(`<h2>预览</h2><div id="pvModal"></div><div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+  return showImg(target || "#pvModal", url);
 }
 
 // ================= 模板 / 全局 / 时段 =================
 const REGION_LABEL = { attribute: "属性", text: "文字", media: "播放内容" };
 function renderTemplates() {
-  $("#globalSel").innerHTML = tplOptions(global.template_id);
   const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
   const rows = templates.map(t => `<tr>
     <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒${t.background_image ? ` · 底图${t.background_image_mirror ? "（含对调版）" : ""}` : ""}</div>
@@ -1467,17 +1494,13 @@ function backgroundDialog(id) {
       <div id="bgBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
     <p class="muted">没有对调版时，对调的设备用常规版原图（不翻转）。</p>
     <div class="actions"><button onclick="closeModal()">关闭</button></div>`);
-  files.forEach(async (f, i) => {
-    if (!f) return;
-    const r = await authFetch("/api/v1/admin/backgrounds/" + f);
-    if (r.ok && $("#bgBox" + i)) $("#bgBox" + i).innerHTML = `<img class="preview" src="${URL.createObjectURL(await r.blob())}">`;
-  });
+  files.forEach((f, i) => f && showImg("#bgBox" + i, "/api/v1/admin/backgrounds/" + f));
 }
 async function downloadGuide(id, mirror) {
-  const r = await authFetch(`/api/v1/admin/templates/${encodeURIComponent(id)}/guide${mirror ? "?mirror=1" : ""}`);
-  if (!r.ok) { toast(await r.text()); return; }
+  const src = await blobURL(`/api/v1/admin/templates/${encodeURIComponent(id)}/guide${mirror ? "?mirror=1" : ""}`);
+  if (!src) return;
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(await r.blob());
+  a.href = src;
   const t = tplById(id);
   a.download = `background-guide-${t.w}x${t.h}${mirror ? "-mirrored" : ""}.png`;
   document.body.append(a); a.click(); a.remove();
@@ -1679,7 +1702,7 @@ async function doRollout(version, cancel = false) {
 }
 
 refresh();
-setInterval(() => { if (!authBlocked && !$("#overlay").classList.contains("show")) refresh(); }, 10000);
+setInterval(() => { if (!document.hidden && !$("#overlay").classList.contains("show")) refresh({ edits: false }); }, 10000);
 if (!token()) setToken();
 </script>
 </body>

@@ -45,6 +45,7 @@ func TestExtractStripsTopDirAndKeepsExecBit(t *testing.T) {
 		entry{name: "display-agent-1.2.0/", typ: tar.TypeDir, mode: 0o755},
 		entry{name: "display-agent-1.2.0/VERSION", body: "1.2.0\n", mode: 0o644},
 		entry{name: "display-agent-1.2.0/update.sh", body: "#!/bin/sh\n", mode: 0o755},
+		entry{name: "display-agent-1.2.0/install-agent.sh", body: "#!/bin/sh\n", mode: 0o755},
 		entry{name: "display-agent-1.2.0/display-agent", body: "bin", mode: 0o755},
 		entry{name: "display-agent-1.2.0/sub/x.txt", body: "x", mode: 0o644},
 		entry{name: "display-agent-1.2.0/../../escape.txt", body: "nope", mode: 0o644}, // 想跳出解包目录
@@ -90,5 +91,22 @@ func TestCheckRequiresFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, Binary), nil, 0o755)
 	if _, err := Check(dir); err == nil || !strings.Contains(err.Error(), UpdateScript) {
 		t.Fatalf("缺 update.sh 应报错：%v", err)
+	}
+	os.WriteFile(filepath.Join(dir, UpdateScript), nil, 0o755)
+	if _, err := Check(dir); err == nil || !strings.Contains(err.Error(), InstallScript) {
+		t.Fatalf("缺 install-agent.sh 应报错（最新的包也是装机包）：%v", err)
+	}
+}
+
+// 压缩炸弹：声明的解包总大小超过上限，读到头部就拒绝，不往磁盘写。
+func TestExtractRejectsHugePackage(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	tw.WriteHeader(&tar.Header{Name: "p/huge", Mode: 0o644, Size: MaxExtracted + 1, Typeflag: tar.TypeReg})
+	tw.Flush()
+	gz.Close()
+	if err := Extract(&buf, t.TempDir()); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("超过解包上限应拒绝：%v", err)
 	}
 }

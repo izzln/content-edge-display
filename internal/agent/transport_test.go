@@ -116,6 +116,27 @@ func TestRunKeepsFeedingWatchdogWhileServerIsDown(t *testing.T) {
 	}
 }
 
+// 连不上服务端、从没注册上时，现场自检（check-display.sh）照样要读到本地播放状态。
+func TestStatusWrittenWhileServerIsDown(t *testing.T) {
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := l.Addr().String()
+	l.Close()
+	cfg := &Config{ServerURL: "https://" + addr, TLSFingerprint: strings.Repeat("0", 64), EnrollToken: "t", CacheDir: t.TempDir(), Player: "null"}
+	if err := cfg.fillDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	a := New(cfg, player.NewNull())
+	a.sched.heartbeat.Store(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := a.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.CacheDir, "status.json")); err != nil {
+		t.Fatalf("没连上服务端也应写播放状态：%v", err)
+	}
+}
+
 // 失败后指数退避，但不超过上限；密钥冲突时最多一分钟重试一次（等运营方在后台点接受）。
 func TestRetryDelay(t *testing.T) {
 	a := &Agent{sched: newSchedule()}

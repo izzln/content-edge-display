@@ -542,3 +542,23 @@ func TestNewRequiresTokens(t *testing.T) {
 		}
 	}
 }
+
+// 认证失败的日志节流表以请求头里的设备编号为键，谁都能随便编：表有上限，满了先清掉一分钟以前的。
+func TestAuthFailureLogBounded(t *testing.T) {
+	s, _ := newTestServer(t)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	for i := range maxAuthLogged + 50 {
+		s.logAuthFailure(fmt.Sprintf("dev-%d|bad", i))
+	}
+	if len(s.authLogged) != maxAuthLogged {
+		t.Fatalf("表应封顶在 %d：%d", maxAuthLogged, len(s.authLogged))
+	}
+	if s.logAuthFailure("dev-0|bad") {
+		t.Fatal("同一设备同一原因一分钟内只记一次")
+	}
+	now = now.Add(time.Minute)
+	if !s.logAuthFailure("dev-new|bad") || len(s.authLogged) != 1 {
+		t.Fatalf("一分钟后应清掉旧记录再记新的：%d", len(s.authLogged))
+	}
+}

@@ -342,6 +342,7 @@ func (s *Server) runCache(stop <-chan struct{}) {
 		s.reconcileCache()
 		s.gcBackgrounds()
 		s.gcThumbs()
+		s.auth.prune(time.Now())
 		select {
 		case <-stop:
 			return
