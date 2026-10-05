@@ -52,8 +52,15 @@ systemctl daemon-reload && systemctl enable --now display-server
   display-server      二进制
   server.json         配置
   fonts/              渲染用字体
-  data/               服务端状态：state.json、cache.json、packages/（程序包）、deps/（离线依赖包）、rendered/、incoming/（待转码原片）、tls/（证书）
-  data/media/<设备ID>/  该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）
+  data/               服务端状态（首次启动自动创建）：
+    state.json          设备、模板、时段、程序包、设备访问、管理口令哈希
+    cache.json          文件缓存区索引
+    media/<设备ID>/     该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）；media/.store/ 是文件缓存区
+    packages/ deps/     设备端程序包、离线依赖包
+    backgrounds/        模板底图
+    thumbs/ rendered/   缩略图与视频抽帧、渲染结果（可重新生成）
+    incoming/           上传与处理的暂存区（启动时清空）
+    tls/                服务端证书与私钥（必须备份）
 ```
 
 > **"明明装了 ffmpeg，后台却说不可用"**：服务由 systemd 以 `display` 用户启动，PATH 只有
@@ -79,7 +86,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 丢了重新生成指纹就变了，已装设备全部拒绝连接。
 
 管理后台：浏览器打开 `https://<服务器>:9001/admin`，输入 `admin_token`（之后可在后台「程序更新」页修改；
-忘了口令就把 server.json 的 `admin_token` 改成新值并重启服务端）。浏览器会提示证书不受信任
+忘了口令就把 server.json 的 `admin_token` 改成新值——例如 `openssl rand -base64 9` 生成——并重启服务端）。浏览器会提示证书不受信任
 （自签证书），选"高级 → 继续访问"；或把 `data/tls/server.crt` 导入管理电脑并设为信任。
 
 ## 新设备装机
