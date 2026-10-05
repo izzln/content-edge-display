@@ -13,13 +13,12 @@ func depsBundle(codename string, files ...testutil.File) []byte {
 	return testutil.TarGz("display-deps", append([]testutil.File{{Name: "CODENAME", Body: codename + "\n"}}, files...)...)
 }
 
-// 离线依赖包与程序包从同一个入口上传，按内容区分；装机脚本经 HTTP 端口的 /apt/<代号>/ 当作 apt 仓库使用。
+// 离线依赖包与程序包从同一个入口上传，按内容区分；设备经 HTTPS 端口的 /apt/<代号>/ 当作 apt 仓库使用。
 func TestDepsRepo(t *testing.T) {
 	s, h := newAdminTestServer(t)
-	boot := s.BootstrapHandler()
 	get := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		boot.ServeHTTP(w, httptest.NewRequest("GET", "http://10.0.0.5:9000"+path, nil))
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 		return w
 	}
 	index := []testutil.File{{Name: "Packages", Body: "Package: libfoo\n"}, {Name: "Release", Body: "Origin: test\n"}}
@@ -73,8 +72,16 @@ func TestDepsRepo(t *testing.T) {
 		t.Fatalf("删除后应 404：%d", w.Code)
 	}
 
-	// 一键安装脚本把仓库地址交给 install-agent.sh
-	if w := get("/install.sh"); !strings.Contains(w.Body.String(), `DEPS_URL="$BOOTSTRAP/apt"`) {
-		t.Fatalf("install.sh 应带上 DEPS_URL：\n%s", w.Body.String())
+	// HTTP 装机端口上没有仓库（跳到 HTTPS）；一键安装脚本带上证书，apt 只信任它
+	boot := s.BootstrapHandler()
+	w := httptest.NewRecorder()
+	boot.ServeHTTP(w, httptest.NewRequest("GET", "http://10.0.0.5:9000/apt/bookworm/Packages", nil))
+	if w.Code != http.StatusMovedPermanently {
+		t.Fatalf("HTTP 端口不提供仓库：%d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	boot.ServeHTTP(w, httptest.NewRequest("GET", "http://10.0.0.5:9000/install.sh", nil))
+	if script := w.Body.String(); !strings.Contains(script, "-----BEGIN CERTIFICATE-----") || !strings.Contains(script, `SERVER_CERT="$tmp/server.crt"`) {
+		t.Fatalf("install.sh 应带上服务端证书：\n%s", script)
 	}
 }

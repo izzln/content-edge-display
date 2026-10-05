@@ -1,15 +1,15 @@
 #!/bin/sh
 # 打设备端离线依赖包：deploy/agent/deps.txt 里的软件包连同全部下层依赖（armhf），外加 apt 索引。
-# 在后台「程序更新」页上传一次，之后一键装机从服务端局域网取依赖，不访问外网、不跑境外源的 apt-get update。
+# 在后台「程序更新」页上传一次，之后装机与 OTA 新增的依赖都从服务端局域网安装，不访问外网、不跑境外源的 apt-get update。
 #
-#   scripts/build-deps.sh [代号]      # 默认 bookworm；须与设备 Armbian 的 VERSION_CODENAME 一致（/etc/os-release），
-#                                     # Debian 系如 bookworm、trixie，Ubuntu 系如 noble
+#   scripts/build-deps.sh [代号]      # 默认 trixie；须与设备 Armbian 的 VERSION_CODENAME 一致（/etc/os-release），
+#                                     # Debian 系如 trixie、bookworm，Ubuntu 系如 noble
 #   → bin/display-deps-<代号>-armhf.tar.gz
 #
 # 需要 docker，且能运行 arm 容器（qemu binfmt：apt install qemu-user-static，或
 # docker run --privileged --rm tonistiigi/binfmt --install arm）。
 set -eu
-CODENAME="${1:-bookworm}"
+CODENAME="${1:-trixie}"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NAME="display-deps-$CODENAME"
 STAGE="$ROOT/bin/stage-deps"

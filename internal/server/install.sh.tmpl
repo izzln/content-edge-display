@@ -6,7 +6,7 @@
 # 可选：HDMI_MODE=1440x900@60（默认）、HDMI_FORCE=e（EDID 里没有该模式时强制）、CMA=256M（默认按内存大小定）。
 #
 # 做的事：凭注册口令从服务端下载最新的设备程序包 → 执行包内 install-agent.sh
-# （安装依赖——服务端有离线依赖包时从局域网装——、安装程序、写配置、设置显示参数、开机自启）→ 重启。
+# （写配置、安装程序与依赖——服务端有离线依赖包时从局域网装——、设置显示参数、开机自启）→ 重启。
 set -eu
 
 # 整个脚本包在函数里、读完再执行：经管道运行时脚本本身就是 stdin，不能让中途的命令读走后半截。
@@ -24,6 +24,15 @@ main() {
 
 	tmp=$(mktemp -d)
 	trap 'rm -rf "$tmp"' EXIT
+
+	# 设备没有 RTC：时钟没被 NTP 校准时按服务端时间校一下，否则 apt 会以"证书或软件源索引尚未生效"拒绝安装
+	if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" != yes ]; then
+		now=$(curl -fsSI "$BOOTSTRAP/install.sh" 2>/dev/null | sed -n 's/^[Dd]ate: *//p' | tr -d '\r')
+		[ -n "$now" ] && date -s "$now" >/dev/null 2>&1 && echo "== 系统时间按服务端校准：$(date)"
+	fi
+
+	cat > "$tmp/server.crt" <<'CERT'
+{{.Cert}}CERT
 	echo "== 下载设备程序包"
 	code=$(curl -sS -o "$tmp/agent.tar.gz" -w '%{http_code}' -H "X-Enroll-Token: $ENROLL_TOKEN" "$BOOTSTRAP/bootstrap/agent.tar.gz") || code=000
 	case "$code" in
@@ -35,7 +44,7 @@ main() {
 	esac
 	tar -xzf "$tmp/agent.tar.gz" -C "$tmp"
 	cd "$tmp"/display-agent-*/
-	SERVER_URL="$SERVER_URL" TLS_FINGERPRINT="$TLS_FINGERPRINT" ENROLL_TOKEN="$ENROLL_TOKEN" DEPS_URL="$BOOTSTRAP/apt" \
+	SERVER_URL="$SERVER_URL" TLS_FINGERPRINT="$TLS_FINGERPRINT" ENROLL_TOKEN="$ENROLL_TOKEN" SERVER_CERT="$tmp/server.crt" \
 		sh ./install-agent.sh </dev/null
 }
 main

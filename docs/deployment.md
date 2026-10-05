@@ -33,13 +33,13 @@ make package
 之后装机从服务端局域网安装依赖，又快又不需要外网（见 3.3）：
 
 ```sh
-make deps                  # 默认 bookworm；须与设备 Armbian 的 Debian 版本一致：make deps DEBIAN=trixie
+make deps                  # 默认 trixie；须与设备 Armbian 的 Debian 版本一致，如 make deps DEBIAN=bookworm
 # → bin/display-deps-<代号>-armhf.tar.gz
 ```
 
 需要 docker 和能跑 arm 容器的 qemu（`apt install qemu-user-static`）。依赖清单只有一份
 （`deploy/agent/deps.txt`）；它变了或想用上 Debian 的安全更新时重新打包上传即可。
-推送 `v*` 标签时 CI 也会打 bookworm、trixie、noble 三个版本附到 Release（手动运行 CI 也会打）。
+推送 `v*` 标签时 CI 也会打 trixie、bookworm、noble 三个版本附到 Release（手动运行 CI 也会打）。
 
 ### 1.2 从 GitHub 下载（本机没有 Go 环境时）
 
@@ -159,9 +159,9 @@ make tokens     # 查看当前口令；文件不存在时生成
 ### 3.1 烧录 Armbian
 
 1. 从 [Armbian 官网](https://www.armbian.com/orange-pi-one/) 下载 Orange Pi One 的
-   **Bookworm CLI（minimal 或 standard）** 镜像；
+   **Trixie CLI（minimal 或 standard）** 镜像（Debian 13；离线依赖包默认也打 trixie，二者要一致）；
 2. 用 balenaEtcher 写入 TF 卡（建议**工业级/高耐久** TF 卡，≥16GB）；
-3. 首次上电走初始化向导（设 root 密码，普通用户可跳过），配好网络；
+3. 首次上电走初始化向导（设 root 密码，普通用户可跳过），配好网络（批量装机可跳过这一步，见 4.2）；
 4. 想用主机名当设备编号（如 `scr-0017`，见 4.1）就在这时 `hostnamectl set-hostname scr-0017`，不设也行。
 
 ### 3.2 固定 HDMI 输出为 1440×900 并禁用息屏
@@ -198,9 +198,9 @@ make tokens     # 查看当前口令；文件不存在时生成
 curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 ```
 
-它会：凭注册口令（`server.json` 的 `enroll_token`）下载程序包 → 装 GStreamer 依赖（见下）→ 按 OTA 布局安装 →
-写 `/etc/display-agent/agent.json`（服务端 HTTPS 地址与证书指纹已由服务端填好）→ 写 HDMI/CMA 启动参数 →
-`systemctl enable display-agent` → 10 秒后**自动重启**。重启后设备自动注册，1~2 分钟内出现在后台设备列表（在线）。
+它会：设备时钟没校准时按服务端时间校一下 → 凭注册口令（`server.json` 的 `enroll_token`）下载程序包 →
+写 `/etc/display-agent/agent.json` 与服务端证书（地址、指纹、证书都由服务端填好）→ 按 OTA 布局安装、装 GStreamer 依赖（见下）→
+写 HDMI/CMA 启动参数 → `systemctl enable display-agent` → 10 秒后**自动重启**。重启后设备自动注册，1~2 分钟内出现在后台设备列表（在线）。
 
 可选参数写在 `ENROLL_TOKEN=...` 旁边，例如 `... | ENROLL_TOKEN=xxxx HDMI_FORCE=e sh`：
 
@@ -213,21 +213,22 @@ curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 
 出错时的提示：`注册口令不对`、`服务端还没有上传设备程序包`、`连不上服务端`（查网线、IP、9000 端口防火墙）。
 
-**依赖怎么装**：服务端有与设备 Debian 版本代号（`/etc/os-release` 的 `VERSION_CODENAME`）一致的离线依赖包时，
-只从服务端的 `http://<服务器>:9000/apt/<代号>/` 安装（日志：`从服务端离线依赖仓库安装`），局域网几秒下完，
-不访问外网，也不动系统的 apt 源配置；没有对应版本、或从服务端装失败时，自动退回在线 `apt-get`。
-下载的 `.deb` 装完即删，不占 SD 卡。
+**依赖怎么装**（程序包里的 `deps.sh`，首次安装与之后每次 OTA 都执行，见 5.3）：服务端有与设备 Debian 版本代号
+（`/etc/os-release` 的 `VERSION_CODENAME`）一致的离线依赖包时，只从服务端的 `https://<服务器>:9001/apt/<代号>/`
+安装（日志：`从服务端离线依赖仓库安装`），apt 只信任服务端证书，局域网几秒下完，不访问外网，也不动系统的 apt 源配置；
+没有对应版本、或从服务端装失败时，自动退回在线 `apt-get`。下载的 `.deb` 装完即删，不占 SD 卡。
 
-只有 9000 端口是明文 HTTP，而且只提供这个脚本、程序包（凭注册口令）与离线依赖仓库（公开的 Debian 软件包）；
-设备装好后一律走 9001 的 HTTPS，并固定服务端证书指纹。脚本本身不含任何口令。
+只有 9000 端口是明文 HTTP，而且只提供这个脚本和程序包（凭注册口令）；设备装好后一律走 9001 的 HTTPS，
+并固定服务端证书指纹。脚本本身不含任何口令。
 
 **连不到 9000 端口时手工安装**：把程序包拷到设备上解开，在包目录里以 root 运行
 
 ```sh
-SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹> ENROLL_TOKEN=注册口令 ./install-agent.sh
+SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹> ENROLL_TOKEN=注册口令 \
+  SERVER_CERT=<从服务端 data/tls/ 拷来的 server.crt> ./install-agent.sh
 ```
 
-（能访问 9000 端口、只是不想走一键脚本时，加上 `DEPS_URL=http://<服务器>:9000/apt` 也能用离线依赖包。）
+（不给 `SERVER_CERT` 也能装，但依赖只能在线安装，之后 OTA 新增的依赖也一样。）
 
 `install-agent.sh` 的行为要知道：
 
@@ -293,8 +294,9 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 
 ## 4. 设备端：批量部署
 
-推荐每台都按第 3 节走：刷公版 Armbian → 一键安装命令。命令一样，装机人员只需知道注册口令；
-首次上电自动获得唯一编号并注册。数量很大时也可以做母镜像（4.2），省掉每台装依赖的时间。
+台数少时每台按第 3 节走：刷公版 Armbian → 一键安装命令。台数多时做一个**插卡即装镜像**（4.2）：
+所有 TF 卡烧同一个镜像，插卡上电就自动装机、注册，不用接键盘、不用登录。两种方式装出来完全一样，
+首次上电都自动获得唯一编号。
 
 ### 4.1 设备编号规则
 
@@ -338,7 +340,7 @@ V4L2 Request API 驱动。GStreamer 的 v4l2codecs 插件（`gstreamer1.0-plugin
 #### 设备报"在服务端登记的是另一把密钥"
 
 说明设备手上的密钥与服务端记录的不一样，通常是 `/var/lib/display-agent/identity.json` 丢了：
-重装系统、换了 SD 卡、手工删过这个目录、或者母镜像清理后没在后台删掉样机。设备会继续播放
+重装系统、换了 SD 卡、手工删过这个目录。设备会继续播放
 本地缓存，同时把新密钥报给服务端。
 
 处理：管理后台该设备上会出现红色提示 →【核对并处理】→ 对照硬件序列号 / MAC，以及设备日志里
@@ -356,40 +358,34 @@ agent: new identity device_id=scr-0017 key=d9e2ca41 (…)                       
 代理已做的防护：身份文件写入后 fsync（防断电丢失）；文件损坏时另存为 `identity.json.bad-<时间>`
 留作证据而不是悄悄覆盖；同一缓存目录只允许一个代理进程（服务在跑时再手工启动一个会直接报错退出）。
 
-### 4.2 制作母镜像（可选）
+### 4.2 插卡即装镜像
 
-先按第 3 节把一台样机完整装好并验证通过（服务已 enable），然后清理成"出厂状态"：
-
-```sh
-systemctl stop display-agent
-rm -rf /var/lib/display-agent/*                                  # 身份、缓存内容、记住的服务端地址等，首启重建
-rm -f /usr/local/lib/display-agent/pending-verify
-rm -f /etc/ssh/ssh_host_*                                        # 首启重新生成
-journalctl --rotate && journalctl --vacuum-time=1s
-systemctl enable armbian-resize-filesystem 2>/dev/null || true   # 克隆机首启自动扩展分区
-apt-get clean
-poweroff
-```
-
-然后在管理后台**删除样机注册的那台设备**（它的密钥已随 identity.json 删除）。
-
-母镜像里的 `agent.json` 带着注册口令和服务端证书指纹：换了 `enroll_token` 或服务端证书后要重做母镜像
-（或烧完后重跑一次装机命令）。镜像里的程序版本旧了没关系，设备上线后按后台的更新目标自动 OTA。
-
-### 4.3 读出并收缩镜像（开发机/Linux）
+服务端包里的 `make-image.sh` 往**公版 Armbian 镜像**里加一个首次开机服务，做成装机镜像。在 Linux 上以 root 运行
+（Orange Pi 的 Armbian 镜像只有一个 ext4 分区，要挂载它，Windows/macOS 改不了；服务器本身就可以）：
 
 ```sh
-sudo dd if=/dev/sdX of=display-golden.raw bs=4M status=progress
-sudo pishrink.sh -z display-golden.raw display-golden.img   # https://github.com/Drewsif/PiShrink
+BOOTSTRAP=http://<服务器>:9000 ENROLL_TOKEN=<注册口令> ROOT_PASSWORD=<设备 root 密码> \
+  ./make-image.sh Armbian_<版本>_Orangepione_trixie_current_<内核>_minimal.img.xz
+# → Armbian_..._minimal-display.img：用 balenaEtcher 烧到每张 TF 卡
 ```
 
-### 4.4 批量烧录与上线
+可选 `HDMI_MODE`、`HDMI_FORCE`、`CMA`，含义同一键装机（3.3）。它对镜像只做三件事：
 
-1. 逐台一键安装（第 3 节）；或用 balenaEtcher 烧 `display-golden.img.gz` 后直接上电；
-2. 接屏、接网、上电；
-3. 1~2 分钟内设备出现在管理后台设备列表（在线）；
-4. 后台设属性（如 `room=302`）、在【内容】里上传要播的图片/视频 → 屏幕在一个轮询周期内更新；
-5. 点【测试】确认是哪块屏。
+- 设好 root 密码（现场救援控制台登录用），并跳过 Armbian 的首次登录向导——向导会在控制台自动登录 root、
+  等人输入密码和用户名，无人值守时会一直卡住；它的自动登录也一并关掉；
+- 写入 `display-firstboot` 服务：首次开机等网络就绪后执行一键装机，进度同时显示在 HDMI 屏幕上和
+  `journalctl -u display-firstboot` 里；连不上服务端、口令不对等失败时每 30 秒重试；
+- 装机成功后删除这个服务与镜像里带的注册口令文件，然后重启进入播放。
+
+上线流程：插卡 → 接屏、接网 → 上电 → 约 5~10 分钟后（服务端已上传离线依赖包时；否则取决于外网速度）
+设备出现在后台设备列表 → 设属性（如 `room=302`）、在【内容】里上传要播的内容 → 点【测试】确认是哪块屏。
+
+注意：
+
+- 镜像里带着注册口令和 root 密码的哈希，**当作机密保管**；换了 `enroll_token` 要重做镜像；
+- 镜像不含程序本身，装的永远是服务端上最新上传的程序包，程序更新后不用重做镜像；
+- 设备 Debian 版本由所用的 Armbian 镜像决定，离线依赖包要与之一致（文件名里的 `trixie`/`bookworm`）；
+- 首次开机装机在样机上确认一遍再批量烧录（不同 Armbian 版本的首次启动流程有过变化）。
 
 ## 5. 日常运维（管理后台）
 
@@ -493,8 +489,11 @@ make package        # 版本号取自 git describe，也可 make package VERSION
 **以 root 执行包内 `update.sh`**（更新 systemd 单元、固定路径的回滚脚本等）→ 成功后 `previous`/`current`
 符号链接原子切换 → 进程退出由 systemd 拉起新版本 → 首个心跳成功即确认，并清掉更早的版本目录。
 
-- `update.sh` 失败（非零退出或超过 2 分钟）：不切换，继续跑旧版本；失败原因随心跳上报，后台设备列表里红字
+- `update.sh` 失败（非零退出或超过 15 分钟）：不切换，继续跑旧版本；失败原因随心跳上报，后台设备列表里红字
   "程序更新失败"（鼠标悬停看详情）。5 分钟后自动重试，修好的包重新上传下发即可。
+- **新版本需要新的软件包**：加进 `deploy/agent/deps.txt`，重新 `make deps` 并上传离线依赖包，再上传、下发程序包。
+  `update.sh` 执行时先从服务端的离线依赖包装上新增的软件包（设备能上外网时也可在线安装），装不上就失败、不切换，
+  后台显示"缺少依赖 …"。重新打的依赖包里有 Debian 的安全更新时，下一次 OTA 也会顺带升级已装的软件包。
 - 新版本连续 3 次启动失败：`rollback-check.sh`（systemd `ExecStartPre`，用系统 sh 执行、不依赖新程序）
   把 `current` 切回 `previous`——**程序和脚本一起回退**。
 
@@ -515,12 +514,13 @@ check-display.sh        -> current/check-display.sh
 
 | | 内容 |
 |---|---|
-| 程序包 OTA 即可 | 播放逻辑（含随代理分发的播放进程 `gstplayer.py`）、清单新字段的解析、下载与缓存策略、心跳内容；以及 `update.sh` 能做的系统调整：systemd 单元、启动参数、配置文件、换播放器所需的改动 |
+| 程序包 OTA 即可 | 播放逻辑（含随代理分发的播放进程 `gstplayer.py`）、清单新字段的解析、下载与缓存策略、心跳内容；新增或升级软件包（`deps.txt` + 离线依赖包）；以及 `update.sh` 能做的系统调整：systemd 单元、启动参数、配置文件、换播放器所需的改动 |
 | 还需同时更新服务端 | 清单生成、模板渲染、管理后台界面（服务端在机房，更新它不用去现场） |
-| **OTA 做不到** | 新增系统软件包（`update.sh` 约定离线运行、不调 `apt`；新依赖只对之后装机的设备生效，已装设备要重装）；把设备从本服务端迁走（`server_url`、证书指纹写在设备的 `agent.json` 里——`update.sh` 技术上能改，但改错了设备就再也连不回来） |
+| **OTA 做不到** | 换 Armbian 的 Debian 大版本、换内核（要重刷）；把设备从本服务端迁走（`server_url`、证书指纹写在设备的 `agent.json` 里——`update.sh` 技术上能改，但改错了设备就再也连不回来） |
 
-`update.sh` 的约定：幂等（可重复执行）；离线可运行；对版本目录以外的改动要与上一个版本兼容——
-回滚只切回旧版本目录，**不会撤销** `update.sh` 做过的系统改动。新增设备端配置项时仍要让"缺省值即可用"。
+`update.sh` 的约定：幂等（可重复执行）；软件包只经 `deps.sh` 安装（优先离线依赖包，不依赖外网）；对版本目录以外的改动
+要与上一个版本兼容——回滚只切回旧版本目录，**不会撤销** `update.sh` 做过的系统改动（包括装上的软件包）。
+新增设备端配置项时仍要让"缺省值即可用"。
 
 **播放能力现状**：模板媒体区里图文混排、视频播完自动切下一条、列表循环都已实测可用。
 

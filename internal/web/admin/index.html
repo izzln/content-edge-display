@@ -324,7 +324,7 @@
         <button class="primary" onclick="uploadPackage()">上传</button>
       </div>
       <span class="muted">程序包：<code>make package</code> 产出的 <code>display-agent-&lt;版本&gt;-armv7.tar.gz</code>，版本号从包里读取，传错文件会被当场拒绝。
-        离线依赖包：<code>make deps</code> 产出的 <code>display-deps-&lt;代号&gt;-armhf.tar.gz</code>，上传一次，之后装机从这里装 GStreamer 等依赖、不访问外网。</span>
+        离线依赖包：<code>make deps</code> 产出的 <code>display-deps-&lt;代号&gt;-armhf.tar.gz</code>，上传一次，之后装机与 OTA 新增的依赖都从这里装、不访问外网。</span>
     </div>
     <table id="pkgTable" class="cards"></table>
     <h2 class="sec">离线依赖包 <span class="muted">设备的 Debian 版本代号（/etc/os-release）与之一致时使用，否则装机时在线安装</span></h2>

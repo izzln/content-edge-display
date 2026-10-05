@@ -20,8 +20,8 @@ import (
 var ErrRestartForUpdate = errors.New("agent: restart required to apply update")
 
 const (
-	updateRetryInterval = 5 * time.Minute // 更新失败后隔多久再试（不必每次轮询都重下坏包）
-	updateScriptTimeout = 2 * time.Minute // 包内 update.sh 的最长运行时间
+	updateRetryInterval = 5 * time.Minute  // 更新失败后隔多久再试（不必每次轮询都重下坏包）
+	updateScriptTimeout = 15 * time.Minute // 包内 update.sh 的最长运行时间（可能要安装新增的依赖，H3 上解包慢）
 )
 
 // installLayout 是 OTA 安装布局的根目录（由 install-agent.sh 建立）：

@@ -16,8 +16,9 @@ import (
 )
 
 // 离线依赖包（scripts/build-deps.sh 产出的 display-deps-<代号>-armhf.tar.gz）：设备播放所需的 Debian 软件包
-// 连同全部下层依赖，外加 apt 索引。后台与程序包从同一个入口上传，解到 data/deps/<代号>/；装机脚本把 HTTP 端口的
-// /apt/<代号>/ 当作 apt 仓库，从局域网安装，不访问外网。里面都是公开的 Debian 软件包，不需要口令。
+// 连同全部下层依赖，外加 apt 索引。后台与程序包从同一个入口上传，解到 data/deps/<代号>/；设备的 deps.sh（首次安装
+// 与每次 OTA）把 HTTPS 端口的 /apt/<代号>/ 当作 apt 仓库，只信任服务端证书，从局域网安装，不访问外网。
+// 里面都是公开的 Debian 软件包，不需要口令。
 
 // depsCodenameFile 是依赖包里标明 Debian 版本代号的文件，也是区分依赖包与程序包的标志。
 const depsCodenameFile = "CODENAME"
@@ -118,8 +119,8 @@ func (s *Server) handleDeleteDeps(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleApt 在 HTTP 端口提供 /apt/<代号>/<文件>。apt 的平铺仓库会请求 /apt/<代号>/./<文件>，
-// 而 ServeMux 会把带 . 的路径重定向，所以它不经路由、在 BootstrapHandler 里直接处理。
+// handleApt 提供 /apt/<代号>/<文件>。apt 的平铺仓库会请求 /apt/<代号>/./<文件>，
+// 而 ServeMux 会把带 . 的路径重定向，所以它不经路由、在 Handler 里直接处理。
 func (s *Server) handleApt(w http.ResponseWriter, r *http.Request) {
 	codename, file, ok := strings.Cut(strings.TrimPrefix(path.Clean(r.URL.Path), "/apt/"), "/")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead || !ok ||

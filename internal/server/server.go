@@ -180,7 +180,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /render/{device}/{file}", s.serveDeviceFile(func(dev string, _ *http.Request) string { return filepath.Join(s.renderedDir(), dev) }))
 	mux.HandleFunc("GET /packages/{file}", s.serveDeviceFile(func(string, *http.Request) string { return s.packagesDir() }))
 	s.registerAdmin(mux)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/apt/") {
+			s.handleApt(w, r) // 离线依赖仓库（deps.go），不经 ServeMux
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // tokenOK 常量时间比较口令。

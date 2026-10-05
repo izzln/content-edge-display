@@ -44,11 +44,12 @@ bin/                  构建产物（gitignore）
 make package     # 需 Go ≥ 1.24；首次运行生成两个口令（.secrets/tokens.env，勿提交）
 # → bin/display-server-<版本>-<架构>.tar.gz   服务端：解开后按包内 INSTALL.md 安装
 # → bin/display-agent-<版本>-armv7.tar.gz     设备端程序包：在后台「程序更新」页上传，装机与 OTA 都用它
-make deps        # 可选（需 docker + qemu）：离线依赖包，后台上传一次，装机从局域网装 GStreamer 等依赖
+make deps        # 可选（需 docker + qemu）：离线依赖包，后台上传一次，装机与 OTA 从局域网装 GStreamer 等依赖
 # → bin/display-deps-<代号>-armhf.tar.gz
 ```
 
-服务端装好后打开 `https://<服务器>:9001/admin`；新设备刷公版 Armbian 后运行后台「程序更新」页给出的一键装机命令。
+服务端装好后打开 `https://<服务器>:9001/admin`；新设备刷公版 Armbian 后运行后台「程序更新」页给出的一键装机命令，
+批量时用服务端包里的 `make-image.sh` 做插卡即装镜像。
 完整步骤见 [docs/deployment.md](docs/deployment.md)。本机没有 Go 时可从 GitHub Actions 产物或 Release 下载两个包
 （其中的口令是占位值，需自行生成，见 deployment.md 2.1）。
 

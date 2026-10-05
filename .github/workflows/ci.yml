@@ -91,7 +91,7 @@ jobs:
       contents: write   # 附到 Release
     strategy:
       matrix:
-        codename: [bookworm, trixie, noble]   # Armbian 的 Debian/Ubuntu 版本
+        codename: [trixie, bookworm, noble]   # Armbian 的 Debian/Ubuntu 版本
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

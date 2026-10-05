@@ -3,6 +3,7 @@
 ```
 display-server           服务端二进制
 display-server.service   systemd 单元
+make-image.sh            把公版 Armbian 镜像做成插卡即装的装机镜像（批量装机用，见下）
 server.json              配置，两个口令已自动生成填好
 ```
 
@@ -70,7 +71,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 9001（`listen`） | HTTPS | 管理后台、设备通信 |
-| 9000（`bootstrap_listen`） | HTTP | 只提供新设备一键装机脚本、程序包与离线依赖仓库，其余请求 301 到 HTTPS |
+| 9000（`bootstrap_listen`） | HTTP | 只提供新设备一键装机脚本与程序包，其余请求 301 到 HTTPS |
 
 防火墙两个端口都要放行。首次启动在 `data/tls/` 生成自签证书，日志里打印证书指纹
 （`journalctl -u display-server | grep fingerprint`）。设备固定这个指纹，所以 **`data/tls/` 必须随 `state.json` 一起备份**——
@@ -87,6 +88,14 @@ systemctl daemon-reload && systemctl enable --now display-server
 
 ```sh
 curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=<server.json 里的 enroll_token> sh
+```
+
+批量装机：在这台服务器上用 `make-image.sh` 把公版 Armbian 镜像做成插卡即装镜像，所有 TF 卡烧同一个，
+插卡上电自动装机并注册：
+
+```sh
+BOOTSTRAP=http://<服务器>:9000 ENROLL_TOKEN=<enroll_token> ROOT_PASSWORD=<设备 root 密码> \
+  ./make-image.sh Armbian_<版本>_Orangepione_trixie_current_<内核>_minimal.img.xz
 ```
 
 完整说明见仓库 `docs/deployment.md`。

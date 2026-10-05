@@ -10,8 +10,8 @@
 #   HDMI_MODE=1440x900@60（默认）；EDID 里没有该模式时加 HDMI_FORCE=e 强制输出
 #   CMA=256M        连续内存，默认按内存大小定（1GB 板 256M，512MB 板 192M）
 #   NO_REBOOT=1     装完不自动重启（显示参数要重启才生效）
-#   DEPS_URL=http://<服务器>:9000/apt   服务端的离线依赖仓库（一键安装脚本自动带上）：有本机 Debian 版本的依赖包时
-#                   只从它安装，不访问外网；没有或安装失败时退回在线 apt
+#   SERVER_CERT=<文件>  服务端证书（一键安装脚本自动带上；手工安装时拷服务端的 data/tls/server.crt）。
+#                   有了它，依赖从服务端的离线依赖包安装（首次安装与之后每次 OTA），没有时在线 apt
 #
 # 按 OTA 布局安装到 /usr/local/lib/display-agent（布局说明见 internal/agent/update.go），之后的程序更新都由 OTA 完成。
 set -eu
@@ -35,44 +35,11 @@ MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 if [ "${MEM_MB:-0}" -ge 768 ]; then CMA_DEFAULT=256M; else CMA_DEFAULT=192M; fi
 CMA="${CMA:-$CMA_DEFAULT}"
 
-echo "== 安装依赖（GStreamer）"
-PKGS=$(grep -v '^#' "$HERE/deps.txt")
-CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
-
-# 只用服务端的离线依赖仓库安装（scripts/build-deps.sh 打包、后台上传）：局域网下载，不跑境外源的 apt-get update。
-# 源列表与索引放在临时目录，不动系统的 apt 配置。
-install_from_server() {
-	[ -n "${DEPS_URL:-}" ] && [ -n "$CODENAME" ] || return 1
-	if ! curl -fsS -o /dev/null "$DEPS_URL/$CODENAME/Packages" 2>/dev/null; then
-		echo "   服务端没有 $CODENAME 的离线依赖包，改为在线安装"
-		return 1
-	fi
-	T=$(mktemp -d) && chmod 755 "$T" && mkdir -p "$T/lists/partial" "$T/parts"
-	echo "deb [trusted=yes] $DEPS_URL/$CODENAME ./" > "$T/sources.list"
-	set -- -o Dir::Etc::SourceList="$T/sources.list" -o Dir::Etc::SourceParts="$T/parts" -o Dir::State::Lists="$T/lists"
-	echo "   从服务端离线依赖仓库安装（$CODENAME）"
-	ok=0
-	apt-get "$@" update && apt-get "$@" install -y --no-install-recommends $PKGS && ok=1
-	rm -rf "$T"
-	[ "$ok" = 1 ] || echo "   从服务端安装失败，改为在线安装"
-	[ "$ok" = 1 ]
-}
-if ! install_from_server; then
-	apt-get update
-	apt-get install -y --no-install-recommends $PKGS
-fi
-apt-get clean # 下载的 .deb 不留在 SD 卡上
-
-echo "== 安装 display-agent $VERSION 到 $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/versions" /etc/display-agent
-rm -rf "$INSTALL_DIR/versions/$VERSION"
-cp -a "$HERE" "$INSTALL_DIR/versions/$VERSION"
-sh "$INSTALL_DIR/versions/$VERSION/update.sh" "$INSTALL_DIR"
-ln -sfn "$INSTALL_DIR/versions/$VERSION" "$INSTALL_DIR/current"
-rm -f "$INSTALL_DIR/pending-verify" "$INSTALL_DIR/previous"
-
 # agent.json 每次安装都按当前参数重写：重装/改服务端地址时不用先手工删文件。
 # 设备特有的状态（编号、密钥）在 /var/lib/display-agent/identity.json 里，不受影响。
+# 先写配置：update.sh 安装依赖时要用到服务端地址与证书。
+mkdir -p "$INSTALL_DIR/versions" /etc/display-agent
+[ -n "${SERVER_CERT:-}" ] && install -m 0644 "$SERVER_CERT" /etc/display-agent/server.crt
 cat > /etc/display-agent/agent.json <<JSON
 {
   "server_url": "$SERVER_URL",
@@ -83,6 +50,13 @@ cat > /etc/display-agent/agent.json <<JSON
 JSON
 chmod 0600 /etc/display-agent/agent.json
 echo "   已写入 /etc/display-agent/agent.json"
+
+echo "== 安装 display-agent $VERSION 到 $INSTALL_DIR（含 GStreamer 等依赖）"
+rm -rf "$INSTALL_DIR/versions/$VERSION"
+cp -a "$HERE" "$INSTALL_DIR/versions/$VERSION"
+sh "$INSTALL_DIR/versions/$VERSION/update.sh" "$INSTALL_DIR"
+ln -sfn "$INSTALL_DIR/versions/$VERSION" "$INSTALL_DIR/current"
+rm -f "$INSTALL_DIR/pending-verify" "$INSTALL_DIR/previous"
 
 echo "== 固定 HDMI 输出 ${HDMI_MODE}、禁用息屏、CMA ${CMA}"
 ENV=/boot/armbianEnv.txt

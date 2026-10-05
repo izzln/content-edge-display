@@ -2,11 +2,11 @@ package server
 
 import (
 	_ "embed"
+	"encoding/pem"
 	"log"
 	"net"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"text/template"
 
 	"github.com/izzln/content-edge-display/internal/store"
@@ -17,29 +17,24 @@ var installScript string
 
 var installTmpl = template.Must(template.New("install.sh").Parse(installScript))
 
-// BootstrapHandler 是 HTTP 端口（bootstrap_listen）的处理器：只提供装机入口（脚本、程序包、离线依赖仓库），
-// 其余一律跳转到 HTTPS。
+// BootstrapHandler 是 HTTP 端口（bootstrap_listen）的处理器：只提供装机入口，其余一律跳转到 HTTPS。
 // 装机时设备还不知道服务端证书指纹，只能从这里用 HTTP 取一次安装脚本（脚本里带着指纹）。
 func (s *Server) BootstrapHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
 	mux.HandleFunc("GET /bootstrap/agent.tar.gz", s.handleBootstrapPackage)
 	mux.HandleFunc("/", s.redirectToHTTPS)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/apt/") {
-			s.handleApt(w, r) // 离线依赖仓库（deps.go），不经 ServeMux
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	return mux
 }
 
-// handleInstallScript 生成一键安装脚本：填好 HTTPS 地址与证书指纹（主机名沿用装机人员访问时用的那个）。
+// handleInstallScript 生成一键安装脚本：填好 HTTPS 地址、证书指纹与证书本身（主机名沿用装机人员访问时用的那个）。
+// 证书给 apt 用：设备从 HTTPS 端口的离线依赖仓库安装依赖时只信任它。
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	installTmpl.Execute(w, map[string]string{
 		"ServerURL":   s.httpsBase(r),
 		"Fingerprint": s.certFP,
+		"Cert":        string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.cert.Certificate[0]})),
 		"Bootstrap":   "http://" + r.Host,
 	})
 }

@@ -59,7 +59,7 @@ package-agent: agent-arm
 
 package-server: build
 	@rm -rf bin/stage && mkdir -p bin/stage/display-server-$(VERSION)
-	@cp bin/display-server deploy/server/display-server.service deploy/server/INSTALL.md \
+	@cp bin/display-server deploy/server/display-server.service deploy/server/INSTALL.md deploy/server/make-image.sh \
 		bin/stage/display-server-$(VERSION)/
 	@# 包里直接给一份填好口令的 server.json，装机时不用再想口令怎么定
 	@if [ "$(BAKE_TOKENS)" = "1" ]; then \
@@ -72,8 +72,8 @@ package-server: build
 	@echo "→ bin/display-server-$(VERSION)-$(HOST_ARCH).tar.gz (服务端)"
 
 # 设备端离线依赖包：后台上传一次，之后装机从局域网装依赖（需要 docker 与 qemu，见 scripts/build-deps.sh）。
-# DEBIAN 须与设备 Armbian 的 VERSION_CODENAME 一致，如 make deps DEBIAN=trixie
-DEBIAN ?= bookworm
+# DEBIAN 须与设备 Armbian 的 VERSION_CODENAME 一致，如 make deps DEBIAN=bookworm
+DEBIAN ?= trixie
 deps:
 	sh scripts/build-deps.sh $(DEBIAN)
 
