@@ -341,6 +341,7 @@ func (s *Server) runCache(stop <-chan struct{}) {
 	for {
 		s.reconcileCache()
 		s.gcBackgrounds()
+		s.gcThumbs()
 		select {
 		case <-stop:
 			return

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/fsutil"
+	"github.com/izzln/content-edge-display/internal/render"
 	"github.com/izzln/content-edge-display/internal/store"
 )
 
@@ -26,10 +27,12 @@ func (s *Server) backgroundsDir() string { return filepath.Join(s.cfg.DataDir, "
 // backgroundGrace：刚落盘、还没写进模板的底图不回收（上传与回收并发时）。
 const backgroundGrace = 10 * time.Minute
 
-// handleUploadBackground 接收 multipart file（PNG/JPG），设为模板的底图；?mirror=1 设为对调版底图。
+// handleUploadBackground 接收 multipart file（PNG），设为模板的底图；?mirror=1 设为对调版底图。
+// 底图压在媒体区上方，所以要检查它在媒体区里透明：完全不透明就拒收（视频会被整个盖住），透明不到一半照收但提示。
 func (s *Server) handleUploadBackground(w http.ResponseWriter, r *http.Request) {
 	id, mirror := r.PathValue("id"), r.URL.Query().Get("mirror") == "1"
-	if _, ok := s.store.Template(id); !ok {
+	tpl, ok := s.store.Template(id)
+	if !ok {
 		http.Error(w, "unknown template", http.StatusNotFound)
 		return
 	}
@@ -46,21 +49,32 @@ func (s *Server) handleUploadBackground(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
-	ext := map[string]string{"png": ".png", "jpeg": ".jpg"}[format]
 	switch {
-	case err != nil || ext == "":
-		http.Error(w, "底图只支持 PNG 或 JPG", http.StatusBadRequest)
+	case err != nil || format != "png":
+		http.Error(w, "底图只支持 PNG（媒体区要透明，视频从透明处露出）", http.StatusBadRequest)
 		return
 	case cfg.Width*cfg.Height > maxImagePixels:
 		http.Error(w, fmt.Sprintf("底图像素太多（%d×%d）", cfg.Width, cfg.Height), http.StatusBadRequest)
 		return
 	}
-	if _, _, err := image.Decode(bytes.NewReader(data)); err != nil {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
 		http.Error(w, "底图文件已损坏："+err.Error(), http.StatusBadRequest)
 		return
 	}
+	share := 1.0 // 媒体区里透明的比例
+	if m, ok := tpl.MediaRegion(); ok {
+		if mirror {
+			m = store.Mirrored(m, tpl.W)
+		}
+		share = render.TransparentShare(render.CoverImage(img, tpl.W, tpl.H), image.Rect(m.X, m.Y, m.X+m.W, m.Y+m.H))
+	}
+	if share < 0.01 {
+		http.Error(w, "底图在媒体区必须是透明的（PNG 透明通道），否则视频会被整个盖住——下载参考图看媒体区的位置", http.StatusBadRequest)
+		return
+	}
 	sum := sha256.Sum256(data)
-	name := "bg-" + hex.EncodeToString(sum[:8]) + ext
+	name := "bg-" + hex.EncodeToString(sum[:8]) + ".png"
 	if err := fsutil.WriteFile(filepath.Join(s.backgroundsDir(), name), data, 0o644); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -69,7 +83,7 @@ func (s *Server) handleUploadBackground(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	log.Printf("template %s: background%s set to %s (%d×%d)", id, map[bool]string{true: " (mirrored)"}[mirror], name, cfg.Width, cfg.Height)
-	writeJSON(w, map[string]any{"file": name, "w": cfg.Width, "h": cfg.Height})
+	writeJSON(w, map[string]any{"file": name, "w": cfg.Width, "h": cfg.Height, "media_transparent": share})
 }
 
 // handleDeleteBackground 去掉模板的底图（?mirror=1 只去掉对调版）。去掉常规底图时对调版一并去掉。

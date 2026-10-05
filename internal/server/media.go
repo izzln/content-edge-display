@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -548,8 +549,16 @@ func (s *Server) handleDeviceMediaThumb(w http.ResponseWriter, r *http.Request) 
 	}
 	dir := s.deviceMediaDir(dev.ID)
 	path := filepath.Join(dir, name)
+	etagFrom := "" // 视频的 ETag 按视频文件本身算（抽出来的帧每次取用都会刷新时间）
 	switch manifest.TypeOf(name) {
 	case "image":
+	case "video":
+		frame, err := s.videoFrame(r.Context(), path)
+		if err != nil {
+			http.NotFound(w, r) // 没有 ffmpeg：后台照旧显示 ▶
+			return
+		}
+		etagFrom, path = path, frame
 	case "document":
 		pages := manifest.Pages(dir, name)
 		n, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -563,7 +572,7 @@ func (s *Server) handleDeviceMediaThumb(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(cmp.Or(etagFrom, path))
 	if err != nil {
 		http.NotFound(w, r)
 		return

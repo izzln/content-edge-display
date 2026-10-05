@@ -275,18 +275,21 @@ assert vcaps.can_intersect(Gst.Caps.from_string("video/x-raw,format=NV12"))
 assert not vcaps.can_intersect(Gst.Caps.from_string("video/x-raw,format=NV12_32L32"))
 assert not vcaps.can_intersect(Gst.Caps.from_string("video/x-raw(memory:DMABuf),format=DMA_DRM"))
 
-# 上层画面：只在洞里填半透明黑（BGRA 预乘即 0,0,0,a），洞外的叠加图原样不动；行宽可能带对齐填充
-base = bytes([9, 9, 9, 255]) * 8  # 4×2
+# 上层画面：洞里叠一层半透明黑幕（在叠加图之下）：透明处变成 (0,0,0,a)，压进媒体区的装饰 rgb 不变、
+# alpha 按 p + a·(255−p)/255 变；洞外的叠加图原样不动；行宽可能带对齐填充
+K, T, D = (9, 9, 9, 255), (0, 0, 0, 0), (5, 5, 5, 128)  # 不透明、透明、半透明装饰（预乘）
+base = bytes(K + K + T + D) * 2  # 4×2，洞是右边两列
 hole = (2, 0, 2, 2)
 def pixels(buf, pitch):
     return [tuple(buf[r * pitch + i:r * pitch + i + 4]) for r in range(2) for i in range(0, 16, 4)]
-K, H = (9, 9, 9, 255), (0, 0, 0, 128)
 for pitch in (16, 24):
     buf = bytearray(pitch * 2)
     g.paint(buf, pitch, 4, base, hole, 128, True)
-    assert pixels(buf, pitch) == [K, K, H, H] * 2, (pitch, pixels(buf, pitch))
+    assert pixels(buf, pitch) == [K, K, (0, 0, 0, 128), (5, 5, 5, 192)] * 2, (pitch, pixels(buf, pitch))
+    g.paint(buf, pitch, 4, base, hole, 255, False)  # 全黑：洞里全不透明，装饰颜色还在
+    assert pixels(buf, pitch) == [K, K, (0, 0, 0, 255), (5, 5, 5, 255)] * 2, (pitch, pixels(buf, pitch))
     g.paint(buf, pitch, 4, base, hole, 0, False)  # 淡入完：洞里还原叠加图
-    assert pixels(buf, pitch) == [K] * 8, (pitch, pixels(buf, pitch))
+    assert pixels(buf, pitch) == [K, K, T, D] * 2, (pitch, pixels(buf, pitch))
     g.paint(buf, pitch, 4, bytes(32), hole, 0, True)  # 换画面：整幅重画
     assert pixels(buf, pitch) == [(0, 0, 0, 0)] * 8
 `).CombinedOutput()

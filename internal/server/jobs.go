@@ -20,6 +20,7 @@ import (
 type videoEncoder interface {
 	Video(ctx context.Context, src, dst string, spec transcode.Spec, onProgress func(seconds float64)) error
 	Duration(ctx context.Context, src string) float64
+	Frame(ctx context.Context, src, dst string) error // 抽一帧 JPEG（缩略图、效果预览）
 	Version() string
 }
 

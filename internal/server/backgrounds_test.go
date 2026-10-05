@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"mime/multipart"
 	"net/http"
@@ -16,11 +17,18 @@ import (
 	"time"
 )
 
-func pngBytes(t *testing.T, w, h int, c color.RGBA) []byte {
+// bgPNG 造一张 w×h 的底图：opaqueFrac 指左边多少比例不透明（填 c），其余透明。
+// 默认模板的媒体区在右半边，所以 0.5 = 媒体区全透明；对调版的媒体区在左半边，要反过来。
+func bgPNG(t *testing.T, w, h int, opaqueFrac float64, c color.RGBA, mirrorSide bool) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for i := 0; i < len(img.Pix); i += 4 {
-		img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3] = c.R, c.G, c.B, c.A
+	cut := int(float64(w) * opaqueFrac)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if (x < cut) != mirrorSide {
+				img.Set(x, y, c)
+			}
+		}
 	}
 	var buf bytes.Buffer
 	png.Encode(&buf, img)
@@ -53,13 +61,23 @@ func TestTemplateBackground(t *testing.T) {
 	tplID := state(s).Global.TemplateID
 	before := deviceManifest(t, h).Version
 
-	if w := uploadBackground(t, h, tplID, true, pngBytes(t, 32, 20, color.RGBA{0, 0xFF, 0, 0xFF})); w.Code != http.StatusBadRequest {
+	red, green := color.RGBA{0xFF, 0, 0, 0xFF}, color.RGBA{0, 0xFF, 0, 0xFF}
+	if w := uploadBackground(t, h, tplID, true, bgPNG(t, 32, 20, 0.5, green, true)); w.Code != http.StatusBadRequest {
 		t.Fatalf("没有常规底图时不能传对调版：%d %s", w.Code, w.Body.String())
 	}
-	if w := uploadBackground(t, h, tplID, false, []byte("not an image")); w.Code != http.StatusBadRequest {
-		t.Fatalf("非图片应被拒：%d", w.Code)
+	var jpg bytes.Buffer
+	jpeg.Encode(&jpg, image.NewRGBA(image.Rect(0, 0, 32, 20)), nil)
+	for name, data := range map[string][]byte{"非图片": []byte("not an image"), "JPG": jpg.Bytes(),
+		"媒体区完全不透明": bgPNG(t, 32, 20, 1, red, false)} {
+		if w := uploadBackground(t, h, tplID, false, data); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s应被拒：%d %s", name, w.Code, w.Body.String())
+		}
 	}
-	w := uploadBackground(t, h, tplID, false, pngBytes(t, 32, 20, color.RGBA{0xFF, 0, 0, 0xFF}))
+	// 媒体区只有约 25% 透明：照收，但返回比例供后台提示
+	if w := uploadBackground(t, h, tplID, false, bgPNG(t, 32, 20, 0.875, red, false)); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"media_transparent":0.2`) {
+		t.Fatalf("透明不足一半应照收并返回比例：%d %s", w.Code, w.Body.String())
+	}
+	w := uploadBackground(t, h, tplID, false, bgPNG(t, 32, 20, 0.5, red, false))
 	var got struct {
 		File string `json:"file"`
 		W, H int
@@ -74,7 +92,7 @@ func TestTemplateBackground(t *testing.T) {
 	if w := do(t, h, adminReq("GET", "/api/v1/admin/backgrounds/"+got.File, nil), http.StatusOK); w.Body.Len() == 0 {
 		t.Fatal("后台应能取回底图原图")
 	}
-	if w := uploadBackground(t, h, tplID, true, pngBytes(t, 32, 20, color.RGBA{0, 0xFF, 0, 0xFF})); w.Code != http.StatusOK {
+	if w := uploadBackground(t, h, tplID, true, bgPNG(t, 32, 20, 0.5, green, true)); w.Code != http.StatusOK {
 		t.Fatalf("对调版底图应上传成功：%d %s", w.Code, w.Body.String())
 	}
 

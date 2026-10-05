@@ -37,7 +37,8 @@ type Template struct {
 	W          int    `json:"w"`
 	H          int    `json:"h"`
 	Background string `json:"background"`
-	// 底图（节日主题等区域画不出来的画面）：data_dir/backgrounds/ 下的文件，按内容命名（IsBackgroundFile）。
+	// 底图（节日主题等区域画不出来的画面，PNG）：data_dir/backgrounds/ 下的文件，按内容命名（IsBackgroundFile）。
+	// 压在媒体区上方：媒体区里透明的地方露出视频，不透明的装饰盖在视频上。
 	// 开了左右对调的设备用对调版；没有对调版时用原图（不翻转：底图里的文字翻过来就是反字）。
 	BackgroundImage       string   `json:"background_image,omitempty"`
 	BackgroundImageMirror string   `json:"background_image_mirror,omitempty"`
@@ -363,10 +364,10 @@ func ActiveSchedule(list []Schedule, now time.Time) (Schedule, bool) {
 var (
 	idPattern         = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	colorPattern      = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
-	backgroundPattern = regexp.MustCompile(`^bg-[0-9a-f]{16}\.(png|jpg)$`)
+	backgroundPattern = regexp.MustCompile(`^bg-[0-9a-f]{16}\.png$`)
 )
 
-// IsBackgroundFile 判断 name 是不是底图文件名（bg-<内容 sha256 前 16 位>.png|jpg）。
+// IsBackgroundFile 判断 name 是不是底图文件名（bg-<内容 sha256 前 16 位>.png）。
 func IsBackgroundFile(name string) bool { return backgroundPattern.MatchString(name) }
 
 // ValidateTemplate 填充默认值并校验模板定义。
