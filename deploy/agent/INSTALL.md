@@ -7,6 +7,8 @@
 display-agent            设备代理程序（ARMv7，静态编译）
 VERSION                  版本号（与程序内置版本一致，服务端据此识别）
 install-agent.sh         首次安装：装依赖、按 OTA 布局安装、写配置、设置显示参数、开机自启、重启
+deps.txt                 播放所需的 Debian 软件包清单（安装与 make deps 共用）
+deps.sh                  安装 deps.txt：优先服务端的离线依赖包，update.sh 每次执行都调用
 update.sh                本版本的安装步骤：首次安装与每次 OTA 都执行（systemd 单元、固定路径的脚本等）
 rollback-check.sh        OTA 回滚检查（由 systemd ExecStartPre 调用）
 check-display.sh         现场自检：输出分辨率、硬件解码、CMA、SoC 温度
@@ -24,6 +26,10 @@ curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 - 注册口令就是服务端 `server.json` 里的 `enroll_token`；后台「程序更新」页上有这条命令可直接复制。
 - 脚本由服务端生成，已填好服务端的 HTTPS 地址（`:9001`）和证书指纹；它下载最新上传的程序包、执行
   `install-agent.sh`，装完自动重启。设备随后自动注册，1~2 分钟内出现在后台设备列表。
+- 建议同时在后台上传离线依赖包（`make deps` 产出的 `display-deps-<代号>-armhf.tar.gz`，代号与设备
+  `/etc/os-release` 的 `VERSION_CODENAME` 一致）：装机与之后 OTA 新增的依赖都从服务端局域网安装，几秒下完、不需要外网；
+  没有时从外网 apt 安装。
+- 批量装机可以用服务端包里的 `make-image.sh` 做插卡即装镜像（见 `docs/deployment.md` 4.2）。
 - 可选参数写在 `ENROLL_TOKEN=...` 旁边：`HDMI_MODE=1440x900@60`（默认）、`HDMI_FORCE=e`（EDID 里没有该模式时强制）、
   `CMA=256M`（默认按内存大小定）。
 
@@ -32,6 +38,8 @@ curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 ```sh
 SERVER_URL=https://<服务器>:9001 TLS_FINGERPRINT=<后台显示的证书指纹> ENROLL_TOKEN=注册口令 ./install-agent.sh
 ```
+
+（再加 `SERVER_CERT=<服务端 data/tls/server.crt 的拷贝>` 才能使用服务端的离线依赖包。）
 
 ## 现场排查
 
@@ -61,7 +69,7 @@ video=HDMI-A-1:1440x900@60
 ## 程序更新
 
 之后升级**不需要再登录设备**：在后台「程序更新」页上传新版本的整包并下发（立即或定时）。
-设备下载整包、校验、执行包内 `update.sh`，成功后切换到新版本；新版本连续 3 次启动失败自动回滚到上一个版本
+设备下载整包、校验、执行包内 `update.sh`（含安装新增的依赖），成功后切换到新版本；新版本连续 3 次启动失败自动回滚到上一个版本
 （程序和脚本一起回退）。失败原因会显示在后台设备列表里。
 
 完整说明见仓库 `docs/deployment.md`。

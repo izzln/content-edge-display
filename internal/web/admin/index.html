@@ -321,11 +321,14 @@
       <div class="row">
         <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
         备注 <input type="text" id="pkgNotes" placeholder="可选">
-        <button class="primary" onclick="uploadPackage()">上传程序包</button>
+        <button class="primary" onclick="uploadPackage()">上传</button>
       </div>
-      <span class="muted">上传 <code>make package</code> 产出的 <code>display-agent-&lt;版本&gt;-armv7.tar.gz</code>，版本号从包里读取；传错文件会被当场拒绝。</span>
+      <span class="muted">程序包：<code>make package</code> 产出的 <code>display-agent-&lt;版本&gt;-armv7.tar.gz</code>，版本号从包里读取，传错文件会被当场拒绝。
+        离线依赖包：<code>make deps</code> 产出的 <code>display-deps-&lt;代号&gt;-armhf.tar.gz</code>，上传一次，之后装机与 OTA 新增的依赖都从这里装、不访问外网。</span>
     </div>
     <table id="pkgTable" class="cards"></table>
+    <h2 class="sec">离线依赖包 <span class="muted">设备的 Debian 版本代号（/etc/os-release）与之一致时使用，否则装机时在线安装</span></h2>
+    <table id="depsTable" class="cards"></table>
   </div>
   <div id="tab-storage" style="display:none"><div id="storageBox" class="card">读取中…</div></div>
 </main>
@@ -433,7 +436,7 @@ tabs.forEach(b => b.onclick = () => {
   if (b.dataset.tab === "storage") loadStorage();
 });
 
-let devices = [], templates = [], global = {}, schedules = [], packages = [], info = {}, infoFetchedAt = 0;
+let devices = [], templates = [], global = {}, schedules = [], packages = [], deps = [], info = {}, infoFetchedAt = 0;
 const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
 const tplById = id => templates.find(t => t.id === id);
 const devById = id => devices.find(d => d.id === id);
@@ -447,12 +450,12 @@ const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段"
 const arr = v => Array.isArray(v) ? v : [];
 async function refresh() {
   try {
-    const [d, t, g, s, f, i] = await Promise.all([
+    const [d, t, g, s, f, dp, i] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
-      api("/api/v1/admin/schedules"), api("/api/v1/admin/packages"), api("/api/v1/admin/info")]);
+      api("/api/v1/admin/schedules"), api("/api/v1/admin/packages"), api("/api/v1/admin/deps"), api("/api/v1/admin/info")]);
     // 任一接口返回 null/异常类型都不应让整页渲染崩掉（崩掉的表现是按钮全部失效）
-    [devices, templates, global, schedules, packages, info] =
-      [arr(d), arr(t), g || {}, arr(s), arr(f), i || {}];
+    [devices, templates, global, schedules, packages, deps, info] =
+      [arr(d), arr(t), g || {}, arr(s), arr(f), arr(dp), i || {}];
     infoFetchedAt = Date.now();
   } catch { return; }
   try {
@@ -1481,14 +1484,26 @@ function renderPackages() {
     `curl -fsSL http://${location.hostname}:${info.bootstrap_port}/install.sh | ENROLL_TOKEN=注册口令 sh`;
   $("#tlsFP").textContent = info.tls_fingerprint;
   $("#pkgTable").innerHTML = `<tr class="head"><th>版本</th><th>大小</th><th>上传时间</th><th>覆盖</th><th>操作</th></tr>${rows || '<tr><td colspan="5" class="muted">尚未上传程序包</td></tr>'}`;
+  const depRows = deps.map(r => `<tr>
+    <td><b>${esc(r.codename)}</b></td>
+    <td data-label="内容">${r.packages} 个软件包 · ${fmtSize(r.size)}</td>
+    <td data-label="上传时间">${esc(fmtTime(r.uploaded_at))}</td>
+    <td class="acts"><button class="danger" onclick="deleteDeps('${esc(r.codename)}')">删除</button></td></tr>`).join("");
+  $("#depsTable").innerHTML = `<tr class="head"><th>代号</th><th>内容</th><th>上传时间</th><th>操作</th></tr>${depRows || '<tr><td colspan="4" class="muted">尚未上传：装机时设备从外网 apt 安装依赖（较慢）</td></tr>'}`;
 }
 async function uploadPackage() {
   const f = $("#pkgFile").files[0];
-  if (!f) { toast("请选择程序包"); return; }
+  if (!f) { toast("请选择要上传的包"); return; }
   const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#pkgNotes").value);
+  toast("上传中…");
   let p;
   try { p = await api("/api/v1/admin/packages", { method: "POST", body: fd }); } catch { return; }
-  toast("已上传 " + p.version); $("#pkgFile").value = ""; $("#pkgNotes").value = ""; refresh();
+  toast(p.codename ? "已上传离线依赖包 " + p.codename : "已上传 " + p.version);
+  $("#pkgFile").value = ""; $("#pkgNotes").value = ""; refresh();
+}
+async function deleteDeps(c) {
+  if (!await confirmDialog(`删除离线依赖包 ${c}？`, "之后该版本的设备装机改为在线安装依赖。", { ok: "删除", danger: true })) return;
+  send("DELETE", "/api/v1/admin/deps/" + encodeURIComponent(c), undefined, "已删除");
 }
 async function deletePackage(v) {
   if (!await confirmDialog(`删除程序版本 ${v}？`, "", { ok: "删除", danger: true })) return;

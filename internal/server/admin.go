@@ -48,6 +48,8 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"GET /api/v1/admin/packages":                        s.handleListPackages,
 		"POST /api/v1/admin/packages":                       s.handleUploadPackage,
 		"DELETE /api/v1/admin/packages/{version}":           s.handleDeletePackage,
+		"GET /api/v1/admin/deps":                            s.handleListDeps,
+		"DELETE /api/v1/admin/deps/{codename}":              s.handleDeleteDeps,
 		"PUT /api/v1/admin/rollout":                         s.handleRollout,
 		"GET /api/v1/admin/cache":                           s.handleGetCache,
 		"PUT /api/v1/admin/cache":                           s.handlePutCache,

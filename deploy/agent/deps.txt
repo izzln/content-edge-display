@@ -1,0 +1,13 @@
+# 设备端播放所需的 Debian 软件包：deps.sh 按它安装（首次安装与每次 OTA），scripts/build-deps.sh 按它打离线依赖包。
+# 播放进程是 Python + GStreamer（随代理分发）。硬解靠 plugins-bad 里的 v4l2codecs（驱动 cedrus），
+# 出画面靠 plugins-bad 的 kmssink；plugins-good 提供 MP4 解封装、JPEG/PNG 解码与裁剪；
+# libav 是软解兜底（硬解不可用时至少还能放，后台会标红提示）。
+python3
+python3-gi
+python3-gst-1.0
+gir1.2-gst-plugins-base-1.0
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-bad
+gstreamer1.0-libav
+libdrm2

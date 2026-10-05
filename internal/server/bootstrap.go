@@ -2,6 +2,7 @@ package server
 
 import (
 	_ "embed"
+	"encoding/pem"
 	"log"
 	"net"
 	"net/http"
@@ -26,12 +27,14 @@ func (s *Server) BootstrapHandler() http.Handler {
 	return mux
 }
 
-// handleInstallScript 生成一键安装脚本：填好 HTTPS 地址与证书指纹（主机名沿用装机人员访问时用的那个）。
+// handleInstallScript 生成一键安装脚本：填好 HTTPS 地址、证书指纹与证书本身（主机名沿用装机人员访问时用的那个）。
+// 证书给 apt 用：设备从 HTTPS 端口的离线依赖仓库安装依赖时只信任它。
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	installTmpl.Execute(w, map[string]string{
 		"ServerURL":   s.httpsBase(r),
 		"Fingerprint": s.certFP,
+		"Cert":        string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.cert.Certificate[0]})),
 		"Bootstrap":   "http://" + r.Host,
 	})
 }

@@ -10,6 +10,8 @@
 #   HDMI_MODE=1440x900@60（默认）；EDID 里没有该模式时加 HDMI_FORCE=e 强制输出
 #   CMA=256M        连续内存，默认按内存大小定（1GB 板 256M，512MB 板 192M）
 #   NO_REBOOT=1     装完不自动重启（显示参数要重启才生效）
+#   SERVER_CERT=<文件>  服务端证书（一键安装脚本自动带上；手工安装时拷服务端的 data/tls/server.crt）。
+#                   有了它，依赖从服务端的离线依赖包安装（首次安装与之后每次 OTA），没有时在线 apt
 #
 # 按 OTA 布局安装到 /usr/local/lib/display-agent（布局说明见 internal/agent/update.go），之后的程序更新都由 OTA 完成。
 set -eu
@@ -33,24 +35,11 @@ MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 if [ "${MEM_MB:-0}" -ge 768 ]; then CMA_DEFAULT=256M; else CMA_DEFAULT=192M; fi
 CMA="${CMA:-$CMA_DEFAULT}"
 
-echo "== 安装依赖（GStreamer）"
-# 播放进程是 Python + GStreamer（随代理分发）。硬解靠 plugins-bad 里的 v4l2codecs（驱动 cedrus），
-# 出画面靠 plugins-bad 的 kmssink；plugins-good 提供 MP4 解封装、JPEG/PNG 解码与裁剪；
-# libav 是软解兜底（硬解不可用时至少还能放，后台会标红提示）。
-apt-get update
-apt-get install -y --no-install-recommends python3 python3-gi python3-gst-1.0 gir1.2-gst-plugins-base-1.0 \
-	gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav libdrm2
-
-echo "== 安装 display-agent $VERSION 到 $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/versions" /etc/display-agent
-rm -rf "$INSTALL_DIR/versions/$VERSION"
-cp -a "$HERE" "$INSTALL_DIR/versions/$VERSION"
-sh "$INSTALL_DIR/versions/$VERSION/update.sh" "$INSTALL_DIR"
-ln -sfn "$INSTALL_DIR/versions/$VERSION" "$INSTALL_DIR/current"
-rm -f "$INSTALL_DIR/pending-verify" "$INSTALL_DIR/previous"
-
 # agent.json 每次安装都按当前参数重写：重装/改服务端地址时不用先手工删文件。
 # 设备特有的状态（编号、密钥）在 /var/lib/display-agent/identity.json 里，不受影响。
+# 先写配置：update.sh 安装依赖时要用到服务端地址与证书。
+mkdir -p "$INSTALL_DIR/versions" /etc/display-agent
+[ -n "${SERVER_CERT:-}" ] && install -m 0644 "$SERVER_CERT" /etc/display-agent/server.crt
 cat > /etc/display-agent/agent.json <<JSON
 {
   "server_url": "$SERVER_URL",
@@ -61,6 +50,13 @@ cat > /etc/display-agent/agent.json <<JSON
 JSON
 chmod 0600 /etc/display-agent/agent.json
 echo "   已写入 /etc/display-agent/agent.json"
+
+echo "== 安装 display-agent $VERSION 到 $INSTALL_DIR（含 GStreamer 等依赖）"
+rm -rf "$INSTALL_DIR/versions/$VERSION"
+cp -a "$HERE" "$INSTALL_DIR/versions/$VERSION"
+sh "$INSTALL_DIR/versions/$VERSION/update.sh" "$INSTALL_DIR"
+ln -sfn "$INSTALL_DIR/versions/$VERSION" "$INSTALL_DIR/current"
+rm -f "$INSTALL_DIR/pending-verify" "$INSTALL_DIR/previous"
 
 echo "== 固定 HDMI 输出 ${HDMI_MODE}、禁用息屏、CMA ${CMA}"
 ENV=/boot/armbianEnv.txt

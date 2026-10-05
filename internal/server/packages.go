@@ -24,10 +24,10 @@ import (
 )
 
 // 设备端程序包（make package 产出的 tar.gz）：后台上传 → 立即/定时下发 → 设备执行包内 update.sh 切换；
-// 最新上传的包同时也是新设备一键装机下载的包（bootstrap.go）。
+// 最新上传的包同时也是新设备一键装机下载的包（bootstrap.go）。离线依赖包从同一个入口上传（deps.go）。
 
-// maxPackageBytes 是设备程序包的大小上限。
-const maxPackageBytes = 64 << 20
+// maxPackageBytes 是上传的程序包/离线依赖包的大小上限（依赖包一两百 MB）。
+const maxPackageBytes = 512 << 20
 
 // 设备端的目标平台（Orange Pi One = ARMv7）。
 const agentGOOS, agentGOARCH = "linux", "arm"
@@ -35,29 +35,16 @@ const agentGOOS, agentGOARCH = "linux", "arm"
 // 从构建信息的 -ldflags 中取出注入的代理版本号。
 var versionLdflagPattern = regexp.MustCompile(`-X\s+\S*internal/agent\.Version=(\S+)`)
 
-// inspectPackage 解开上传的程序包检查：VERSION、update.sh 齐全，代理程序是 linux/arm 的 Go 程序且内置版本与
+// inspectPackage 检查解开的程序包 dir：VERSION、update.sh 齐全，代理程序是 linux/arm 的 Go 程序且内置版本与
 // VERSION 一致。返回版本号。
 //
 // 没有这道校验时，本机架构的程序、没注入版本号的程序都会被原样分发到所有设备：设备装上后
 // systemd 执行失败，要连续失败 3 次才触发回滚，期间屏幕是黑的。Go 的构建信息可跨架构读取，
 // 因此这些错误都能在上传时当场挡住。
-func inspectPackage(pkg string) (string, error) {
-	dir, err := os.MkdirTemp(filepath.Dir(pkg), ".inspect-")
+func inspectPackage(dir string) (string, error) {
+	version, err := agentpkg.Check(dir)
 	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(dir)
-	f, err := os.Open(pkg)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	version := ""
-	if err = agentpkg.Extract(f, dir); err == nil {
-		version, err = agentpkg.Check(dir)
-	}
-	if err != nil {
-		return "", fmt.Errorf("这不是有效的设备程序包（%v）——请上传 make package 产出的 %s", err, agentpkg.FileName("<版本>"))
+		return "", invalidPackage(err)
 	}
 	info, err := buildinfo.ReadFile(filepath.Join(dir, agentpkg.Binary))
 	if err != nil {
@@ -78,6 +65,10 @@ func inspectPackage(pkg string) (string, error) {
 		return "", fmt.Errorf("程序内置版本是 %q，与包的 VERSION %q 不一致", got, version)
 	}
 	return version, nil
+}
+
+func invalidPackage(err error) error {
+	return fmt.Errorf("这不是有效的设备程序包（%v）——请上传 make package 产出的 %s", err, agentpkg.FileName("<版本>"))
 }
 
 // pendingUpdate 返回要随清单下发给设备的程序更新：有目标、到了 not_before、设备上报的版本还不是目标版本、
@@ -103,7 +94,7 @@ func (s *Server) handleListPackages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// handleUploadPackage 接收 multipart：file（程序包）+ notes（可选）。版本号从包里读。
+// handleUploadPackage 接收 multipart：file（程序包或离线依赖包，按内容区分）+ notes（可选）。版本号从包里读。
 // 流式写盘，不把整个包读进内存。
 func (s *Server) handleUploadPackage(w http.ResponseWriter, r *http.Request) {
 	mr, err := r.MultipartReader()
@@ -156,8 +147,28 @@ func (s *Server) handleUploadPackage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("程序包超过 %dMB", maxPackageBytes>>20), http.StatusBadRequest)
 		return
 	}
+	dir, err := os.MkdirTemp(s.packagesDir(), ".inspect-")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(dir)
+	if err := extractFile(tmp, dir); err != nil {
+		http.Error(w, invalidPackage(err).Error(), http.StatusBadRequest)
+		return
+	}
+	if isDepsBundle(dir) {
+		repo, err := s.installDeps(dir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		log.Printf("dependency repo %s uploaded (%d packages, %s)", repo.Codename, repo.Packages, humanBytes(repo.Size))
+		writeJSON(w, repo)
+		return
+	}
 	// 在落库前把"传错文件"挡住——这个包会分发到所有设备。
-	version, err := inspectPackage(tmp)
+	version, err := inspectPackage(dir)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -173,6 +184,15 @@ func (s *Server) handleUploadPackage(w http.ResponseWriter, r *http.Request) {
 		log.Printf("agent package %s uploaded (%s)", version, humanBytes(n))
 		writeJSON(w, p)
 	}
+}
+
+func extractFile(pkg, dir string) error {
+	f, err := os.Open(pkg)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return agentpkg.Extract(f, dir)
 }
 
 func (s *Server) handleDeletePackage(w http.ResponseWriter, r *http.Request) {

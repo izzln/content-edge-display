@@ -3,6 +3,7 @@
 ```
 display-server           服务端二进制
 display-server.service   systemd 单元
+make-image.sh            把公版 Armbian 镜像做成插卡即装的装机镜像（批量装机用，见下）
 server.json              配置，两个口令已自动生成填好
 ```
 
@@ -50,7 +51,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   display-server      二进制
   server.json         配置
   fonts/              渲染用字体
-  data/               服务端状态：state.json、cache.json、packages/（程序包）、rendered/、incoming/（待转码原片）、tls/（证书）
+  data/               服务端状态：state.json、cache.json、packages/（程序包）、deps/（离线依赖包）、rendered/、incoming/（待转码原片）、tls/（证书）
   data/media/<设备ID>/  该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）
 ```
 
@@ -70,7 +71,7 @@ systemctl daemon-reload && systemctl enable --now display-server
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 9001（`listen`） | HTTPS | 管理后台、设备通信 |
-| 9000（`bootstrap_listen`） | HTTP | 只提供新设备一键装机脚本与程序包下载，其余请求 301 到 HTTPS |
+| 9000（`bootstrap_listen`） | HTTP | 只提供新设备一键装机脚本与程序包，其余请求 301 到 HTTPS |
 
 防火墙两个端口都要放行。首次启动在 `data/tls/` 生成自签证书，日志里打印证书指纹
 （`journalctl -u display-server | grep fingerprint`）。设备固定这个指纹，所以 **`data/tls/` 必须随 `state.json` 一起备份**——
@@ -81,11 +82,20 @@ systemctl daemon-reload && systemctl enable --now display-server
 
 ## 新设备装机
 
-先在后台「程序更新」页上传设备端程序包（`display-agent-<版本>-armv7.tar.gz`），然后在刷好公版 Armbian 的设备上以 root 运行
+先在后台「程序更新」页上传设备端程序包（`display-agent-<版本>-armv7.tar.gz`）；建议再上传离线依赖包
+（`display-deps-<代号>-armhf.tar.gz`，装机从局域网装依赖、不需要外网）。然后在刷好公版 Armbian 的设备上以 root 运行
 （这条命令在「程序更新」页可直接复制）：
 
 ```sh
 curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=<server.json 里的 enroll_token> sh
+```
+
+批量装机：在这台服务器上用 `make-image.sh` 把公版 Armbian 镜像做成插卡即装镜像，所有 TF 卡烧同一个，
+插卡上电自动装机并注册：
+
+```sh
+BOOTSTRAP=http://<服务器>:9000 ENROLL_TOKEN=<enroll_token> ROOT_PASSWORD=<设备 root 密码> \
+  ./make-image.sh Armbian_<版本>_Orangepione_trixie_current_<内核>_minimal.img.xz
 ```
 
 完整说明见仓库 `docs/deployment.md`。

@@ -108,7 +108,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	}
 	// incoming/ 是待处理原片的暂存区：任务只在内存里，重启后它们已无人认领，清掉。
 	os.RemoveAll(s.incomingDir())
-	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.incomingDir()} {
+	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
@@ -180,7 +180,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /render/{device}/{file}", s.serveDeviceFile(func(dev string, _ *http.Request) string { return filepath.Join(s.renderedDir(), dev) }))
 	mux.HandleFunc("GET /packages/{file}", s.serveDeviceFile(func(string, *http.Request) string { return s.packagesDir() }))
 	s.registerAdmin(mux)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/apt/") {
+			s.handleApt(w, r) // 离线依赖仓库（deps.go），不经 ServeMux
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // tokenOK 常量时间比较口令。
