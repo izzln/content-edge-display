@@ -40,6 +40,7 @@ useradd -r -s /usr/sbin/nologin display 2>/dev/null || true
 sudo -u display ffmpeg -version | head -1   # 必须以服务的运行用户能跑通（见下方说明）
 sudo -u display pdftoppm -v 2>&1 | head -1  # 同上
 chown -R display:display /srv/display
+chmod 600 /srv/display/server.json          # 含初始口令与注册口令
 install -m 0644 display-server.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now display-server
 ```
@@ -77,7 +78,8 @@ systemctl daemon-reload && systemctl enable --now display-server
 （`journalctl -u display-server | grep fingerprint`）。设备固定这个指纹，所以 **`data/tls/` 必须随 `state.json` 一起备份**——
 丢了重新生成指纹就变了，已装设备全部拒绝连接。
 
-管理后台：浏览器打开 `https://<服务器>:9001/admin`，输入 `admin_token`。浏览器会提示证书不受信任
+管理后台：浏览器打开 `https://<服务器>:9001/admin`，输入 `admin_token`（之后可在后台「程序更新」页修改；
+忘了口令就把 server.json 的 `admin_token` 改成新值并重启服务端）。浏览器会提示证书不受信任
 （自签证书），选"高级 → 继续访问"；或把 `data/tls/server.crt` 导入管理电脑并设为信任。
 
 ## 新设备装机

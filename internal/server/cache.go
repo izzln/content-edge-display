@@ -340,6 +340,7 @@ func (s *Server) runCache(stop <-chan struct{}) {
 	defer t.Stop()
 	for {
 		s.reconcileCache()
+		s.gcBackgrounds()
 		select {
 		case <-stop:
 			return

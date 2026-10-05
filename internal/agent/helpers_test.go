@@ -57,6 +57,11 @@ func newEnv(t *testing.T, register bool, tweak ...func(*server.Config)) *testEnv
 	}
 	p := player.NewNull()
 	a := New(cfg, p)
+	// 测试绝不能改到本机的 root 密码与 SSH 配置
+	accDir := t.TempDir()
+	a.acc = accessTarget{authorizedKeys: filepath.Join(accDir, "authorized_keys"),
+		sshdDropIn: filepath.Join(accDir, "sshd_config.d", "00-display-agent.conf"),
+		run:        func(string, string, ...string) error { return nil }}
 	if err := os.MkdirAll(a.mediaDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}

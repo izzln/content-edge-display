@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,10 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"PUT /api/v1/admin/templates/{id}":                  s.handlePutTemplate,
 		"DELETE /api/v1/admin/templates/{id}":               s.handleDeleteTemplate,
 		"GET /api/v1/admin/templates/{id}/preview":          s.handlePreview,
+		"POST /api/v1/admin/templates/{id}/background":      s.handleUploadBackground,
+		"DELETE /api/v1/admin/templates/{id}/background":    s.handleDeleteBackground,
+		"GET /api/v1/admin/templates/{id}/guide":            s.handleBackgroundGuide,
+		"GET /api/v1/admin/backgrounds/{file}":              s.handleGetBackground,
 		"GET /api/v1/admin/global":                          s.handleGetGlobal,
 		"PUT /api/v1/admin/global":                          s.handlePutGlobal,
 		"GET /api/v1/admin/schedules":                       s.handleGetSchedules,
@@ -51,6 +56,10 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"GET /api/v1/admin/deps":                            s.handleListDeps,
 		"DELETE /api/v1/admin/deps/{codename}":              s.handleDeleteDeps,
 		"PUT /api/v1/admin/rollout":                         s.handleRollout,
+		"GET /api/v1/admin/token":                           s.handleGetAdminToken,
+		"PUT /api/v1/admin/token":                           s.handlePutAdminToken,
+		"GET /api/v1/admin/access":                          s.handleGetAccess,
+		"PUT /api/v1/admin/access":                          s.handlePutAccess,
 		"GET /api/v1/admin/cache":                           s.handleGetCache,
 		"PUT /api/v1/admin/cache":                           s.handlePutCache,
 	} {
@@ -60,10 +69,18 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/devices/{id}/media", s.admin(s.handleUploadDeviceMedia, false))
 }
 
-// admin 校验管理口令；logWrites 为真时把写操作（非 GET）记进日志。
+// admin 校验管理口令（猜错多了按来源 IP 锁定，见 adminauth.go）；logWrites 为真时把写操作（非 GET）记进日志。
 func (s *Server) admin(h http.HandlerFunc, logWrites bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !tokenOK(r.Header.Get("X-Admin-Token"), s.cfg.AdminToken) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		ok, wait := s.auth.check(r.Header.Get("X-Admin-Token"), clientIP(r), s.now())
+		switch {
+		case wait > 0:
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			http.Error(w, "口令错误次数过多，请 "+waitText(wait)+"后再试", http.StatusTooManyRequests)
+			return
+		case !ok:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -89,7 +106,15 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// adminCSP：页面是单文件、用 onclick 属性，去不掉 'unsafe-inline'；但只许连自己、不许被别的网页嵌入——
+// 万一有 XSS 也难把口令发到外部主机。
+const adminCSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
 func (s *Server) handleAdminUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Security-Policy", adminCSP)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(web.AdminHTML)
 }
@@ -374,7 +399,14 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	for _, f := range []string{t.BackgroundImage, t.BackgroundImageMirror} {
+		if _, err := os.Stat(filepath.Join(s.backgroundsDir(), f)); f != "" && err != nil {
+			http.Error(w, "底图 "+f+" 不存在（请在后台「底图」里上传）", http.StatusBadRequest)
+			return
+		}
+	}
 	if s.update(w, func(st *store.State) { st.Templates[t.ID] = t }) {
+		s.gcBackgrounds()
 		writeJSON(w, t)
 	}
 }
@@ -411,6 +443,7 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		delete(st.Templates, id)
 		store.EnsureGlobalTemplate(st)
 	}):
+		s.gcBackgrounds()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

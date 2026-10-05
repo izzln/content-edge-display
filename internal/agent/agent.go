@@ -50,6 +50,11 @@ type Agent struct {
 	updateErr      string           // 上次更新失败的原因（随心跳上报）
 	verified       bool             // 本次运行是否已确认过版本（首个成功心跳后）
 	status         []byte           // 上次写进 status.json 的内容
+
+	access         *manifest.Access // 清单里的访问凭据（access.go）
+	accessFailedAt time.Time
+	accessErr      string // 上次应用失败的原因（随心跳上报）
+	acc            accessTarget
 }
 
 // New 创建代理；设备身份在 Run 中解析。
@@ -64,6 +69,7 @@ func New(cfg *Config, p player.Player) *Agent {
 		clock:   clock,
 		sched:   sched,
 		install: detectInstallLayout(),
+		acc:     systemAccess,
 	}
 }
 
@@ -167,6 +173,7 @@ func (a *Agent) step(ctx context.Context) error {
 		return err
 	}
 	a.failures = 0
+	a.applyAccess()
 	return a.applyPendingUpdate(ctx)
 }
 
@@ -381,6 +388,7 @@ func (a *Agent) apply(m *manifest.Manifest) error {
 	}
 	a.manifestVer = m.Version
 	a.setUpdate(m.Update)
+	a.access = m.Access
 	return nil
 }
 
@@ -430,6 +438,7 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 		OutputW:      st.OutputW,
 		OutputH:      st.OutputH,
 		UpdateError:  a.updateErr,
+		AccessError:  a.accessErr,
 	}, true)
 	if err != nil {
 		return err

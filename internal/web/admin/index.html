@@ -155,6 +155,8 @@
   #alert h3 { margin:0 0 4px; font-size:16px; font-weight:600; }
   #alert p { margin:0; font-size:13px; color:var(--label); }
   #alert input { width:100%; margin-top:12px; text-align:left; }
+  #alert label.remember { display:flex; align-items:center; justify-content:center; gap:6px; margin-top:10px; font-size:13px; }
+  #alert label.remember input { width:44px; margin:0; }
   #alert .btns { display:flex; border-top:.5px solid var(--sep); }
   #alert .btns button { flex:1; height:44px; margin:0; border-radius:0; background:none; font-size:16px; font-weight:400; }
   #alert .btns button + button { border-left:.5px solid var(--sep); }
@@ -289,7 +291,7 @@
     <button class="tab" data-tab="packages">程序更新</button>
     <button class="tab" data-tab="storage">存储</button>
   </nav>
-  <span class="right"><button class="sm" onclick="setToken()">设置 Token</button></span>
+  <span class="right"><button class="sm" onclick="setToken()">设置 Token</button> <button class="sm" onclick="logout()">退出</button></span>
 </header>
 <main>
   <div id="tab-devices">
@@ -317,6 +319,25 @@
       <pre class="cmd" id="installCmd"></pre>
       <div class="muted">服务端证书指纹（设备只认这张证书，装机脚本已自动填好）：<code id="tlsFP"></code></div>
     </div>
+    <div class="card" id="accessBox">
+      <h3>设备访问</h3>
+      <p class="muted">统一设置所有设备的 root 密码与允许 SSH 登录的公钥，保存后在线设备一个轮询周期内生效、离线设备上线即生效。
+        配了公钥后设备只允许密钥 SSH；现场插键盘的控制台始终用 root 密码。人员变动删掉其公钥、密码泄露重设即可。</p>
+      <div class="row">root 密码 <input type="password" id="accPw" placeholder="不改就留空" autocomplete="new-password" style="width:14em">
+        <span class="muted" id="accPwState"></span></div>
+      <div class="row" style="display:block">SSH 公钥 <span class="muted">每行一个，整行复制运维电脑上的 ~/.ssh/id_ed25519.pub</span>
+        <textarea id="accKeys" style="min-height:90px" placeholder="ssh-ed25519 AAAA… 张三的笔记本"></textarea></div>
+      <div class="row"><button class="primary" onclick="saveAccess()">保存</button></div>
+    </div>
+    <div class="card">
+      <h3>管理口令</h3>
+      <p class="muted">所有人共用的后台口令。服务器上只存哈希。连续输错 5 次后按来源地址锁定 1 分钟，再错依次 5 分钟、15 分钟、1 小时。
+        忘了口令：在服务器上把 server.json 的 admin_token 改成一个新值并重启服务端。</p>
+      <div class="row"><span class="muted" id="tokState"></span></div>
+      <div class="row">新口令 <input type="password" id="tokNew" autocomplete="new-password" style="width:12em">
+        再输一遍 <input type="password" id="tokNew2" autocomplete="new-password" style="width:12em">
+        <button class="primary" onclick="changeToken()">修改</button></div>
+    </div>
     <div class="card">
       <div class="row">
         <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
@@ -340,17 +361,44 @@
 "use strict";
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const token = () => localStorage.getItem("admin_token") || "";
-const DAYS = ["日","一","二","三","四","五","六"];
-async function setToken() {
-  const t = await promptDialog("管理 Token", "服务端 server.json 里的 admin_token", token(), { secure: true });
-  if (t !== null) { localStorage.setItem("admin_token", t.trim()); refresh(); }
+// 管理口令：默认只在当前标签页记住（sessionStorage，关掉即忘）；勾了"记住这台电脑"才存 localStorage。
+// 浏览器存储在隐私模式等情况下可能不可用：一律 try，取不到就当没有。
+const token = () => { try { return sessionStorage.getItem("admin_token") || localStorage.getItem("admin_token") || ""; } catch { return ""; } };
+const remembered = () => { try { return !!localStorage.getItem("admin_token"); } catch { return false; } };
+function saveToken(t, remember) {
+  try {
+    sessionStorage.removeItem("admin_token"); localStorage.removeItem("admin_token");
+    if (t) (remember ? localStorage : sessionStorage).setItem("admin_token", t);
+  } catch { /* 忽略 */ }
 }
+const DAYS = ["日","一","二","三","四","五","六"];
+let authBlocked = false, tokenAsking = null; // 口令不对或被锁时停止自动刷新，免得拿着错口令一直撞
+function setToken(msg = "服务端 server.json 里的 admin_token，或在后台改过的口令") {
+  return tokenAsking ||= new Promise(resolve => {
+    showAlert(`<div class="body"><h3>管理口令</h3><p>${esc(msg)}</p>
+        <input type="password" id="alertInput" value="${esc(token())}" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <label class="remember"><input type="checkbox" id="rememberChk" ${remembered() ? "checked" : ""}> 记住这台电脑</label></div>
+      <div class="btns"><button onclick="finishAlert(null)">取消</button><button class="default" onclick="finishAlert($('#alertInput').value)">好</button></div>`,
+      "", v => {
+        tokenAsking = null;
+        if (typeof v === "string" && v.trim()) { saveToken(v.trim(), $("#rememberChk").checked); authBlocked = false; refresh(); }
+        resolve();
+      });
+    const inp = $("#alertInput");
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") finishAlert(inp.value); });
+    inp.focus(); inp.select();
+  });
+}
+function logout() { saveToken(""); location.reload(); }
 // 所有管理接口都要带口令；图片（缩略图、预览）也走这里取 blob
 const authFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { "X-Admin-Token": token(), ...opts.headers } });
 async function api(path, opts = {}) {
   const r = await authFetch(path, opts);
-  if (r.status === 401) { toast("Token 无效，请重新设置"); throw new Error("unauthorized"); }
+  if (r.status === 401 || r.status === 429) {
+    const msg = r.status === 401 ? "口令不对，请重新输入（连续输错多次会被锁定一段时间）" : await r.text();
+    if (!authBlocked) { authBlocked = true; toast(msg); setToken(msg); }
+    throw new Error("unauthorized");
+  }
   if (!r.ok) { const t = await r.text(); toast(t); throw new Error(t); }
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
@@ -407,18 +455,6 @@ function confirmDialog(title, msg = "", { ok = "好", danger = false } = {}) {
     $("#alert .btns button:last-child").focus();
   });
 }
-// promptDialog(标题, 说明, 默认值, {secure}) → Promise<string|null>
-function promptDialog(title, msg, value = "", { secure = false } = {}) {
-  return new Promise(resolve => {
-    showAlert(`<div class="body"><h3>${esc(title)}</h3><p>${esc(msg)}</p>
-        <input type="${secure ? "password" : "text"}" id="alertInput" value="${esc(value)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-      <div class="btns"><button onclick="finishAlert(null)">取消</button><button class="default" onclick="finishAlert($('#alertInput').value)">好</button></div>`,
-      "", v => resolve(typeof v === "string" ? v : null));
-    const inp = $("#alertInput");
-    inp.addEventListener("keydown", e => { if (e.key === "Enter") finishAlert(inp.value); });
-    inp.focus(); inp.select();
-  });
-}
 // actionSheet(标题, [{label, run, destructive}])：窄屏时收起来的行内操作
 function actionSheet(title, items) {
   showAlert(`<div class="menu-group">${title ? `<div class="ttl">${esc(title)}</div>` : ""}${items.map((it, i) =>
@@ -434,6 +470,7 @@ tabs.forEach(b => b.onclick = () => {
     $("#tab-" + x.dataset.tab).style.display = x === b ? "" : "none";
   }
   if (b.dataset.tab === "storage") loadStorage();
+  if (b.dataset.tab === "packages") loadAccess();
 });
 
 let devices = [], templates = [], global = {}, schedules = [], packages = [], deps = [], info = {}, infoFetchedAt = 0;
@@ -449,6 +486,7 @@ const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段"
 
 const arr = v => Array.isArray(v) ? v : [];
 async function refresh() {
+  if (authBlocked) return;
   try {
     const [d, t, g, s, f, dp, i] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
@@ -503,6 +541,7 @@ async function saveQuota() {
 function healthLine(d) {
   const hb = d.heartbeat, parts = [];
   if (hb.update_error) parts.push(`<span class="bad" title="${esc(hb.update_error)}">程序更新失败</span>`);
+  if (hb.access_error) parts.push(`<span class="bad" title="${esc(hb.access_error)}">访问设置失败</span>`);
   if (hb.hwdec === "no") parts.push('<span class="bad" title="硬解没起来，视频在软解：会发热、卡顿。在设备上运行 check-display.sh 排查">软解</span>');
   else if (hb.hwdec) parts.push(`<span class="okc" title="实际使用的硬件解码器">硬解 ${esc(hb.hwdec)}</span>`);
   if (hb.temp_c) parts.push(hb.temp_c >= 80
@@ -701,8 +740,9 @@ async function contentDialog(id) {
     <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
       <select id="ovSel" ${own ? "" : "disabled"} onchange="renderContentBody()">${tplOptions(d.display.template_id)}</select>
       <button class="sm" onclick="copyGlobalTemplate()">复制全局模板再改</button></div>
-    <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""}> 左右对调
+    <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""} onchange="updateMirrorWarn()"> 左右对调
       <span class="muted">同一个模板，属性放到另一边（不镜像文字）</span></label></div>
+    <div id="mirrorWarn"></div>
     <hr>
     <div id="contentBody"></div>
     <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
@@ -711,6 +751,12 @@ async function contentDialog(id) {
   renderContentBody();
 }
 
+// updateMirrorWarn 对调的设备用的模板有底图却没有对调版时提示（会用常规版原图，媒体区与底图的留空对不上）。
+function updateMirrorWarn() {
+  const tpl = tplById(ownTemplate() ? $("#ovSel").value : global.template_id);
+  $("#mirrorWarn").innerHTML = $("#mirrorChk").checked && tpl?.background_image && !tpl.background_image_mirror
+    ? `<p class="warn">模板「${esc(tpl.name)}」有底图但没有对调版：对调后底图的留空与媒体区对不上。到"模板与时段"页的【底图】上传对调版。</p>` : "";
+}
 function onModeChange() {
   $("#ovSel").disabled = !ownTemplate();
   renderContentBody();
@@ -739,6 +785,7 @@ function renderContentBody() {
   if (!box) return;
   const tid = ownTemplate() ? $("#ovSel").value : global.template_id;
   const tpl = tplById(tid), region = mediaRegionOf(tid);
+  updateMirrorWarn();
   if (!tpl) {
     box.innerHTML = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
     return;
@@ -1372,18 +1419,75 @@ function renderTemplates() {
   $("#globalSel").innerHTML = tplOptions(global.template_id);
   const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
   const rows = templates.map(t => `<tr>
-    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒</div></td>
+    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒${t.background_image ? ` · 底图${t.background_image_mirror ? "（含对调版）" : ""}` : ""}</div>
+      ${mirroredMissing(t).length ? `<div class="warn">${mirroredMissing(t).length} 台对调的设备在用它，缺对调版底图</div>` : ""}</td>
     <td data-label="区域">${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
     <td class="acts">
       ${global.template_id === t.id ? "" : `<button onclick="setGlobal('${esc(t.id)}')">设为全局</button>`}
       <button onclick="showPreview('/api/v1/admin/templates/${esc(t.id)}/preview')">预览</button>
       <button onclick="templateForm('${esc(t.id)}')">编辑</button>
+      <button onclick="backgroundDialog('${esc(t.id)}')">底图</button>
       <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
       <button class="danger" onclick="deleteTemplate('${esc(t.id)}')" ${only ? 'disabled title="这是最后一个模板，不能删除"' : ""}>删除</button>
     </td></tr>`).join("");
   $("#tplTable").innerHTML = `<tr class="head"><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
 function setGlobal(id) { $("#globalSel").value = id; saveGlobal(); }
+
+// ---- 模板底图：节日主题等模板画不出来的画面，垫在最下面 ----
+// mediaRect 返回模板的媒体区（mirror 时是对调后的位置）
+const mediaRect = (t, mirror) => { const m = t.regions.find(r => r.type === "media"); return m && (mirror ? { ...m, x: t.w - m.x - m.w } : m); };
+const rectText = r => r ? `x=${r.x} y=${r.y}，${r.w}×${r.h}` : "（这个模板没有媒体区）";
+// mirroredMissing 返回开了左右对调、正在用模板 t、而 t 有底图却没有对调版的设备
+const mirroredMissing = t => t.background_image && !t.background_image_mirror ? devices.filter(d => d.display.mirror && d.active_template === t.id) : [];
+const bgPath = (id, mirror) => `/api/v1/admin/templates/${encodeURIComponent(id)}/background${mirror ? "?mirror=1" : ""}`;
+function backgroundDialog(id) {
+  const t = tplById(id);
+  const files = [t.background_image, t.background_image_mirror];
+  const covering = t.regions.filter(r => r.type !== "media" && r.bg); // 设了底色的区域会盖住底图
+  modal(`<h2>底图 — ${esc(t.name)}</h2>
+    <p>底图垫在模板最下面，放节日主题等模板画不出来的画面。尺寸 <b>${t.w}×${t.h}</b> 像素，PNG 或 JPG（比例不同时铺满后居中裁切）。</p>
+    <p><b>媒体区会被视频/图片完全盖住，底图的这块要留空</b>：常规版 ${rectText(mediaRect(t, false))}；对调版 ${rectText(mediaRect(t, true))}。
+      属性/文字区域不设底色时是透明的，会透出底图。下载参考图（媒体区标红、各区域标框）当作参考图层来做底图。</p>
+    ${covering.length ? `<p class="warn">${covering.map(r => `${esc(REGION_LABEL[r.type] || r.type)}区域${r.type === "attribute" ? "（" + esc(r.key) + "）" : ""}设了底色 ${esc(r.bg)}`).join("、")}，
+      会盖住底图的这块：在模板【编辑】里把底色留空即透明。</p>` : ""}
+    ${["常规版", "对调版（开了左右对调的设备用）"].map((label, i) => `<div class="card"><h3>${label}</h3>
+      <div class="row"><button onclick="downloadGuide('${esc(id)}', ${!!i})">下载参考图</button>
+        ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png,image/jpeg" onchange="uploadBg('${esc(id)}', ${!!i}, this)">`}
+        ${files[i] ? `<button onclick="showPreview('/api/v1/admin/templates/${esc(id)}/preview${i ? "?mirror=1" : ""}', '#bgBox${i}')">预览效果</button>
+          <button class="danger" onclick="removeBg('${esc(id)}', ${!!i})">移除</button>` : ""}</div>
+      <div id="bgBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
+    <p class="muted">没有对调版时，对调的设备用常规版原图（不翻转）。</p>
+    <div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+  files.forEach(async (f, i) => {
+    if (!f) return;
+    const r = await authFetch("/api/v1/admin/backgrounds/" + f);
+    if (r.ok && $("#bgBox" + i)) $("#bgBox" + i).innerHTML = `<img class="preview" src="${URL.createObjectURL(await r.blob())}">`;
+  });
+}
+async function downloadGuide(id, mirror) {
+  const r = await authFetch(`/api/v1/admin/templates/${encodeURIComponent(id)}/guide${mirror ? "?mirror=1" : ""}`);
+  if (!r.ok) { toast(await r.text()); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await r.blob());
+  const t = tplById(id);
+  a.download = `background-guide-${t.w}x${t.h}${mirror ? "-mirrored" : ""}.png`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+async function uploadBg(id, mirror, input) {
+  const fd = new FormData(); fd.append("file", input.files[0]);
+  toast("上传中…");
+  try { await api(bgPath(id, mirror), { method: "POST", body: fd }); } catch { input.value = ""; return; }
+  toast("底图已更新");
+  await refresh(); backgroundDialog(id);
+}
+async function removeBg(id, mirror) {
+  if (!await confirmDialog(mirror ? "移除对调版底图？" : "移除底图？", mirror ? "" : "对调版会一起移除。", { ok: "移除", danger: true })) return;
+  try { await api(bgPath(id, mirror), { method: "DELETE" }); } catch { return; }
+  toast("已移除");
+  await refresh(); backgroundDialog(id);
+}
 const saveGlobal = () => send("PUT", "/api/v1/admin/global", { template_id: $("#globalSel").value }, "已保存");
 // splitTemplate 生成"一半属性、一半播放内容"的模板（画布 w×h）：表单新建/保存与 JSON 示例共用。
 function splitTemplate({ name = "左右分屏", w = 1440, h = 900, mediaLeft = false, key = "room", font_size = 160,
@@ -1414,19 +1518,20 @@ function templateForm(id) {
       <span class="muted">显示设备属性里该 key 对应的值，如 room</span></div>
     <div class="row">字号 <input type="text" id="f_size" value="${esc(attr.font_size)}" style="width:5em">
       文字色 <input type="text" id="f_color" value="${esc(attr.color)}" style="width:7em">
-      底色 <input type="text" id="f_bg" value="${esc(attr.bg)}" style="width:7em"></div>
+      底色 <input type="text" id="f_bg" value="${esc(attr.bg)}" placeholder="透明" style="width:7em">
+      <span class="muted">留空 = 透明（透出底图）</span></div>
     <div class="row">图片停留 <input type="number" id="f_dur" min="1" max="3600" style="width:5em" value="${esc(t?.image_duration_s || def.image_duration_s)}"> 秒
       <span class="muted">视频按自身长度播完即切</span></div>
     <div class="actions"><button onclick="closeModal()">取消</button>
       <button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button></div>`);
 }
 function saveTemplateForm(id) {
-  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸
-  saveTemplate(id, splitTemplate({
+  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸与底图
+  saveTemplate(id, Object.assign(splitTemplate({
     name: $("#f_name").value.trim(), w: t?.w, h: t?.h, mediaLeft: $("#f_side").value === "left",
     key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || undefined,
     color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), image_duration_s: parseInt($("#f_dur").value) || undefined,
-  }));
+  }), { background_image: t?.background_image, background_image_mirror: t?.background_image_mirror }));
 }
 const saveTemplate = (id, tpl) => send(id ? "PUT" : "POST", "/api/v1/admin/templates" + (id ? "/" + encodeURIComponent(id) : ""), tpl, "模板已保存", { close: true });
 
@@ -1472,6 +1577,32 @@ async function saveSchedules() {
 }
 
 // ================= 程序更新 =================
+// ---- 设备访问（root 密码、SSH 公钥）：只在打开本页和保存后读取，免得定时刷新冲掉正在编辑的内容 ----
+async function loadAccess() {
+  api("/api/v1/admin/token").then(t => $("#tokState").textContent = t.from_config
+    ? "当前口令来自 server.json" : "当前口令在后台修改于 " + fmtTime(t.changed_at)).catch(() => {});
+  let a;
+  try { a = await api("/api/v1/admin/access"); } catch { return; }
+  $("#accPwState").textContent = a.root_password_set_at ? "已设置于 " + fmtTime(a.root_password_set_at) : "未设置（设备保持装机时的密码）";
+  $("#accKeys").value = a.ssh_keys.join("\n");
+}
+async function saveAccess() {
+  const keys = $("#accKeys").value.split("\n").map(s => s.trim()).filter(Boolean), pw = $("#accPw").value;
+  if (pw && !await confirmDialog("重设所有设备的 root 密码？", "现场键盘控制台登录要用新密码。", { ok: "重设" })) return;
+  if (await send("PUT", "/api/v1/admin/access", { root_password: pw, ssh_keys: keys }, "已保存，设备将在一个轮询周期内更新")) {
+    $("#accPw").value = ""; loadAccess();
+  }
+}
+async function changeToken() {
+  const a = $("#tokNew").value, b = $("#tokNew2").value;
+  if (a !== b) { toast("两次输入的口令不一致"); return; }
+  if (!await confirmDialog("修改管理口令？", "其他人要用新口令重新登录；忘了口令只能在服务器上改 server.json 找回。", { ok: "修改" })) return;
+  // 不用 send()：它会立刻刷新页面，那时浏览器里还是旧口令
+  try { await api("/api/v1/admin/token", { method: "PUT", ...J({ new_token: a }) }); } catch { return; }
+  saveToken(a, remembered());
+  toast("口令已修改");
+  $("#tokNew").value = $("#tokNew2").value = ""; loadAccess(); refresh();
+}
 function renderPackages() {
   const rows = packages.map(f => `<tr>
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
@@ -1538,7 +1669,7 @@ async function doRollout(version, cancel = false) {
 }
 
 refresh();
-setInterval(() => { if (!$("#overlay").classList.contains("show")) refresh(); }, 10000);
+setInterval(() => { if (!authBlocked && !$("#overlay").classList.contains("show")) refresh(); }, 10000);
 if (!token()) setToken();
 </script>
 </body>

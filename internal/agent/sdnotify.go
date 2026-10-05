@@ -33,8 +33,8 @@ var watchdogInterval = 30 * time.Second
 // 主循环其余时候由 Run 里的定时器喂狗，真卡死时看门狗照样生效。
 func keepFeeding(fn func()) {
 	done := make(chan struct{})
+	t := time.NewTicker(watchdogInterval) // 在这里读间隔：协程可能在 fn 返回后才开始跑
 	go func() {
-		t := time.NewTicker(watchdogInterval)
 		defer t.Stop()
 		for {
 			select {
