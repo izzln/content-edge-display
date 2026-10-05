@@ -108,7 +108,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	}
 	// incoming/ 是待处理原片的暂存区：任务只在内存里，重启后它们已无人认领，清掉。
 	os.RemoveAll(s.incomingDir())
-	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.incomingDir()} {
+	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.backgroundsDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
@@ -116,7 +116,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	if err := s.loadOrCreateCert(); err != nil {
 		return nil, err
 	}
-	if s.renderer, err = render.New(cfg.FontPath); err != nil {
+	if s.renderer, err = render.New(cfg.FontPath, s.backgroundsDir()); err != nil {
 		return nil, err
 	}
 	if cfg.FontPath == "" {

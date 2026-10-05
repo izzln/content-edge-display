@@ -62,6 +62,7 @@ type Manifest struct {
 	Items   []Item  `json:"items"`
 	Layout  *Layout `json:"layout,omitempty"`
 	Update  *Update `json:"update,omitempty"`
+	Access  *Access `json:"access,omitempty"`
 }
 
 // Downloads 返回本份清单需要设备端下载校验的全部文件（播放条目 + 叠加图）。
@@ -162,25 +163,26 @@ func (c *HashCache) Sum(path string) (sum string, size int64, err error) {
 	return sum, size, nil
 }
 
-// Version 由条目、程序更新与叠加布局计算清单版本号：内容不变则版本稳定（设备收到 304），
+// Version 由条目、程序更新、叠加布局与访问凭据计算清单版本号：内容不变则版本稳定（设备收到 304），
 // 任何一项出现/消失/变化都会让版本号变，触发设备刷新。
 //
 // 参与计算的不只是文件本身，还有影响播放行为的字段（类型、停留时长、媒体区位置）：
 // 只改停留时长或只改模板属性文字而媒体文件不变时版本号也必须变，
 // 否则设备一直收到 304，新设置永远到不了现场。
-func Version(items []Item, update *Update, layout *Layout) string {
+func Version(m Manifest) string {
 	h := sha256.New()
-	for _, it := range items {
+	for _, it := range m.Items {
 		fmt.Fprintf(h, "%s|%s|%s|%d\n", it.Name, it.SHA256, it.Type, it.Duration)
 	}
-	if update != nil {
-		fmt.Fprintf(h, "update|%s|%s\n", update.Version, update.SHA256)
+	if u := m.Update; u != nil {
+		fmt.Fprintf(h, "update|%s|%s\n", u.Version, u.SHA256)
 	}
-	if layout != nil {
+	if l := m.Layout; l != nil {
 		fmt.Fprintf(h, "layout|%d|%d|%d|%d|%d|%d|%s\n",
-			layout.CanvasW, layout.CanvasH,
-			layout.Media.X, layout.Media.Y, layout.Media.W, layout.Media.H,
-			layout.Overlay.SHA256)
+			l.CanvasW, l.CanvasH, l.Media.X, l.Media.Y, l.Media.W, l.Media.H, l.Overlay.SHA256)
+	}
+	if a := m.Access; a != nil {
+		fmt.Fprintf(h, "access|%s|%s\n", a.RootHash, strings.Join(a.SSHKeys, "|"))
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }

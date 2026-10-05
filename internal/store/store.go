@@ -32,13 +32,25 @@ const (
 
 // Template 是运营方定义的显示模板（画布 + 若干区域）。
 type Template struct {
-	ID             string   `json:"id"` // 自动生成，管理后台不暴露给使用者
-	Name           string   `json:"name"`
-	W              int      `json:"w"`
-	H              int      `json:"h"`
-	Background     string   `json:"background"`
-	ImageDurationS int      `json:"image_duration_s"` // 媒体区里每张图片停留几秒（视频播完即切）
-	Regions        []Region `json:"regions"`
+	ID         string `json:"id"` // 自动生成，管理后台不暴露给使用者
+	Name       string `json:"name"`
+	W          int    `json:"w"`
+	H          int    `json:"h"`
+	Background string `json:"background"`
+	// 底图（节日主题等区域画不出来的画面）：data_dir/backgrounds/ 下的文件，按内容命名（IsBackgroundFile）。
+	// 开了左右对调的设备用对调版；没有对调版时用原图（不翻转：底图里的文字翻过来就是反字）。
+	BackgroundImage       string   `json:"background_image,omitempty"`
+	BackgroundImageMirror string   `json:"background_image_mirror,omitempty"`
+	ImageDurationS        int      `json:"image_duration_s"` // 媒体区里每张图片停留几秒（视频播完即切）
+	Regions               []Region `json:"regions"`
+}
+
+// BackgroundFor 返回这个模板在 mirror 设置下要用的底图（可能为空）。
+func (t Template) BackgroundFor(mirror bool) string {
+	if mirror && t.BackgroundImageMirror != "" {
+		return t.BackgroundImageMirror
+	}
+	return t.BackgroundImage
 }
 
 // MediaRegion 返回模板的播放列表区域。
@@ -130,6 +142,13 @@ type Schedule struct {
 	End        string `json:"end"`   // "HH:MM"；Start > End 表示跨午夜
 }
 
+// Access 是统一下发给所有设备的访问凭据（后台「设备访问」）。
+type Access struct {
+	RootPasswordHash  string    `json:"root_password_hash,omitempty"` // SHA-512 crypt（$6$），设备用 chpasswd -e 写入
+	RootPasswordSetAt time.Time `json:"root_password_set_at,omitzero"`
+	SSHKeys           []string  `json:"ssh_keys,omitempty"` // 允许 SSH 登录 root 的公钥；非空时设备禁止密码 SSH
+}
+
 // State 是全部可变状态；字段直接序列化到 state.json。
 type State struct {
 	DeviceAttrs  map[string]map[string]string `json:"device_attrs"`
@@ -142,6 +161,7 @@ type State struct {
 	Global       GlobalConfig                 `json:"global"`
 	Schedules    []Schedule                   `json:"schedules"`
 	CacheQuotaGB int                          `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
+	Access       Access                       `json:"access"`
 }
 
 // DefaultCacheQuotaGB 是文件缓存区的默认配额。
@@ -332,9 +352,13 @@ func ActiveSchedule(list []Schedule, now time.Time) (Schedule, bool) {
 // ---- 校验 ----
 
 var (
-	idPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	colorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+	idPattern         = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	colorPattern      = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+	backgroundPattern = regexp.MustCompile(`^bg-[0-9a-f]{16}\.(png|jpg)$`)
 )
+
+// IsBackgroundFile 判断 name 是不是底图文件名（bg-<内容 sha256 前 16 位>.png|jpg）。
+func IsBackgroundFile(name string) bool { return backgroundPattern.MatchString(name) }
 
 // ValidateTemplate 填充默认值并校验模板定义。
 func ValidateTemplate(t *Template) error {
@@ -355,6 +379,14 @@ func ValidateTemplate(t *Template) error {
 	}
 	if !colorPattern.MatchString(t.Background) {
 		return fmt.Errorf("template: 非法背景色 %q", t.Background)
+	}
+	for _, f := range []string{t.BackgroundImage, t.BackgroundImageMirror} {
+		if f != "" && !IsBackgroundFile(f) {
+			return fmt.Errorf("template: 非法底图 %q（请在后台「底图」里上传）", f)
+		}
+	}
+	if t.BackgroundImage == "" && t.BackgroundImageMirror != "" {
+		return errors.New("template: 有对调版底图时必须先有常规底图")
 	}
 	if len(t.Regions) == 0 {
 		return errors.New("template: 至少需要一个区域")

@@ -41,6 +41,10 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"PUT /api/v1/admin/templates/{id}":                  s.handlePutTemplate,
 		"DELETE /api/v1/admin/templates/{id}":               s.handleDeleteTemplate,
 		"GET /api/v1/admin/templates/{id}/preview":          s.handlePreview,
+		"POST /api/v1/admin/templates/{id}/background":      s.handleUploadBackground,
+		"DELETE /api/v1/admin/templates/{id}/background":    s.handleDeleteBackground,
+		"GET /api/v1/admin/templates/{id}/guide":            s.handleBackgroundGuide,
+		"GET /api/v1/admin/backgrounds/{file}":              s.handleGetBackground,
 		"GET /api/v1/admin/global":                          s.handleGetGlobal,
 		"PUT /api/v1/admin/global":                          s.handlePutGlobal,
 		"GET /api/v1/admin/schedules":                       s.handleGetSchedules,
@@ -51,6 +55,8 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"GET /api/v1/admin/deps":                            s.handleListDeps,
 		"DELETE /api/v1/admin/deps/{codename}":              s.handleDeleteDeps,
 		"PUT /api/v1/admin/rollout":                         s.handleRollout,
+		"GET /api/v1/admin/access":                          s.handleGetAccess,
+		"PUT /api/v1/admin/access":                          s.handlePutAccess,
 		"GET /api/v1/admin/cache":                           s.handleGetCache,
 		"PUT /api/v1/admin/cache":                           s.handlePutCache,
 	} {
@@ -374,7 +380,14 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	for _, f := range []string{t.BackgroundImage, t.BackgroundImageMirror} {
+		if _, err := os.Stat(filepath.Join(s.backgroundsDir(), f)); f != "" && err != nil {
+			http.Error(w, "底图 "+f+" 不存在（请在后台「底图」里上传）", http.StatusBadRequest)
+			return
+		}
+	}
 	if s.update(w, func(st *store.State) { st.Templates[t.ID] = t }) {
+		s.gcBackgrounds()
 		writeJSON(w, t)
 	}
 }
@@ -411,6 +424,7 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		delete(st.Templates, id)
 		store.EnsureGlobalTemplate(st)
 	}):
+		s.gcBackgrounds()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

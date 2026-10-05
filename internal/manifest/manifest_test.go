@@ -118,14 +118,14 @@ func TestVersionStableAndChanges(t *testing.T) {
 	cache := NewHashCache()
 	writeFile(t, dir, "a.jpg", "aaa")
 
-	v1 := Version(buildDir(t, dir, cache), nil, nil)
-	if v2 := Version(buildDir(t, dir, cache), nil, nil); v1 != v2 {
+	v1 := Version(Manifest{Items: buildDir(t, dir, cache)})
+	if v2 := Version(Manifest{Items: buildDir(t, dir, cache)}); v1 != v2 {
 		t.Fatalf("version not stable: %s vs %s", v1, v2)
 	}
 
 	// 新增文件 → 版本变化
 	writeFile(t, dir, "b.mp4", "bbb")
-	v3 := Version(buildDir(t, dir, cache), nil, nil)
+	v3 := Version(Manifest{Items: buildDir(t, dir, cache)})
 	if v3 == v1 {
 		t.Fatal("version unchanged after adding a file")
 	}
@@ -137,28 +137,32 @@ func TestVersionStableAndChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	items := buildDir(t, dir, cache)
-	v4 := Version(items, nil, nil)
+	v4 := Version(Manifest{Items: items})
 	if v4 == v3 {
 		t.Fatal("version unchanged after modifying a file")
 	}
 
 	// 只改停留时长、只加指令、只改叠加布局 —— 都必须改变版本号，否则设备一直收到 304
 	items[0].Duration++
-	if Version(items, nil, nil) == v4 {
+	if Version(Manifest{Items: items}) == v4 {
 		t.Fatal("停留时长变化必须改变版本号")
 	}
 	items[0].Duration--
-	if Version(items, &Update{Version: "2"}, nil) == v4 {
+	if Version(Manifest{Items: items, Update: &Update{Version: "2"}}) == v4 {
 		t.Fatal("指令出现必须改变版本号")
 	}
 	l := &Layout{CanvasW: 1440, CanvasH: 900, Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}
-	withLayout := Version(items, nil, l)
+	withLayout := Version(Manifest{Items: items, Layout: l})
 	if withLayout == v4 {
 		t.Fatal("叠加布局出现必须改变版本号")
 	}
 	l.Media.X = 0
-	if Version(items, nil, l) == withLayout {
+	if Version(Manifest{Items: items, Layout: l}) == withLayout {
 		t.Fatal("媒体区位置变化必须改变版本号")
+	}
+	withAccess := Version(Manifest{Items: items, Access: &Access{SSHKeys: []string{"ssh-ed25519 AAAA a"}}})
+	if withAccess == v4 || Version(Manifest{Items: items, Access: &Access{SSHKeys: []string{"ssh-ed25519 AAAA b"}}}) == withAccess {
+		t.Fatal("访问凭据出现或变化必须改变版本号")
 	}
 }
 

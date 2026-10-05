@@ -317,6 +317,16 @@
       <pre class="cmd" id="installCmd"></pre>
       <div class="muted">服务端证书指纹（设备只认这张证书，装机脚本已自动填好）：<code id="tlsFP"></code></div>
     </div>
+    <div class="card" id="accessBox">
+      <h3>设备访问</h3>
+      <p class="muted">统一设置所有设备的 root 密码与允许 SSH 登录的公钥，保存后在线设备一个轮询周期内生效、离线设备上线即生效。
+        配了公钥后设备只允许密钥 SSH；现场插键盘的控制台始终用 root 密码。人员变动删掉其公钥、密码泄露重设即可。</p>
+      <div class="row">root 密码 <input type="password" id="accPw" placeholder="不改就留空" autocomplete="new-password" style="width:14em">
+        <span class="muted" id="accPwState"></span></div>
+      <div class="row" style="display:block">SSH 公钥 <span class="muted">每行一个，整行复制运维电脑上的 ~/.ssh/id_ed25519.pub</span>
+        <textarea id="accKeys" style="min-height:90px" placeholder="ssh-ed25519 AAAA… 张三的笔记本"></textarea></div>
+      <div class="row"><button class="primary" onclick="saveAccess()">保存</button></div>
+    </div>
     <div class="card">
       <div class="row">
         <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
@@ -434,6 +444,7 @@ tabs.forEach(b => b.onclick = () => {
     $("#tab-" + x.dataset.tab).style.display = x === b ? "" : "none";
   }
   if (b.dataset.tab === "storage") loadStorage();
+  if (b.dataset.tab === "packages") loadAccess();
 });
 
 let devices = [], templates = [], global = {}, schedules = [], packages = [], deps = [], info = {}, infoFetchedAt = 0;
@@ -503,6 +514,7 @@ async function saveQuota() {
 function healthLine(d) {
   const hb = d.heartbeat, parts = [];
   if (hb.update_error) parts.push(`<span class="bad" title="${esc(hb.update_error)}">程序更新失败</span>`);
+  if (hb.access_error) parts.push(`<span class="bad" title="${esc(hb.access_error)}">访问设置失败</span>`);
   if (hb.hwdec === "no") parts.push('<span class="bad" title="硬解没起来，视频在软解：会发热、卡顿。在设备上运行 check-display.sh 排查">软解</span>');
   else if (hb.hwdec) parts.push(`<span class="okc" title="实际使用的硬件解码器">硬解 ${esc(hb.hwdec)}</span>`);
   if (hb.temp_c) parts.push(hb.temp_c >= 80
@@ -701,8 +713,9 @@ async function contentDialog(id) {
     <div class="row"><label><input type="radio" name="mode" value="template" ${own ? "checked" : ""} onchange="onModeChange()"> 专属模板</label>
       <select id="ovSel" ${own ? "" : "disabled"} onchange="renderContentBody()">${tplOptions(d.display.template_id)}</select>
       <button class="sm" onclick="copyGlobalTemplate()">复制全局模板再改</button></div>
-    <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""}> 左右对调
+    <div class="row"><label><input type="checkbox" id="mirrorChk" ${d.display.mirror ? "checked" : ""} onchange="updateMirrorWarn()"> 左右对调
       <span class="muted">同一个模板，属性放到另一边（不镜像文字）</span></label></div>
+    <div id="mirrorWarn"></div>
     <hr>
     <div id="contentBody"></div>
     <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button></div><div id="previewBox"></div>
@@ -711,6 +724,12 @@ async function contentDialog(id) {
   renderContentBody();
 }
 
+// updateMirrorWarn 对调的设备用的模板有底图却没有对调版时提示（会用常规版原图，媒体区与底图的留空对不上）。
+function updateMirrorWarn() {
+  const tpl = tplById(ownTemplate() ? $("#ovSel").value : global.template_id);
+  $("#mirrorWarn").innerHTML = $("#mirrorChk").checked && tpl?.background_image && !tpl.background_image_mirror
+    ? `<p class="warn">模板「${esc(tpl.name)}」有底图但没有对调版：对调后底图的留空与媒体区对不上。到"模板与时段"页的【底图】上传对调版。</p>` : "";
+}
 function onModeChange() {
   $("#ovSel").disabled = !ownTemplate();
   renderContentBody();
@@ -739,6 +758,7 @@ function renderContentBody() {
   if (!box) return;
   const tid = ownTemplate() ? $("#ovSel").value : global.template_id;
   const tpl = tplById(tid), region = mediaRegionOf(tid);
+  updateMirrorWarn();
   if (!tpl) {
     box.innerHTML = '<p class="warn">尚未设置模板，先到"模板与时段"页设置全局默认模板。</p>';
     return;
@@ -1372,18 +1392,75 @@ function renderTemplates() {
   $("#globalSel").innerHTML = tplOptions(global.template_id);
   const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
   const rows = templates.map(t => `<tr>
-    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒</div></td>
+    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒${t.background_image ? ` · 底图${t.background_image_mirror ? "（含对调版）" : ""}` : ""}</div>
+      ${mirroredMissing(t).length ? `<div class="warn">${mirroredMissing(t).length} 台对调的设备在用它，缺对调版底图</div>` : ""}</td>
     <td data-label="区域">${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
     <td class="acts">
       ${global.template_id === t.id ? "" : `<button onclick="setGlobal('${esc(t.id)}')">设为全局</button>`}
       <button onclick="showPreview('/api/v1/admin/templates/${esc(t.id)}/preview')">预览</button>
       <button onclick="templateForm('${esc(t.id)}')">编辑</button>
+      <button onclick="backgroundDialog('${esc(t.id)}')">底图</button>
       <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
       <button class="danger" onclick="deleteTemplate('${esc(t.id)}')" ${only ? 'disabled title="这是最后一个模板，不能删除"' : ""}>删除</button>
     </td></tr>`).join("");
   $("#tplTable").innerHTML = `<tr class="head"><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
 function setGlobal(id) { $("#globalSel").value = id; saveGlobal(); }
+
+// ---- 模板底图：节日主题等模板画不出来的画面，垫在最下面 ----
+// mediaRect 返回模板的媒体区（mirror 时是对调后的位置）
+const mediaRect = (t, mirror) => { const m = t.regions.find(r => r.type === "media"); return m && (mirror ? { ...m, x: t.w - m.x - m.w } : m); };
+const rectText = r => r ? `x=${r.x} y=${r.y}，${r.w}×${r.h}` : "（这个模板没有媒体区）";
+// mirroredMissing 返回开了左右对调、正在用模板 t、而 t 有底图却没有对调版的设备
+const mirroredMissing = t => t.background_image && !t.background_image_mirror ? devices.filter(d => d.display.mirror && d.active_template === t.id) : [];
+const bgPath = (id, mirror) => `/api/v1/admin/templates/${encodeURIComponent(id)}/background${mirror ? "?mirror=1" : ""}`;
+function backgroundDialog(id) {
+  const t = tplById(id);
+  const files = [t.background_image, t.background_image_mirror];
+  const covering = t.regions.filter(r => r.type !== "media" && r.bg); // 设了底色的区域会盖住底图
+  modal(`<h2>底图 — ${esc(t.name)}</h2>
+    <p>底图垫在模板最下面，放节日主题等模板画不出来的画面。尺寸 <b>${t.w}×${t.h}</b> 像素，PNG 或 JPG（比例不同时铺满后居中裁切）。</p>
+    <p><b>媒体区会被视频/图片完全盖住，底图的这块要留空</b>：常规版 ${rectText(mediaRect(t, false))}；对调版 ${rectText(mediaRect(t, true))}。
+      属性/文字区域不设底色时是透明的，会透出底图。下载参考图（媒体区标红、各区域标框）当作参考图层来做底图。</p>
+    ${covering.length ? `<p class="warn">${covering.map(r => `${esc(REGION_LABEL[r.type] || r.type)}区域${r.type === "attribute" ? "（" + esc(r.key) + "）" : ""}设了底色 ${esc(r.bg)}`).join("、")}，
+      会盖住底图的这块：在模板【编辑】里把底色留空即透明。</p>` : ""}
+    ${["常规版", "对调版（开了左右对调的设备用）"].map((label, i) => `<div class="card"><h3>${label}</h3>
+      <div class="row"><button onclick="downloadGuide('${esc(id)}', ${!!i})">下载参考图</button>
+        ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png,image/jpeg" onchange="uploadBg('${esc(id)}', ${!!i}, this)">`}
+        ${files[i] ? `<button onclick="showPreview('/api/v1/admin/templates/${esc(id)}/preview${i ? "?mirror=1" : ""}', '#bgBox${i}')">预览效果</button>
+          <button class="danger" onclick="removeBg('${esc(id)}', ${!!i})">移除</button>` : ""}</div>
+      <div id="bgBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
+    <p class="muted">没有对调版时，对调的设备用常规版原图（不翻转）。</p>
+    <div class="actions"><button onclick="closeModal()">关闭</button></div>`);
+  files.forEach(async (f, i) => {
+    if (!f) return;
+    const r = await authFetch("/api/v1/admin/backgrounds/" + f);
+    if (r.ok && $("#bgBox" + i)) $("#bgBox" + i).innerHTML = `<img class="preview" src="${URL.createObjectURL(await r.blob())}">`;
+  });
+}
+async function downloadGuide(id, mirror) {
+  const r = await authFetch(`/api/v1/admin/templates/${encodeURIComponent(id)}/guide${mirror ? "?mirror=1" : ""}`);
+  if (!r.ok) { toast(await r.text()); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await r.blob());
+  const t = tplById(id);
+  a.download = `background-guide-${t.w}x${t.h}${mirror ? "-mirrored" : ""}.png`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+async function uploadBg(id, mirror, input) {
+  const fd = new FormData(); fd.append("file", input.files[0]);
+  toast("上传中…");
+  try { await api(bgPath(id, mirror), { method: "POST", body: fd }); } catch { input.value = ""; return; }
+  toast("底图已更新");
+  await refresh(); backgroundDialog(id);
+}
+async function removeBg(id, mirror) {
+  if (!await confirmDialog(mirror ? "移除对调版底图？" : "移除底图？", mirror ? "" : "对调版会一起移除。", { ok: "移除", danger: true })) return;
+  try { await api(bgPath(id, mirror), { method: "DELETE" }); } catch { return; }
+  toast("已移除");
+  await refresh(); backgroundDialog(id);
+}
 const saveGlobal = () => send("PUT", "/api/v1/admin/global", { template_id: $("#globalSel").value }, "已保存");
 // splitTemplate 生成"一半属性、一半播放内容"的模板（画布 w×h）：表单新建/保存与 JSON 示例共用。
 function splitTemplate({ name = "左右分屏", w = 1440, h = 900, mediaLeft = false, key = "room", font_size = 160,
@@ -1414,19 +1491,20 @@ function templateForm(id) {
       <span class="muted">显示设备属性里该 key 对应的值，如 room</span></div>
     <div class="row">字号 <input type="text" id="f_size" value="${esc(attr.font_size)}" style="width:5em">
       文字色 <input type="text" id="f_color" value="${esc(attr.color)}" style="width:7em">
-      底色 <input type="text" id="f_bg" value="${esc(attr.bg)}" style="width:7em"></div>
+      底色 <input type="text" id="f_bg" value="${esc(attr.bg)}" placeholder="透明" style="width:7em">
+      <span class="muted">留空 = 透明（透出底图）</span></div>
     <div class="row">图片停留 <input type="number" id="f_dur" min="1" max="3600" style="width:5em" value="${esc(t?.image_duration_s || def.image_duration_s)}"> 秒
       <span class="muted">视频按自身长度播完即切</span></div>
     <div class="actions"><button onclick="closeModal()">取消</button>
       <button class="primary" onclick="saveTemplateForm(${t ? `'${esc(t.id)}'` : "null"})">保存</button></div>`);
 }
 function saveTemplateForm(id) {
-  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸
-  saveTemplate(id, splitTemplate({
+  const t = id ? tplById(id) : null; // 编辑时保留原画布尺寸与底图
+  saveTemplate(id, Object.assign(splitTemplate({
     name: $("#f_name").value.trim(), w: t?.w, h: t?.h, mediaLeft: $("#f_side").value === "left",
     key: $("#f_key").value.trim(), font_size: parseInt($("#f_size").value) || undefined,
     color: $("#f_color").value.trim(), bg: $("#f_bg").value.trim(), image_duration_s: parseInt($("#f_dur").value) || undefined,
-  }));
+  }), { background_image: t?.background_image, background_image_mirror: t?.background_image_mirror }));
 }
 const saveTemplate = (id, tpl) => send(id ? "PUT" : "POST", "/api/v1/admin/templates" + (id ? "/" + encodeURIComponent(id) : ""), tpl, "模板已保存", { close: true });
 
@@ -1472,6 +1550,20 @@ async function saveSchedules() {
 }
 
 // ================= 程序更新 =================
+// ---- 设备访问（root 密码、SSH 公钥）：只在打开本页和保存后读取，免得定时刷新冲掉正在编辑的内容 ----
+async function loadAccess() {
+  let a;
+  try { a = await api("/api/v1/admin/access"); } catch { return; }
+  $("#accPwState").textContent = a.root_password_set_at ? "已设置于 " + fmtTime(a.root_password_set_at) : "未设置（设备保持装机时的密码）";
+  $("#accKeys").value = a.ssh_keys.join("\n");
+}
+async function saveAccess() {
+  const keys = $("#accKeys").value.split("\n").map(s => s.trim()).filter(Boolean), pw = $("#accPw").value;
+  if (pw && !await confirmDialog("重设所有设备的 root 密码？", "现场键盘控制台登录要用新密码。", { ok: "重设" })) return;
+  if (await send("PUT", "/api/v1/admin/access", { root_password: pw, ssh_keys: keys }, "已保存，设备将在一个轮询周期内更新")) {
+    $("#accPw").value = ""; loadAccess();
+  }
+}
 function renderPackages() {
   const rows = packages.map(f => `<tr>
     <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>

@@ -6,6 +6,7 @@
 #     ./make-image.sh Armbian_<版本>_Orangepione_trixie_current_<内核>_minimal.img.xz
 #   → 同目录下 <原名>-display.img，用 balenaEtcher 等烧到 TF 卡，插卡上电即可
 #
+# ROOT_PASSWORD 是装机期间的临时密码（现场控制台用）；设备注册后换成后台「设备访问」里统一设置的密码。
 # 可选：HDMI_MODE、HDMI_FORCE、CMA（同一键装机命令）。
 # 镜像里带着注册口令和 root 密码的哈希：当作机密保管，别外传。装机成功后设备上的这两样会被删掉
 # （注册口令仍在 agent.json 里，与手工装机相同）。
@@ -13,7 +14,7 @@ set -eu
 SRC="${1:?用法见脚本开头}"
 : "${BOOTSTRAP:?需要 BOOTSTRAP，如 http://display.lan:9000（后台「程序更新」页装机命令里的地址）}"
 : "${ENROLL_TOKEN:?需要 ENROLL_TOKEN（server.json 的 enroll_token）}"
-: "${ROOT_PASSWORD:?需要 ROOT_PASSWORD（设备 root 登录密码，现场救援控制台用）}"
+: "${ROOT_PASSWORD:?需要 ROOT_PASSWORD（装机期间的 root 密码，注册后换成后台「设备访问」里的）}"
 [ "$(id -u)" = 0 ] || { echo "请以 root 运行（要挂载镜像）" >&2; exit 1; }
 
 OUT="${SRC%.xz}"

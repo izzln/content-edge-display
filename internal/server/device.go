@@ -233,6 +233,7 @@ type content struct {
 	Mirror    bool              `json:"mirror"`
 	Media     []mediaFile       `json:"media"` // 媒体区的播放列表；模板没有媒体区时为空
 	Update    *manifest.Update  `json:"update,omitempty"`
+	Access    *manifest.Access  `json:"access,omitempty"`
 }
 
 // mediaFile 是播放列表里的一个文件。带上大小与修改时间：同名文件被替换也算内容变了。
@@ -251,7 +252,7 @@ func (s *Server) content(deviceID string, now time.Time) (content, error) {
 	)
 	s.store.View(func(st *store.State) {
 		c.Attrs = maps.Clone(st.DeviceAttrs[deviceID])
-		c.Update = pendingUpdate(st, deviceID, now)
+		c.Update, c.Access = pendingUpdate(st, deviceID, now), deviceAccess(st.Access)
 		if until := st.TestUntil[deviceID]; now.Before(until) {
 			c.TestUntil, c.Source, found = until, "test", true
 			return
@@ -352,12 +353,9 @@ func (s *Server) buildManifest(deviceID string, c content) (*manifest.Manifest, 
 	if layout != nil {
 		items, layout.Overlay = media, png
 	}
-	return &manifest.Manifest{
-		Version: manifest.Version(items, c.Update, layout),
-		Items:   items,
-		Layout:  layout,
-		Update:  c.Update,
-	}, nil
+	m := &manifest.Manifest{Items: items, Layout: layout, Update: c.Update, Access: c.Access}
+	m.Version = manifest.Version(*m)
+	return m, nil
 }
 
 // renderedItem 把渲染结果存成 PNG（文件名内嵌内容哈希）并包装成清单条目，同时清掉这台设备的旧渲染图

@@ -19,6 +19,12 @@ CONF=/etc/display-agent
 SERVER_URL=$(sed -n 's/.*"server_url": *"\([^"]*\)".*/\1/p' "$CONF/agent.json")
 install_deps "$SERVER_URL" "$CONF/server.crt"
 
+# 设备不自行升级系统：内核、dtb、u-boot 升级可能弄坏显示与硬解，只随整包 OTA 有计划地变；
+# apt 的定时任务还会在 OTA 安装依赖时占着 dpkg 锁
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+dpkg-query -W -f='${db:Status-Abbrev}${Package}\n' 'linux-image-*' 'linux-dtb-*' 'linux-u-boot-*' 'armbian-firmware*' 2>/dev/null |
+	sed -n 's/^ii *//p' | xargs -r apt-mark hold >/dev/null
+
 # 回滚检查放在固定路径：systemd 的 ExecStartPre 指向它，新版本起不来时也要能跑
 install -m 0755 "$HERE/rollback-check.sh" "$DIR/rollback-check.sh.new"
 mv "$DIR/rollback-check.sh.new" "$DIR/rollback-check.sh"

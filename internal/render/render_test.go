@@ -6,8 +6,11 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
 	"testing"
 	"time"
+
+	"golang.org/x/image/font/sfnt"
 
 	"github.com/izzln/content-edge-display/internal/store"
 )
@@ -35,7 +38,7 @@ func encode(t *testing.T, img image.Image) []byte {
 
 func newRenderer(t *testing.T) *Renderer {
 	t.Helper()
-	r, err := New("")
+	r, err := New("", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +168,7 @@ func TestRenderTestCard(t *testing.T) {
 }
 
 func TestNewBadFontPath(t *testing.T) {
-	if _, err := New("/no/such/font.ttf"); err == nil {
+	if _, err := New("/no/such/font.ttf", ""); err == nil {
 		t.Fatal("expected error for missing font file")
 	}
 }
@@ -192,5 +195,20 @@ func TestRenderTestCardUsesGivenTimezone(t *testing.T) {
 	}
 	if asTokyo != render(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)) {
 		t.Fatal("应显示东京时间 12:00:00")
+	}
+}
+
+// 文档推荐的 NotoSansCJK-Regular.ttc（apt install fonts-noto-cjk）是字体集合，必须能加载，并选中简体中文那一款。
+func TestFontCollection(t *testing.T) {
+	const p = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+	if _, err := os.Stat(p); err != nil {
+		t.Skip("本机没装 fonts-noto-cjk")
+	}
+	r, err := New(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := r.font.Name(nil, sfnt.NameIDFamily); name != "Noto Sans CJK SC" {
+		t.Fatalf("应选中简体中文字体，得到 %q", name)
 	}
 }

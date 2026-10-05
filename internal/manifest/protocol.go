@@ -20,6 +20,13 @@ const (
 // DeviceIDPattern 是合法的设备编号：设备拿主机名当编号前要过它，服务端注册时也按它校验。
 var DeviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
 
+// Access 是设备的访问凭据（后台「设备访问」统一设置，随清单下发）：root 密码的 SHA-512 crypt 哈希
+// （设备用 chpasswd -e 写入，现场键盘控制台登录用）与允许 SSH 登录的公钥（非空时设备禁止密码 SSH）。
+type Access struct {
+	RootHash string   `json:"root_hash,omitempty"`
+	SSHKeys  []string `json:"ssh_keys,omitempty"`
+}
+
 // RegisterRequest 是设备自注册请求体（POST /api/v1/device/register，不签名，凭 enroll_token）。
 type RegisterRequest struct {
 	DeviceID     string `json:"device_id"`
@@ -46,4 +53,6 @@ type Heartbeat struct {
 	OutputH int `json:"output_h,omitempty"`
 	// UpdateError 是最近一次程序更新失败的原因（下载/解包/update.sh），后台设备列表标红显示。
 	UpdateError string `json:"update_error,omitempty"`
+	// AccessError 是最近一次应用访问凭据（root 密码、SSH 公钥）失败的原因，后台设备列表标红显示。
+	AccessError string `json:"access_error,omitempty"`
 }
