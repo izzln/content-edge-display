@@ -155,6 +155,8 @@
   #alert h3 { margin:0 0 4px; font-size:16px; font-weight:600; }
   #alert p { margin:0; font-size:13px; color:var(--label); }
   #alert input { width:100%; margin-top:12px; text-align:left; }
+  #alert label.remember { display:flex; align-items:center; justify-content:center; gap:6px; margin-top:10px; font-size:13px; }
+  #alert label.remember input { width:44px; margin:0; }
   #alert .btns { display:flex; border-top:.5px solid var(--sep); }
   #alert .btns button { flex:1; height:44px; margin:0; border-radius:0; background:none; font-size:16px; font-weight:400; }
   #alert .btns button + button { border-left:.5px solid var(--sep); }
@@ -289,7 +291,7 @@
     <button class="tab" data-tab="packages">程序更新</button>
     <button class="tab" data-tab="storage">存储</button>
   </nav>
-  <span class="right"><button class="sm" onclick="setToken()">设置 Token</button></span>
+  <span class="right"><button class="sm" onclick="setToken()">设置 Token</button> <button class="sm" onclick="logout()">退出</button></span>
 </header>
 <main>
   <div id="tab-devices">
@@ -328,6 +330,15 @@
       <div class="row"><button class="primary" onclick="saveAccess()">保存</button></div>
     </div>
     <div class="card">
+      <h3>管理口令</h3>
+      <p class="muted">所有人共用的后台口令。服务器上只存哈希。连续输错 5 次后按来源地址锁定 1 分钟，再错依次 5 分钟、15 分钟、1 小时。
+        忘了口令：在服务器上把 server.json 的 admin_token 改成一个新值并重启服务端。</p>
+      <div class="row"><span class="muted" id="tokState"></span></div>
+      <div class="row">新口令 <input type="password" id="tokNew" autocomplete="new-password" style="width:12em">
+        再输一遍 <input type="password" id="tokNew2" autocomplete="new-password" style="width:12em">
+        <button class="primary" onclick="changeToken()">修改</button></div>
+    </div>
+    <div class="card">
       <div class="row">
         <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
         备注 <input type="text" id="pkgNotes" placeholder="可选">
@@ -350,17 +361,44 @@
 "use strict";
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const token = () => localStorage.getItem("admin_token") || "";
-const DAYS = ["日","一","二","三","四","五","六"];
-async function setToken() {
-  const t = await promptDialog("管理 Token", "服务端 server.json 里的 admin_token", token(), { secure: true });
-  if (t !== null) { localStorage.setItem("admin_token", t.trim()); refresh(); }
+// 管理口令：默认只在当前标签页记住（sessionStorage，关掉即忘）；勾了"记住这台电脑"才存 localStorage。
+// 浏览器存储在隐私模式等情况下可能不可用：一律 try，取不到就当没有。
+const token = () => { try { return sessionStorage.getItem("admin_token") || localStorage.getItem("admin_token") || ""; } catch { return ""; } };
+const remembered = () => { try { return !!localStorage.getItem("admin_token"); } catch { return false; } };
+function saveToken(t, remember) {
+  try {
+    sessionStorage.removeItem("admin_token"); localStorage.removeItem("admin_token");
+    if (t) (remember ? localStorage : sessionStorage).setItem("admin_token", t);
+  } catch { /* 忽略 */ }
 }
+const DAYS = ["日","一","二","三","四","五","六"];
+let authBlocked = false, tokenAsking = null; // 口令不对或被锁时停止自动刷新，免得拿着错口令一直撞
+function setToken(msg = "服务端 server.json 里的 admin_token，或在后台改过的口令") {
+  return tokenAsking ||= new Promise(resolve => {
+    showAlert(`<div class="body"><h3>管理口令</h3><p>${esc(msg)}</p>
+        <input type="password" id="alertInput" value="${esc(token())}" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <label class="remember"><input type="checkbox" id="rememberChk" ${remembered() ? "checked" : ""}> 记住这台电脑</label></div>
+      <div class="btns"><button onclick="finishAlert(null)">取消</button><button class="default" onclick="finishAlert($('#alertInput').value)">好</button></div>`,
+      "", v => {
+        tokenAsking = null;
+        if (typeof v === "string" && v.trim()) { saveToken(v.trim(), $("#rememberChk").checked); authBlocked = false; refresh(); }
+        resolve();
+      });
+    const inp = $("#alertInput");
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") finishAlert(inp.value); });
+    inp.focus(); inp.select();
+  });
+}
+function logout() { saveToken(""); location.reload(); }
 // 所有管理接口都要带口令；图片（缩略图、预览）也走这里取 blob
 const authFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { "X-Admin-Token": token(), ...opts.headers } });
 async function api(path, opts = {}) {
   const r = await authFetch(path, opts);
-  if (r.status === 401) { toast("Token 无效，请重新设置"); throw new Error("unauthorized"); }
+  if (r.status === 401 || r.status === 429) {
+    const msg = r.status === 401 ? "口令不对，请重新输入（连续输错多次会被锁定一段时间）" : await r.text();
+    if (!authBlocked) { authBlocked = true; toast(msg); setToken(msg); }
+    throw new Error("unauthorized");
+  }
   if (!r.ok) { const t = await r.text(); toast(t); throw new Error(t); }
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
@@ -417,18 +455,6 @@ function confirmDialog(title, msg = "", { ok = "好", danger = false } = {}) {
     $("#alert .btns button:last-child").focus();
   });
 }
-// promptDialog(标题, 说明, 默认值, {secure}) → Promise<string|null>
-function promptDialog(title, msg, value = "", { secure = false } = {}) {
-  return new Promise(resolve => {
-    showAlert(`<div class="body"><h3>${esc(title)}</h3><p>${esc(msg)}</p>
-        <input type="${secure ? "password" : "text"}" id="alertInput" value="${esc(value)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-      <div class="btns"><button onclick="finishAlert(null)">取消</button><button class="default" onclick="finishAlert($('#alertInput').value)">好</button></div>`,
-      "", v => resolve(typeof v === "string" ? v : null));
-    const inp = $("#alertInput");
-    inp.addEventListener("keydown", e => { if (e.key === "Enter") finishAlert(inp.value); });
-    inp.focus(); inp.select();
-  });
-}
 // actionSheet(标题, [{label, run, destructive}])：窄屏时收起来的行内操作
 function actionSheet(title, items) {
   showAlert(`<div class="menu-group">${title ? `<div class="ttl">${esc(title)}</div>` : ""}${items.map((it, i) =>
@@ -460,6 +486,7 @@ const SOURCE = { test: "测试中", override: "专属模板", schedule: "时段"
 
 const arr = v => Array.isArray(v) ? v : [];
 async function refresh() {
+  if (authBlocked) return;
   try {
     const [d, t, g, s, f, dp, i] = await Promise.all([
       api("/api/v1/admin/devices"), api("/api/v1/admin/templates"), api("/api/v1/admin/global"),
@@ -1552,6 +1579,8 @@ async function saveSchedules() {
 // ================= 程序更新 =================
 // ---- 设备访问（root 密码、SSH 公钥）：只在打开本页和保存后读取，免得定时刷新冲掉正在编辑的内容 ----
 async function loadAccess() {
+  api("/api/v1/admin/token").then(t => $("#tokState").textContent = t.from_config
+    ? "当前口令来自 server.json" : "当前口令在后台修改于 " + fmtTime(t.changed_at)).catch(() => {});
   let a;
   try { a = await api("/api/v1/admin/access"); } catch { return; }
   $("#accPwState").textContent = a.root_password_set_at ? "已设置于 " + fmtTime(a.root_password_set_at) : "未设置（设备保持装机时的密码）";
@@ -1563,6 +1592,16 @@ async function saveAccess() {
   if (await send("PUT", "/api/v1/admin/access", { root_password: pw, ssh_keys: keys }, "已保存，设备将在一个轮询周期内更新")) {
     $("#accPw").value = ""; loadAccess();
   }
+}
+async function changeToken() {
+  const a = $("#tokNew").value, b = $("#tokNew2").value;
+  if (a !== b) { toast("两次输入的口令不一致"); return; }
+  if (!await confirmDialog("修改管理口令？", "其他人要用新口令重新登录；忘了口令只能在服务器上改 server.json 找回。", { ok: "修改" })) return;
+  // 不用 send()：它会立刻刷新页面，那时浏览器里还是旧口令
+  try { await api("/api/v1/admin/token", { method: "PUT", ...J({ new_token: a }) }); } catch { return; }
+  saveToken(a, remembered());
+  toast("口令已修改");
+  $("#tokNew").value = $("#tokNew2").value = ""; loadAccess(); refresh();
 }
 function renderPackages() {
   const rows = packages.map(f => `<tr>
@@ -1630,7 +1669,7 @@ async function doRollout(version, cancel = false) {
 }
 
 refresh();
-setInterval(() => { if (!$("#overlay").classList.contains("show")) refresh(); }, 10000);
+setInterval(() => { if (!authBlocked && !$("#overlay").classList.contains("show")) refresh(); }, 10000);
 if (!token()) setToken();
 </script>
 </body>

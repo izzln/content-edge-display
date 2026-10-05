@@ -149,6 +149,14 @@ type Access struct {
 	SSHKeys           []string  `json:"ssh_keys,omitempty"` // 允许 SSH 登录 root 的公钥；非空时设备禁止密码 SSH
 }
 
+// Admin 是后台的管理口令：只存 PBKDF2 哈希。ConfigHash 是 server.json 里 admin_token 的哈希，
+// 用来发现有人在服务器上把它改成了新值（找回口令，见 server.syncAdminToken）。
+type Admin struct {
+	TokenHash  string    `json:"token_hash"`
+	ConfigHash string    `json:"config_hash"`
+	ChangedAt  time.Time `json:"changed_at,omitzero"` // 在后台改口令的时间
+}
+
 // State 是全部可变状态；字段直接序列化到 state.json。
 type State struct {
 	DeviceAttrs  map[string]map[string]string `json:"device_attrs"`
@@ -162,6 +170,7 @@ type State struct {
 	Schedules    []Schedule                   `json:"schedules"`
 	CacheQuotaGB int                          `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
 	Access       Access                       `json:"access"`
+	Admin        Admin                        `json:"admin"`
 }
 
 // DefaultCacheQuotaGB 是文件缓存区的默认配额。

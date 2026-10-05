@@ -34,7 +34,8 @@ type Server struct {
 	cache    *contentCache // 文件缓存区，见 cache.go
 	jobs     *jobQueue     // 视频转码、PDF 渲染，见 jobs.go
 	cert     *tls.Certificate
-	certFP   string // 证书公钥指纹（tls.go）
+	certFP   string     // 证书公钥指纹（tls.go）
+	auth     *adminAuth // 后台口令验证与猜错锁定（adminauth.go）
 
 	mu         sync.Mutex
 	lastSeen   map[string]time.Time
@@ -114,6 +115,9 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 		}
 	}
 	if err := s.loadOrCreateCert(); err != nil {
+		return nil, err
+	}
+	if err := s.syncAdminToken(); err != nil {
 		return nil, err
 	}
 	if s.renderer, err = render.New(cfg.FontPath, s.backgroundsDir()); err != nil {

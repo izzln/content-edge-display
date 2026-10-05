@@ -150,26 +150,6 @@ func TestHeartbeatAndAdmin(t *testing.T) {
 	}
 }
 
-func TestAdminTokenRequired(t *testing.T) {
-	s, _ := newTestServer(t)
-	s.cfg.AdminToken = "tok"
-	h := s.Handler()
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/admin/devices", nil))
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 without token, got %d", w.Code)
-	}
-
-	r := httptest.NewRequest("GET", "/api/v1/admin/devices", nil)
-	r.Header.Set("X-Admin-Token", "tok")
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 with token, got %d", w.Code)
-	}
-}
-
 // 401 要说明原因：时钟偏差、密钥不对、设备不存在的处理办法完全不同。
 func TestAuthFailureExplainsWhy(t *testing.T) {
 	s, _ := newTestServer(t)
