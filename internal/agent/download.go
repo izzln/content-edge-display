@@ -61,7 +61,7 @@ func (a *Agent) fetch(ctx context.Context, urlPath, part string, offset int64, h
 	// 就放弃，下次轮询从 .part 续传。
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, err := a.newRequest(ctx, http.MethodGet, u.EscapedPath(), nil)
+	req, err := a.newRequest(ctx, http.MethodGet, u.EscapedPath(), nil, true)
 	if err != nil {
 		return err
 	}

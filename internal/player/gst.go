@@ -36,7 +36,7 @@ type GST struct {
 
 	callTimeout   time.Duration // 一次请求等多久回复
 	watchInterval time.Duration // 看门狗（兼状态查询）间隔
-	restartDelay  time.Duration // 播放进程退出后隔多久重启
+	restartDelay  time.Duration // 播放进程退出后隔多久重启；接连起不来（如 HDMI 没接）时翻倍，最长 maxRestartDelay
 
 	mu        sync.Mutex
 	desired   *Scene
@@ -136,14 +136,12 @@ func (p *GST) send(proc *gstProc, s Scene) error {
 	}
 	req := map[string]any{"cmd": "load", "items": items, "overlay": nil}
 	if s.OverlayPNG != "" {
-		raw, err := rasterize(s.OverlayPNG, p.width, p.height)
+		raw, hole, err := rasterize(s.OverlayPNG, p.width, p.height, s.Media)
 		if err != nil {
 			// 叠加图用不了时宁可整屏播放，也不要黑屏
 			log.Printf("player(gst): overlay unusable (%v), playing fullscreen", err)
 		} else {
-			req["overlay"] = raw
-			req["canvas"] = []int{s.CanvasW, s.CanvasH}
-			req["media"] = []int{s.Media.X, s.Media.Y, s.Media.W, s.Media.H}
+			req["overlay"], req["media"] = raw, []int{hole.X, hole.Y, hole.W, hole.H} // 都是输出坐标
 		}
 	}
 	if err := proc.call(req, nil); err != nil {
@@ -153,8 +151,12 @@ func (p *GST) send(proc *gstProc, s Scene) error {
 	return nil
 }
 
+// maxRestartDelay 是播放进程接连起不来时重启间隔的上限；跑稳了（超过 stableRun）就恢复到 restartDelay。
+const maxRestartDelay, stableRun = time.Minute, time.Minute
+
 // supervise 拉起播放进程并在其退出后自动重启（进程级守护的最内层）。
 func (p *GST) supervise(ctx context.Context) {
+	delay := p.restartDelay
 	for ctx.Err() == nil {
 		if !p.waitUnpaused(ctx) {
 			return
@@ -168,6 +170,7 @@ func (p *GST) supervise(ctx context.Context) {
 		}
 		p.runCancel = cancel
 		p.mu.Unlock()
+		started := time.Now()
 		p.runOnce(runCtx)
 		p.mu.Lock()
 		p.runCancel = nil
@@ -180,12 +183,16 @@ func (p *GST) supervise(ctx context.Context) {
 		if paused {
 			continue
 		}
-		log.Printf("player(gst): player process exited, restarting in %s", p.restartDelay)
+		if time.Since(started) >= stableRun {
+			delay = p.restartDelay
+		}
+		log.Printf("player(gst): player process exited, restarting in %s", delay)
 		select {
-		case <-time.After(p.restartDelay):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return
 		}
+		delay = min(2*delay, maxRestartDelay)
 	}
 }
 

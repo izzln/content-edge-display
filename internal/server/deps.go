@@ -15,7 +15,7 @@ import (
 )
 
 // 离线依赖包（scripts/build-deps.sh 产出的 display-deps-<代号>-armhf.tar.gz）：设备播放所需的 Debian 软件包
-// 连同全部下层依赖，外加 apt 索引。后台与程序包从同一个入口上传，解到 data/deps/<代号>/；设备的 deps.sh（首次安装
+// 连同全部下层依赖，外加 apt 索引。后台与程序包从同一个入口上传，解到 data/deps/<代号>/；设备的 update.sh（首次安装
 // 与每次 OTA）把 HTTPS 端口的 /apt/<代号>/ 当作 apt 仓库，只信任服务端证书，从局域网安装，不访问外网。
 // 里面都是公开的 Debian 软件包，不需要口令。
 

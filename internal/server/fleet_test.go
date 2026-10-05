@@ -113,9 +113,9 @@ func agentBinaryFixture(t *testing.T) []byte {
 	return b
 }
 
-// agentPackage 现造一个设备程序包（与 make package 同样的结构）：VERSION + 程序 +（可选）update.sh 与 install-agent.sh。
+// agentPackage 现造一个设备程序包（与 make package 同样的结构）：程序 +（可选）update.sh 与 install-agent.sh。
 func agentPackage(t *testing.T, version string, bin []byte, withUpdate bool) []byte {
-	files := []testutil.File{{Name: "VERSION", Body: version + "\n"}, {Name: "display-agent", Body: string(bin), Exec: true}}
+	files := []testutil.File{{Name: "display-agent", Body: string(bin), Exec: true}}
 	if withUpdate {
 		files = append(files, testutil.File{Name: "update.sh", Body: "#!/bin/sh\nexit 0\n", Exec: true},
 			testutil.File{Name: "install-agent.sh", Body: "#!/bin/sh\n", Exec: true})
@@ -170,7 +170,6 @@ func TestPackageUploadRejectsWrongFile(t *testing.T) {
 	}{
 		{"误传裸程序而不是整包", bin, "不是有效的设备程序包"},
 		{"包里是本机架构的程序", agentPackage(t, testAgentVersion, native, true), "目标平台"},
-		{"VERSION 与程序内置版本不一致", agentPackage(t, "1.0.0", bin, true), "内置版本"},
 		{"缺 update.sh", agentPackage(t, testAgentVersion, bin, false), "update.sh"},
 	} {
 		if w := uploadPackageRaw(t, h, c.pkg); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.want) {

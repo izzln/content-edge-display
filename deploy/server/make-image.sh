@@ -41,7 +41,7 @@ done
 echo "== 设置 root 密码，跳过 Armbian 首次登录向导"
 # 向导会在控制台自动登录 root、等人输入密码和用户名——无人值守时会一直卡在那里；
 # 它的自动登录也要关掉，否则谁接上键盘都直接是 root。
-hash=$(openssl passwd -6 "$ROOT_PASSWORD")
+hash=$(printf '%s' "$ROOT_PASSWORD" | openssl passwd -6 -stdin) # 密码不进进程参数（ps 看得到）
 awk -F: -v OFS=: -v h="$hash" -v d=$(($(date +%s) / 86400)) '$1 == "root" { $2 = h; $3 = d } 1' \
 	"$MNT/etc/shadow" > "$MNT/etc/shadow.new"
 cat "$MNT/etc/shadow.new" > "$MNT/etc/shadow" # 覆盖内容，保留原文件的属主与权限

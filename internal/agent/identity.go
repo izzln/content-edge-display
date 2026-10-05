@@ -17,14 +17,14 @@ import (
 	"github.com/izzln/content-edge-display/internal/sign"
 )
 
-// Identity 是设备的持久化身份。
-type Identity struct {
+// deviceIdentity 是设备的持久化身份。
+type deviceIdentity struct {
 	DeviceID string `json:"device_id"`
 	Secret   string `json:"secret"`
 }
 
-// HardwareInfo 随注册上报，便于运营方识别机器。
-type HardwareInfo struct {
+// hardwareInfo 随注册上报，便于运营方识别机器。
+type hardwareInfo struct {
 	Hostname string
 	HWSerial string
 	MAC      string
@@ -41,9 +41,9 @@ var defaultHostnames = map[string]bool{
 // 这个文件丢了或读不出来，设备就会用**同一个编号、新的密钥**去注册，服务端会当成冒名顶替
 // 拒绝（409）。所以：写入要落盘（fsync）；读不出来时不悄悄重建，而是把坏文件留作现场证据、
 // 大声报出来——新密钥要运营方在后台确认后才生效。
-func loadOrCreateIdentity(cacheDir string, hw HardwareInfo) (Identity, error) {
+func loadOrCreateIdentity(cacheDir string, hw hardwareInfo) (deviceIdentity, error) {
 	path := filepath.Join(cacheDir, "identity.json")
-	var id Identity
+	var id deviceIdentity
 	switch data, err := os.ReadFile(path); {
 	case err == nil:
 		if err := json.Unmarshal(data, &id); err == nil && id.DeviceID != "" && id.Secret != "" {
@@ -57,20 +57,20 @@ func loadOrCreateIdentity(cacheDir string, hw HardwareInfo) (Identity, error) {
 	case os.IsNotExist(err):
 	default:
 		// 读不了（权限、IO 错误）不是"没有"：此时重建只会得到一个服务端不认的新密钥
-		return Identity{}, fmt.Errorf("read %s: %w", path, err)
+		return deviceIdentity{}, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	id = Identity{DeviceID: deriveDeviceID(hw), Secret: rand.Text() + rand.Text()}
+	id = deviceIdentity{DeviceID: deriveDeviceID(hw), Secret: rand.Text() + rand.Text()}
 	data, _ := json.MarshalIndent(id, "", "  ")
 	if err := fsutil.WriteFile(path, data, 0o600); err != nil {
-		return Identity{}, err
+		return deviceIdentity{}, err
 	}
 	log.Printf("agent: new identity device_id=%s key=%s (%s)", id.DeviceID, sign.Fingerprint(id.Secret), path)
 	return id, nil
 }
 
 // deriveDeviceID 从主机名或硬件序列号派生设备编号。
-func deriveDeviceID(hw HardwareInfo) string {
+func deriveDeviceID(hw hardwareInfo) string {
 	host := strings.ToLower(strings.TrimSpace(hw.Hostname))
 	if host != "" && !defaultHostnames[host] && manifest.DeviceIDPattern.MatchString(host) {
 		return host
@@ -86,8 +86,8 @@ func deriveDeviceID(hw HardwareInfo) string {
 }
 
 // collectHardwareInfo 读取主机名、SoC 序列号（全志 SID → /proc/cpuinfo Serial）与第一块网卡的 MAC。
-func collectHardwareInfo() HardwareInfo {
-	var hw HardwareInfo
+func collectHardwareInfo() hardwareInfo {
+	var hw hardwareInfo
 	hw.Hostname, _ = os.Hostname()
 	if data, err := os.ReadFile("/sys/bus/nvmem/devices/sunxi-sid0/nvmem"); err == nil && len(data) >= 16 {
 		hw.HWSerial = hex.EncodeToString(data[:16])

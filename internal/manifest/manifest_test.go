@@ -151,7 +151,7 @@ func TestVersionStableAndChanges(t *testing.T) {
 	if Version(Manifest{Items: items, Update: &Update{Version: "2"}}) == v4 {
 		t.Fatal("指令出现必须改变版本号")
 	}
-	l := &Layout{CanvasW: 1440, CanvasH: 900, Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}
+	l := &Layout{Media: Rect{720, 0, 720, 900}, Overlay: Item{SHA256: "x"}}
 	withLayout := Version(Manifest{Items: items, Layout: l})
 	if withLayout == v4 {
 		t.Fatal("叠加布局出现必须改变版本号")

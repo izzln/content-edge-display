@@ -346,7 +346,6 @@ func (s *Server) buildManifest(deviceID string, c content) (*manifest.Manifest, 
 		if len(media) > 0 {
 			r, _ := c.Template.MediaRect(c.Mirror)
 			kind, layout = "ovl", &manifest.Layout{
-				CanvasW: c.Template.W, CanvasH: c.Template.H,
 				Media: manifest.Rect{X: r.Min.X, Y: r.Min.Y, W: r.Dx(), H: r.Dy()},
 			}
 		}

@@ -16,8 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
 // ---- 测试素材 ----
@@ -383,9 +381,6 @@ func TestManifestLayoutAndMirror(t *testing.T) {
 	if got, want := m.Layout.Media, (struct{ X, Y, W, H int }{720, 0, 720, 900}); got.X != want.X ||
 		got.Y != want.Y || got.W != want.W || got.H != want.H {
 		t.Fatalf("媒体区矩形 = %+v，期望右半屏 %+v", got, want)
-	}
-	if m.Layout.CanvasW != manifest.CanvasW || m.Layout.CanvasH != manifest.CanvasH {
-		t.Fatalf("画布尺寸错误：%dx%d", m.Layout.CanvasW, m.Layout.CanvasH)
 	}
 	if !strings.HasPrefix(m.Layout.Overlay.Name, "ovl_") || m.Layout.Overlay.Size == 0 {
 		t.Fatalf("叠加图条目不完整：%+v", m.Layout.Overlay)

@@ -23,7 +23,8 @@ case "$SERVER_URL" in https://*) ;; *) echo "SERVER_URL 必须是 https:// 地�
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 INSTALL_DIR=/usr/local/lib/display-agent
-VERSION=$(cat "$HERE/VERSION")
+# 版本号内置在程序里；顺带确认程序能在这块板子上运行
+VERSION=$("$HERE/display-agent" -version) || { echo "display-agent 无法在本机运行（不是 ARMv7 的 Armbian？）" >&2; exit 1; }
 # 显示屏模式。面板 EDID 报的往往是 1920x1080——必须在两处显式指定：
 #   - 内核 video= 参数（armbianEnv.txt）：管控制台，也让该模式出现在连接器的可用模式里；
 #   - agent.json 的 display_mode：播放进程据此设置显示模式，不指定就用 EDID 首选模式。
@@ -37,7 +38,7 @@ CMA="${CMA:-$CMA_DEFAULT}"
 
 # agent.json 每次安装都按当前参数重写：重装/改服务端地址时不用先手工删文件。
 # 设备特有的状态（编号、密钥）在 /var/lib/display-agent/identity.json 里，不受影响。
-# 先写配置：update.sh 安装依赖时要用到服务端地址与证书。
+# 先放证书：update.sh 从服务端的离线依赖包安装依赖时要用到它（服务端地址经 SERVER_URL 传过去）。
 mkdir -p "$INSTALL_DIR/versions" /etc/display-agent
 [ -n "${SERVER_CERT:-}" ] && install -m 0644 "$SERVER_CERT" /etc/display-agent/server.crt
 cat > /etc/display-agent/agent.json <<JSON
@@ -54,7 +55,7 @@ echo "   已写入 /etc/display-agent/agent.json"
 echo "== 安装 display-agent $VERSION 到 $INSTALL_DIR（含 GStreamer 等依赖）"
 rm -rf "$INSTALL_DIR/versions/$VERSION"
 cp -a "$HERE" "$INSTALL_DIR/versions/$VERSION"
-sh "$INSTALL_DIR/versions/$VERSION/update.sh" "$INSTALL_DIR"
+SERVER_URL="$SERVER_URL" sh "$INSTALL_DIR/versions/$VERSION/update.sh"
 ln -sfn "$INSTALL_DIR/versions/$VERSION" "$INSTALL_DIR/current"
 rm -f "$INSTALL_DIR/pending-verify" "$INSTALL_DIR/previous"
 

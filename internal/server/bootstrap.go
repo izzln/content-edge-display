@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"text/template"
 
 	"github.com/izzln/content-edge-display/internal/store"
@@ -36,6 +37,7 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 		"Fingerprint": s.certFP,
 		"Cert":        string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.cert.Certificate[0]})),
 		"Bootstrap":   "http://" + r.Host,
+		"Now":         strconv.FormatInt(s.now().Unix(), 10),
 	})
 }
 

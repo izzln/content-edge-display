@@ -4,12 +4,11 @@
 在管理后台「程序更新」页上传它，新设备装机和已有设备升级都从服务端取这同一个包。
 
 ```
-display-agent            设备代理程序（ARMv7，静态编译）
-VERSION                  版本号（与程序内置版本一致，服务端据此识别）
-install-agent.sh         首次安装：装依赖、按 OTA 布局安装、写配置、设置显示参数、开机自启、重启
+display-agent            设备代理程序（ARMv7，静态编译；版本号内置，display-agent -version 可查）
+install-agent.sh         首次安装：写配置、按 OTA 布局安装、设置显示参数、开机自启、重启
 deps.txt                 播放所需的 Debian 软件包清单（安装与 make deps 共用）
-deps.sh                  安装 deps.txt：优先服务端的离线依赖包，update.sh 每次执行都调用
-update.sh                本版本的安装步骤：首次安装与每次 OTA 都执行（systemd 单元、固定路径的脚本等）
+update.sh                本版本的安装步骤：首次安装与每次 OTA 都执行（装 deps.txt：优先服务端的离线依赖包；
+                         systemd 单元、固定路径的脚本等）
 rollback-check.sh        OTA 回滚检查（由 systemd ExecStartPre 调用）
 check-display.sh         现场自检：输出分辨率、硬件解码、CMA、SoC 温度
 display-agent.service    systemd 单元

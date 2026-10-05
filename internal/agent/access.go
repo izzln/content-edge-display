@@ -52,32 +52,42 @@ func runCommand(stdin, name string, args ...string) error {
 	return nil
 }
 
-func (a *Agent) accessStatePath() string { return filepath.Join(a.cfg.CacheDir, "access-applied") }
+// accessFPPath 记着上次成功应用的访问凭据的指纹：重启后不必再应用一遍（会重载 sshd）。
+func (a *Agent) accessFPPath() string { return filepath.Join(a.cfg.CacheDir, "access-applied") }
 
-// applyAccess 把清单里的访问凭据落到系统上；与上次成功应用的相同（指纹记在 cache_dir）就什么都不做。
+func (a *Agent) loadAccessFP() string {
+	b, _ := os.ReadFile(a.accessFPPath())
+	return string(b)
+}
+
+// applyAccess 把清单里的访问凭据落到系统上；与上次成功应用的相同（按指纹比）就什么都不做。
 // 清单里没有（后台从没设置过）时保持系统现状。
 func (a *Agent) applyAccess() {
 	acc := a.access
-	if acc == nil || time.Since(a.accessFailedAt) < accessRetryInterval {
+	if acc == nil || !a.accRetry.due() {
 		return
 	}
 	b, _ := json.Marshal(acc)
 	sum := sha256.Sum256(b)
 	fp := hex.EncodeToString(sum[:8])
-	if applied, _ := os.ReadFile(a.accessStatePath()); string(applied) == fp {
+	if fp == a.accessFP {
 		return
 	}
-	if err := a.acc.apply(*acc); err != nil {
-		a.accessFailedAt, a.accessErr = time.Now(), "access settings: "+err.Error()
+	if err := a.accessSys.apply(*acc); err != nil {
+		a.accRetry.fail("access settings: " + err.Error())
 		log.Printf("agent: applying access settings failed: %v (retry in %s)", err, accessRetryInterval)
 		return
 	}
-	a.accessFailedAt, a.accessErr = time.Time{}, ""
-	if err := fsutil.WriteFile(a.accessStatePath(), []byte(fp), 0o600); err != nil {
+	a.accRetry.clear()
+	a.accessFP = fp
+	if err := fsutil.WriteFile(a.accessFPPath(), []byte(fp), 0o600); err != nil {
 		log.Printf("agent: %v", err)
 	}
-	log.Printf("agent: access settings applied (root password %s, %d SSH key(s))",
-		map[bool]string{true: "set", false: "unchanged"}[acc.RootHash != ""], len(acc.SSHKeys))
+	root := "unchanged"
+	if acc.RootHash != "" {
+		root = "set"
+	}
+	log.Printf("agent: access settings applied (root password %s, %d SSH key(s))", root, len(acc.SSHKeys))
 }
 
 func (t accessTarget) apply(acc manifest.Access) error {

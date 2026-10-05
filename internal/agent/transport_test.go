@@ -132,7 +132,7 @@ func TestStatusWrittenWhileServerIsDown(t *testing.T) {
 	if err := a.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.CacheDir, "status.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(cfg.CacheDir, statusFile)); err != nil {
 		t.Fatalf("没连上服务端也应写播放状态：%v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,9 +34,16 @@ func TestMain(m *testing.M) {
 
 // fakePlayer 按 gstplayer.py 的协议应答，并把收到的请求逐行记进 GST_FAKE_LOG。
 //   - GST_FAKE_EXIT_ONCE=<标记文件>：第一次收到 load 后退出（模拟崩溃），之后正常；
-//   - GST_FAKE_HANG_ONCE=<标记文件>：第一次运行时不回状态查询（模拟卡死）。
+//   - GST_FAKE_HANG_ONCE=<标记文件>：第一次运行时不回状态查询（模拟卡死）；
+//   - GST_FAKE_DIE=1：一启动就退出（模拟起不来，如 HDMI 没接）。
 func fakePlayer() {
 	logPath := os.Getenv("GST_FAKE_LOG")
+	if os.Getenv("GST_FAKE_DIE") == "1" {
+		f, _ := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		fmt.Fprintf(f, "%d\n", time.Now().UnixMilli())
+		f.Close()
+		os.Exit(1)
+	}
 	once := func(env string) bool {
 		marker := os.Getenv(env)
 		if marker == "" {
@@ -172,7 +181,7 @@ func TestOverlayRasterizedToOutputSize(t *testing.T) {
 	err := p.Load(Scene{
 		Items:      []Item{{Path: "/m/a.mp4", Type: "video"}},
 		OverlayPNG: pngPath,
-		Media:      manifest.Rect{X: 720, Y: 0, W: 720, H: 900}, CanvasW: 1440, CanvasH: 900,
+		Media:      manifest.Rect{X: 720, Y: 0, W: 720, H: 900},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -182,8 +191,8 @@ func TestOverlayRasterizedToOutputSize(t *testing.T) {
 	if l["overlay"] != pngPath+".1920x1080.bgra" {
 		t.Fatalf("叠加图应光栅化到输出分辨率，得到 %v", l["overlay"])
 	}
-	if !jsonEq(l["media"], []int{720, 0, 720, 900}) || !jsonEq(l["canvas"], []int{1440, 900}) {
-		t.Fatalf("媒体区/画布不对：%v %v", l["media"], l["canvas"])
+	if !jsonEq(l["media"], []int{960, 0, 960, 1080}) {
+		t.Fatalf("媒体区应按同一比例换算到输出坐标：%v", l["media"])
 	}
 	raw, err := os.ReadFile(pngPath + ".1920x1080.bgra")
 	if err != nil || len(raw) != 1920*1080*4 {
@@ -201,6 +210,25 @@ func jsonEq(got any, want []int) bool {
 	a, _ := json.Marshal(got)
 	b, _ := json.Marshal(want)
 	return bytes.Equal(a, b)
+}
+
+// 播放进程接连起不来时重启间隔翻倍，不要每 2 秒拉一次、刷满日志。
+func TestRestartBacksOff(t *testing.T) {
+	_, logPath := startFake(t, 1440, 900, "GST_FAKE_DIE=1")
+	starts := func() []int64 {
+		data, _ := os.ReadFile(logPath)
+		var out []int64
+		for _, l := range strings.Fields(string(data)) {
+			n, _ := strconv.ParseInt(l, 10, 64)
+			out = append(out, n)
+		}
+		return out
+	}
+	testutil.WaitFor(t, 5*time.Second, "起了 4 次", func() bool { return len(starts()) >= 4 })
+	s := starts()
+	if g1, g3 := s[1]-s[0], s[3]-s[2]; g3 < 3*g1 {
+		t.Fatalf("重启间隔应翻倍增长：%v", s)
+	}
 }
 
 func TestStatsFromPlayer(t *testing.T) {
@@ -282,15 +310,17 @@ base = bytes(K + K + T + D) * 2  # 4×2，洞是右边两列
 hole = (2, 0, 2, 2)
 def pixels(buf, pitch):
     return [tuple(buf[r * pitch + i:r * pitch + i + 4]) for r in range(2) for i in range(0, 16, 4)]
+spans = g.deco_spans(base, 16, hole)
+assert spans == [(1, 2), (1, 2)], spans
 for pitch in (16, 24):
     buf = bytearray(pitch * 2)
-    g.paint(buf, pitch, 4, base, hole, 128, True)
+    g.paint(buf, pitch, 4, base, hole, spans, 128, True)
     assert pixels(buf, pitch) == [K, K, (0, 0, 0, 128), (5, 5, 5, 192)] * 2, (pitch, pixels(buf, pitch))
-    g.paint(buf, pitch, 4, base, hole, 255, False)  # 全黑：洞里全不透明，装饰颜色还在
+    g.paint(buf, pitch, 4, base, hole, spans, 255, False)  # 全黑：洞里全不透明，装饰颜色还在
     assert pixels(buf, pitch) == [K, K, (0, 0, 0, 255), (5, 5, 5, 255)] * 2, (pitch, pixels(buf, pitch))
-    g.paint(buf, pitch, 4, base, hole, 0, False)  # 淡入完：洞里还原叠加图
+    g.paint(buf, pitch, 4, base, hole, spans, 0, False)  # 淡入完：洞里还原叠加图
     assert pixels(buf, pitch) == [K, K, T, D] * 2, (pitch, pixels(buf, pitch))
-    g.paint(buf, pitch, 4, bytes(32), hole, 0, True)  # 换画面：整幅重画
+    g.paint(buf, pitch, 4, bytes(32), hole, [None, None], 0, True)  # 换画面：整幅重画
     assert pixels(buf, pitch) == [(0, 0, 0, 0)] * 8
 `).CombinedOutput()
 	if err != nil {
@@ -509,7 +539,7 @@ func TestPlayerScriptAppliesCoverCrop(t *testing.T) {
 	for _, m := range []map[string]any{
 		{"id": 1, "cmd": "config", "width": 1440, "height": 900, "fade": 0.1},
 		{"id": 2, "cmd": "load", "items": []map[string]any{{"path": img, "type": "image", "duration": 5}},
-			"overlay": overlay, "canvas": []int{1440, 900}, "media": []int{720, 0, 720, 900}},
+			"overlay": overlay, "media": []int{720, 0, 720, 900}},
 	} {
 		b, _ := json.Marshal(m)
 		stdin.Write(append(b, '\n'))

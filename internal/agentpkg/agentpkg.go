@@ -18,10 +18,9 @@ import (
 	"strings"
 )
 
-// 包内的固定文件。
+// 包内的固定文件。版本号只有一份：程序构建时注入的版本（Inspect 从构建信息里读）。
 const (
 	Binary        = "display-agent"    // 代理程序（linux/arm）
-	VersionFile   = "VERSION"          // 版本号，与程序内置版本一致
 	UpdateScript  = "update.sh"        // 安装步骤：首次安装与 OTA 都执行
 	InstallScript = "install-agent.sh" // 装机入口（install.sh 下载最新的包后执行）
 )
@@ -99,32 +98,23 @@ func writeEntry(dst string, h *tar.Header, body io.Reader) error {
 	return err
 }
 
-// Check 检查解开后的包是否齐全（VERSION、代理程序、update.sh、install-agent.sh），返回版本号。
-func Check(dir string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(dir, VersionFile))
-	if err != nil {
-		return "", fmt.Errorf("package has no %s", VersionFile)
-	}
-	version := strings.TrimSpace(string(data))
-	if !versionPattern.MatchString(version) {
-		return "", fmt.Errorf("package %s %q is invalid", VersionFile, version)
-	}
+// Check 检查解开后的包是否齐全：代理程序、update.sh、install-agent.sh。
+func Check(dir string) error {
 	for _, name := range []string{Binary, UpdateScript, InstallScript} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			return "", fmt.Errorf("package has no %s", name)
+			return fmt.Errorf("package has no %s", name)
 		}
 	}
-	return version, nil
+	return nil
 }
 
-// Inspect 在 Check 之外再确认包里的代理程序是 linux/arm 的 Go 程序、内置版本与 VERSION 一致，返回版本号。
+// Inspect 在 Check 之外再确认包里的代理程序是 linux/arm 的 Go 程序、注入了版本号，返回这个版本号。
 //
 // 没有这道校验时，本机架构的程序、没注入版本号的程序都会被原样分发到所有设备：设备装上后
 // systemd 执行失败，要连续失败 3 次才触发回滚，期间屏幕是黑的。Go 的构建信息可跨架构读取，
 // 因此这些错误都能在上传时当场挡住。
 func Inspect(dir string) (string, error) {
-	version, err := Check(dir)
-	if err != nil {
+	if err := Check(dir); err != nil {
 		return "", err
 	}
 	info, err := buildinfo.ReadFile(filepath.Join(dir, Binary))
@@ -142,8 +132,9 @@ func Inspect(dir string) (string, error) {
 	if m == nil {
 		return "", errors.New("包里的程序没有注入版本号")
 	}
-	if got := strings.Trim(m[1], `"'`); got != version {
-		return "", fmt.Errorf("程序内置版本是 %q，与包的 %s %q 不一致", got, VersionFile, version)
+	version := strings.Trim(m[1], `"'`)
+	if !versionPattern.MatchString(version) {
+		return "", fmt.Errorf("程序内置的版本号 %q 不合法", version)
 	}
 	return version, nil
 }

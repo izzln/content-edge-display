@@ -45,14 +45,12 @@ type Rect struct {
 	H int `json:"h"`
 }
 
-// Layout 描述“模板承载媒体”的合成方式：Overlay 是一张整屏 PNG，媒体区被挖成全透明；
-// 设备端把它贴在画面之上，并把播放内容限制在 Media 矩形里、按 cover 撑满。
+// Layout 描述“模板承载媒体”的合成方式：Overlay 是一张模板画布大小的 PNG，媒体区透明（有底图时可能
+// 压着装饰）；设备端把它贴在画面之上，并把播放内容限制在 Media 矩形（画布坐标）里、按 cover 撑满。
 // 这样属性/文字变化只需重发这张小 PNG，视频完全不用重新编码。
 //
 // 为 nil 表示整屏播放（测试卡，或模板已渲染成一张整屏图）。
 type Layout struct {
-	CanvasW int  `json:"canvas_w"`
-	CanvasH int  `json:"canvas_h"`
 	Media   Rect `json:"media"`
 	Overlay Item `json:"overlay"`
 }
@@ -194,8 +192,7 @@ func Version(m Manifest) string {
 		fmt.Fprintf(h, "update|%s|%s\n", u.Version, u.SHA256)
 	}
 	if l := m.Layout; l != nil {
-		fmt.Fprintf(h, "layout|%d|%d|%d|%d|%d|%d|%s\n",
-			l.CanvasW, l.CanvasH, l.Media.X, l.Media.Y, l.Media.W, l.Media.H, l.Overlay.SHA256)
+		fmt.Fprintf(h, "layout|%d|%d|%d|%d|%s\n", l.Media.X, l.Media.Y, l.Media.W, l.Media.H, l.Overlay.SHA256)
 	}
 	if a := m.Access; a != nil {
 		fmt.Fprintf(h, "access|%s|%s\n", a.RootHash, strings.Join(a.SSHKeys, "|"))

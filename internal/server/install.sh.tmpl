@@ -25,10 +25,10 @@ main() {
 	tmp=$(mktemp -d)
 	trap 'rm -rf "$tmp"' EXIT
 
-	# 设备没有 RTC：时钟没被 NTP 校准时按服务端时间校一下，否则 apt 会以"证书或软件源索引尚未生效"拒绝安装
+	# 设备没有 RTC：时钟没被 NTP 校准时按服务端时间（生成本脚本的时刻）校一下，
+	# 否则 apt 会以"证书或软件源索引尚未生效"拒绝安装
 	if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" != yes ]; then
-		now=$(curl -fsSI "$BOOTSTRAP/install.sh" 2>/dev/null | sed -n 's/^[Dd]ate: *//p' | tr -d '\r')
-		[ -n "$now" ] && date -s "$now" >/dev/null 2>&1 && echo "== 系统时间按服务端校准：$(date)"
+		date -s @{{.Now}} >/dev/null 2>&1 && echo "== 系统时间按服务端校准：$(date)"
 	fi
 
 	cat > "$tmp/server.crt" <<'CERT'

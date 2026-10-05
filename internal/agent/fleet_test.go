@@ -20,28 +20,28 @@ import (
 
 func TestDeriveDeviceID(t *testing.T) {
 	cases := []struct {
-		hw   HardwareInfo
+		hw   hardwareInfo
 		want string
 	}{
-		{HardwareInfo{Hostname: "scr-0017"}, "scr-0017"},
-		{HardwareInfo{Hostname: "SCR-0017"}, "scr-0017"},
-		{HardwareInfo{Hostname: "orangepione", HWSerial: "0123456789ABCDEF"}, "opi-89abcdef"},
-		{HardwareInfo{Hostname: "armbian", MAC: "02:42:ac:11:00:02"}, "opi-ac110002"},
-		{HardwareInfo{Hostname: "bad host name", HWSerial: "0123456789abcdef"}, "opi-89abcdef"},
+		{hardwareInfo{Hostname: "scr-0017"}, "scr-0017"},
+		{hardwareInfo{Hostname: "SCR-0017"}, "scr-0017"},
+		{hardwareInfo{Hostname: "orangepione", HWSerial: "0123456789ABCDEF"}, "opi-89abcdef"},
+		{hardwareInfo{Hostname: "armbian", MAC: "02:42:ac:11:00:02"}, "opi-ac110002"},
+		{hardwareInfo{Hostname: "bad host name", HWSerial: "0123456789abcdef"}, "opi-89abcdef"},
 	}
 	for _, c := range cases {
 		if got := deriveDeviceID(c.hw); got != c.want {
 			t.Errorf("%+v: got %q want %q", c.hw, got, c.want)
 		}
 	}
-	if got := deriveDeviceID(HardwareInfo{Hostname: "localhost"}); !strings.HasPrefix(got, "opi-") || len(got) != 12 {
+	if got := deriveDeviceID(hardwareInfo{Hostname: "localhost"}); !strings.HasPrefix(got, "opi-") || len(got) != 12 {
 		t.Errorf("fallback random id malformed: %q", got)
 	}
 }
 
 func TestIdentityPersistence(t *testing.T) {
 	dir := t.TempDir()
-	id1, err := loadOrCreateIdentity(dir, HardwareInfo{Hostname: "orangepione", HWSerial: "0123456789abcdef"}) // 默认主机名不能当编号
+	id1, err := loadOrCreateIdentity(dir, hardwareInfo{Hostname: "orangepione", HWSerial: "0123456789abcdef"}) // 默认主机名不能当编号
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestIdentityPersistence(t *testing.T) {
 		t.Fatalf("unexpected identity: %+v", id1)
 	}
 	// 再次加载：即使主机名变了也沿用已持久化的编号与密钥
-	if id2, err := loadOrCreateIdentity(dir, HardwareInfo{Hostname: "renamed-later"}); err != nil || id2 != id1 {
+	if id2, err := loadOrCreateIdentity(dir, hardwareInfo{Hostname: "renamed-later"}); err != nil || id2 != id1 {
 		t.Fatalf("identity not stable: %+v vs %+v (%v)", id1, id2, err)
 	}
 	if fi, err := os.Stat(filepath.Join(dir, "identity.json")); err != nil || fi.Mode().Perm() != 0o600 {
@@ -62,7 +62,7 @@ func TestIdentityCorruptFileIsKeptAndReported(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "identity.json")
 	os.WriteFile(path, []byte("{truncated"), 0o600)
-	id, err := loadOrCreateIdentity(dir, HardwareInfo{Hostname: "scr-0017"})
+	id, err := loadOrCreateIdentity(dir, hardwareInfo{Hostname: "scr-0017"})
 	if err != nil || id.DeviceID != "scr-0017" || id.Secret == "" {
 		t.Fatalf("应生成新身份：%+v %v", id, err)
 	}
@@ -75,7 +75,7 @@ func TestIdentityCorruptFileIsKeptAndReported(t *testing.T) {
 func TestIdentityUnreadableIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	os.Mkdir(filepath.Join(dir, "identity.json"), 0o755) // 读它会报 EISDIR
-	if _, err := loadOrCreateIdentity(dir, HardwareInfo{Hostname: "scr-0017"}); err == nil {
+	if _, err := loadOrCreateIdentity(dir, hardwareInfo{Hostname: "scr-0017"}); err == nil {
 		t.Fatal("身份文件读不了时应报错，而不是生成新密钥")
 	}
 }
@@ -207,11 +207,10 @@ func otaEnv(t *testing.T) *testEnv {
 }
 
 // offer 把程序包放进设备媒体目录（下载走同一个签名下载器），并作为清单里的待执行更新交给代理。
-func (e *testEnv) offer(t *testing.T, version, pkgVersion, updateScript string) manifest.Update {
+func (e *testEnv) offer(t *testing.T, version, updateScript string) manifest.Update {
 	t.Helper()
-	pkg := testutil.Package(pkgVersion,
-		testutil.File{Name: "VERSION", Body: pkgVersion + "\n"},
-		testutil.File{Name: "display-agent", Body: "new-binary-" + pkgVersion, Exec: true},
+	pkg := testutil.Package(version,
+		testutil.File{Name: "display-agent", Body: "new-binary-" + version, Exec: true},
 		testutil.File{Name: "update.sh", Body: updateScript, Exec: true},
 		testutil.File{Name: "install-agent.sh", Body: "#!/bin/sh\n", Exec: true},
 		testutil.File{Name: "check-display.sh", Body: "#!/bin/sh\n", Exec: true})
@@ -230,9 +229,9 @@ func TestApplyUpdateSwitchesSymlinks(t *testing.T) {
 	a, l, ctx := e.a, e.a.install, context.Background()
 	os.MkdirAll(l.versionDir("0.9.0"), 0o755) // 更早的版本：确认后应被清掉
 
-	e.offer(t, "2.0.0", "2.0.0", "#!/bin/sh\nset -e\ntouch \"$1/update-ran\"\n")
+	e.offer(t, "2.0.0", "#!/bin/sh\nset -e\necho \"$SERVER_URL\" > ../../update-ran\n")
 	if err := a.applyPendingUpdate(ctx); !errors.Is(err, ErrRestartForUpdate) {
-		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, a.updateErr)
+		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, a.updRetry.err)
 	}
 	cur, _ := os.Readlink(l.current())
 	prev, _ := os.Readlink(l.previous())
@@ -242,8 +241,8 @@ func TestApplyUpdateSwitchesSymlinks(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(cur, "display-agent")); err != nil || fi.Mode().Perm()&0o111 == 0 {
 		t.Fatal("新版本目录里应有可执行的程序")
 	}
-	if _, err := os.Stat(l.path("update-ran")); err != nil {
-		t.Fatal("应执行了包内 update.sh（参数是安装目录）")
+	if ran, err := os.ReadFile(l.path("update-ran")); err != nil || strings.TrimSpace(string(ran)) != a.cfg.ServerURL {
+		t.Fatalf("应在版本目录里执行包内 update.sh，并经 SERVER_URL 告诉它服务端地址：%q %v", ran, err)
 	}
 	if pv, err := os.ReadFile(l.pendingVerify()); err != nil || strings.TrimSpace(string(pv)) != "0" {
 		t.Fatalf("pending-verify 应从 0 开始计数：%v %q", err, pv)
@@ -273,11 +272,11 @@ func TestRolledBackVersionIsNotRetried(t *testing.T) {
 	a, l, ctx := e.a, e.a.install, context.Background()
 	script, _ := os.ReadFile("../../deploy/agent/rollback-check.sh")
 	os.WriteFile(l.path("rollback-check.sh"), script, 0o755)
-	const countRuns = "#!/bin/sh\necho run >>\"$1/runs\"\n"
+	const countRuns = "#!/bin/sh\necho run >>../../runs\n"
 
-	e.offer(t, "2.0.0", "2.0.0", countRuns)
+	e.offer(t, "2.0.0", countRuns)
 	if err := a.applyPendingUpdate(ctx); !errors.Is(err, ErrRestartForUpdate) {
-		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, a.updateErr)
+		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, a.updRetry.err)
 	}
 	for range 3 { // 新版本三次都没能心跳确认
 		if out, err := exec.Command(l.path("rollback-check.sh")).CombinedOutput(); err != nil {
@@ -289,19 +288,19 @@ func TestRolledBackVersionIsNotRetried(t *testing.T) {
 	}
 
 	// 代理重启后清单里还是 2.0.0：不再重试，报原因
-	a.update, a.updateErr = nil, ""
-	e.offer(t, "2.0.0", "2.0.0", countRuns)
-	if err := a.applyPendingUpdate(ctx); err != nil || !strings.Contains(a.updateErr, "已回滚") {
-		t.Fatalf("回滚掉的版本应报原因而不重试：%v %q", err, a.updateErr)
+	a.update, a.updRetry.err = nil, ""
+	e.offer(t, "2.0.0", countRuns)
+	if err := a.applyPendingUpdate(ctx); err != nil || !strings.Contains(a.updRetry.err, "已回滚") {
+		t.Fatalf("回滚掉的版本应报原因而不重试：%v %q", err, a.updRetry.err)
 	}
 	if runs, _ := os.ReadFile(l.path("runs")); strings.Count(string(runs), "run") != 1 {
 		t.Fatalf("回滚掉的版本不应再装：%q", runs)
 	}
 
 	// 换个版本号重新下发：照常更新，回滚记录清掉
-	e.offer(t, "2.0.1", "2.0.1", countRuns)
+	e.offer(t, "2.0.1", countRuns)
 	if err := a.applyPendingUpdate(ctx); !errors.Is(err, ErrRestartForUpdate) {
-		t.Fatalf("新版本号应照常更新：%v (%s)", err, a.updateErr)
+		t.Fatalf("新版本号应照常更新：%v (%s)", err, a.updRetry.err)
 	}
 	if l.rolledBack() != "" {
 		t.Fatal("开始装别的版本后应清掉回滚记录")
@@ -312,7 +311,7 @@ func TestRolledBackVersionIsNotRetried(t *testing.T) {
 func TestFailedUpdateIsReportedAndRetried(t *testing.T) {
 	e := otaEnv(t)
 	a, l, ctx := e.a, e.a.install, context.Background()
-	e.offer(t, "2.0.0", "2.0.0", "#!/bin/sh\necho try >>\"$1/attempts\"\necho 'cannot write unit file' >&2\nexit 3\n")
+	e.offer(t, "2.0.0", "#!/bin/sh\necho try >>../../attempts\necho 'cannot write unit file' >&2\nexit 3\n")
 	attempts := func() int {
 		data, _ := os.ReadFile(l.path("attempts"))
 		return strings.Count(string(data), "try")
@@ -324,14 +323,14 @@ func TestFailedUpdateIsReportedAndRetried(t *testing.T) {
 	if cur, _ := os.Readlink(l.current()); cur != l.versionDir("1.0.0") {
 		t.Fatalf("update.sh 失败不能切换版本：%s", cur)
 	}
-	if !strings.Contains(a.updateErr, "update.sh failed") || !strings.Contains(a.updateErr, "cannot write unit file") {
-		t.Fatalf("失败原因应带上 update.sh 的输出：%q", a.updateErr)
+	if !strings.Contains(a.updRetry.err, "update.sh failed") || !strings.Contains(a.updRetry.err, "cannot write unit file") {
+		t.Fatalf("失败原因应带上 update.sh 的输出：%q", a.updRetry.err)
 	}
 	a.applyPendingUpdate(ctx) // 重试间隔未到：不再尝试
 	if n := attempts(); n != 1 {
 		t.Fatalf("重试间隔内不应重复尝试，尝试了 %d 次", n)
 	}
-	a.updateFailedAt = time.Now().Add(-updateRetryInterval) // 间隔到了：同一份清单也要再试
+	a.updRetry.at = time.Now().Add(-updateRetryInterval) // 间隔到了：同一份清单也要再试
 	a.applyPendingUpdate(ctx)
 	if n := attempts(); n != 2 {
 		t.Fatalf("间隔到了应重试，尝试了 %d 次", n)
@@ -339,14 +338,8 @@ func TestFailedUpdateIsReportedAndRetried(t *testing.T) {
 
 	// 运营方撤销更新：失败记录随之清掉
 	a.setUpdate(nil)
-	if a.updateErr != "" {
+	if a.updRetry.err != "" {
 		t.Fatal("撤销更新后不应再上报失败")
-	}
-	// 版本号对不上的包不装
-	e.offer(t, "4.0.0", "4.0.1", "#!/bin/sh\n")
-	a.applyPendingUpdate(ctx)
-	if !strings.Contains(a.updateErr, "does not match") {
-		t.Fatalf("包内 VERSION 与更新不符应拒装：%q", a.updateErr)
 	}
 }
 
@@ -355,9 +348,9 @@ func TestUpdateScriptKeepsFeedingWatchdog(t *testing.T) {
 	count := listenNotify(t)
 	fastWatchdog(t)
 	e := otaEnv(t)
-	e.offer(t, "2.0.0", "2.0.0", "#!/bin/sh\nsleep 0.4\n")
+	e.offer(t, "2.0.0", "#!/bin/sh\nsleep 0.4\n")
 	if err := e.a.applyPendingUpdate(context.Background()); !errors.Is(err, ErrRestartForUpdate) {
-		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, e.a.updateErr)
+		t.Fatalf("expected ErrRestartForUpdate, got %v (%s)", err, e.a.updRetry.err)
 	}
 	if n := count(); n < 5 {
 		t.Fatalf("update.sh 执行期间应持续喂狗，只收到 %d 次", n)
@@ -368,9 +361,9 @@ func TestUpdateScriptKeepsFeedingWatchdog(t *testing.T) {
 func TestUpdateRequiresInstallLayout(t *testing.T) {
 	e := newEnv(t, true)
 	e.a.install = ""
-	e.offer(t, "2.0.0", "2.0.0", "#!/bin/sh\n")
-	if err := e.a.applyPendingUpdate(context.Background()); err != nil || !strings.Contains(e.a.updateErr, "OTA layout") {
-		t.Fatalf("应报告没按 OTA 布局安装：%v %q", err, e.a.updateErr)
+	e.offer(t, "2.0.0", "#!/bin/sh\n")
+	if err := e.a.applyPendingUpdate(context.Background()); err != nil || !strings.Contains(e.a.updRetry.err, "OTA layout") {
+		t.Fatalf("应报告没按 OTA 布局安装：%v %q", err, e.a.updRetry.err)
 	}
 }
 

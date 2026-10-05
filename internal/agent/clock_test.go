@@ -62,7 +62,7 @@ func TestClockSkewRetriedImmediately(t *testing.T) {
 	a, p := e.a, e.p
 	a.clock.local = func() time.Time { return time.Now().Add(-24 * time.Hour) }
 	calls := 0
-	err := retrySkew(func() error { calls++; return a.poll(context.Background()) })
+	err := a.contact(func() error { calls++; return a.poll(context.Background()) })
 	if err != nil || calls != 2 {
 		t.Fatalf("应在第二次（立即重试）成功：调用 %d 次，错误 %v", calls, err)
 	}

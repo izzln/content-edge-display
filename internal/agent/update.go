@@ -75,7 +75,7 @@ func detectInstallLayout() installLayout {
 // 撤销更新也清掉回滚记录（运营方已知晓）。
 func (a *Agent) setUpdate(u *manifest.Update) {
 	if u == nil || a.update == nil || u.Version != a.update.Version {
-		a.updateErr, a.updateFailedAt = "", time.Time{}
+		a.updRetry.clear()
 	}
 	if u == nil && a.install != "" {
 		os.Remove(a.install.failedVersion())
@@ -93,18 +93,17 @@ func (a *Agent) applyPendingUpdate(ctx context.Context) error {
 	case u == nil || u.Version == Version:
 		return nil
 	case u.Version == a.install.rolledBack():
-		a.updateErr = fmt.Sprintf("版本 %s 连续 3 次启动失败，已回滚；修好后请换个版本号重新下发", u.Version)
+		a.updRetry.err = fmt.Sprintf("版本 %s 连续 3 次启动失败，已回滚；修好后请换个版本号重新下发", u.Version)
 		return nil
-	case time.Since(a.updateFailedAt) < updateRetryInterval:
+	case !a.updRetry.due():
 		return nil
 	}
 	err := a.applyUpdate(ctx, *u)
 	if err == nil || errors.Is(err, ErrRestartForUpdate) {
 		return err
 	}
-	a.updateFailedAt = time.Now()
-	a.updateErr = fmt.Sprintf("update to %s failed: %v", u.Version, err)
-	log.Printf("agent: %s (retry in %s)", a.updateErr, updateRetryInterval)
+	a.updRetry.fail(fmt.Sprintf("update to %s failed: %v", u.Version, err))
+	log.Printf("agent: %s (retry in %s)", a.updRetry.err, updateRetryInterval)
 	return nil
 }
 
@@ -120,7 +119,7 @@ func (a *Agent) applyUpdate(ctx context.Context, u manifest.Update) error {
 		return err
 	}
 	var err error
-	keepFeeding(func() { err = runUpdateScript(ctx, dir, string(l)) })
+	keepFeeding(func() { err = runUpdateScript(ctx, dir, a.cfg.ServerURL) })
 	if err != nil {
 		return err
 	}
@@ -161,12 +160,9 @@ func (a *Agent) stagePackage(ctx context.Context, l installLayout, u manifest.Up
 	defer f.Close()
 	tmp := filepath.Join(versions, "."+u.Version+".tmp")
 	os.RemoveAll(tmp)
-	err = agentpkg.Extract(f, tmp)
-	if err == nil {
-		var v string
-		if v, err = agentpkg.Check(tmp); err == nil && v != u.Version {
-			err = fmt.Errorf("package version %q does not match the update (%s)", v, u.Version)
-		}
+	// 包的内容由清单里的 sha256 担保（服务端上传时已核对过程序的平台与版本），这里只看齐不齐
+	if err = agentpkg.Extract(f, tmp); err == nil {
+		err = agentpkg.Check(tmp)
 	}
 	if err != nil {
 		os.RemoveAll(tmp)
@@ -176,12 +172,13 @@ func (a *Agent) stagePackage(ctx context.Context, l installLayout, u manifest.Up
 	return os.Rename(tmp, dir)
 }
 
-// runUpdateScript 以 root 执行版本目录里的 update.sh <安装目录>。输出写进日志；失败时把最后一行带进错误。
-func runUpdateScript(ctx context.Context, dir, root string) error {
+// runUpdateScript 以 root 执行版本目录 dir 里的 update.sh（安装目录由它从自己的位置推出；服务端地址经
+// 环境变量 SERVER_URL 传入，离线依赖从那里装）。输出写进日志；失败时把最后一行带进错误。
+func runUpdateScript(ctx context.Context, dir, serverURL string) error {
 	ctx, cancel := context.WithTimeout(ctx, updateScriptTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", filepath.Join(dir, agentpkg.UpdateScript), root)
-	cmd.Dir = dir
+	cmd := exec.CommandContext(ctx, "/bin/sh", filepath.Join(dir, agentpkg.UpdateScript))
+	cmd.Dir, cmd.Env = dir, append(os.Environ(), "SERVER_URL="+serverURL)
 	out, err := cmd.CombinedOutput()
 	lines := strings.Split(string(bytes.TrimSpace(out)), "\n")
 	for _, line := range lines {

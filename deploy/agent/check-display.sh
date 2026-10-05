@@ -4,17 +4,16 @@
 #
 # 退出码：0 全部正常；1 有问题（每一项都会打印怎么修）。
 set -u
-STATUS=/var/lib/display-agent/status.json
+STATUS=/var/lib/display-agent/status.env # 代理每个心跳周期写一次（连不上服务端时也写）
 bad=0
 
 say()  { printf '%-14s %s\n' "$1" "$2"; }
 fail() { printf '%-14s %s\n' "$1" "$2"; bad=1; }
-# 从 JSON 里抠一个字段（不引 jq）
-jget() { sed -n "s/.*\"$1\":\([^,}]*\).*/\1/p" | head -1 | tr -d '" '; }
 
-# 期望的输出分辨率：agent.json 的 display_mode（装机时写入），没配就按模板画布
-WANT=$(jget display_mode < /etc/display-agent/agent.json 2>/dev/null)
-WANT="${WANT:-1440x900}"
+# 播放状态：HWDEC、OUTPUT（实际输出 WxH）、DISPLAY_MODE（agent.json 的 display_mode，装机时写入）
+HWDEC="" OUTPUT="" DISPLAY_MODE=""
+[ -s "$STATUS" ] && . "$STATUS"
+WANT="${DISPLAY_MODE:-1440x900}" # 没配就按默认模板画布
 WANT_W="${WANT%x*}" WANT_H="${WANT#*x}"
 
 echo "=== 1. 内核输出模式 ==="
@@ -47,35 +46,32 @@ else
 	echo "               内核没带 sunxi-cedrus 驱动，或设备树里 video-codec 节点没启用："
 	echo "               ls /dev/video* /dev/media*；dmesg | grep -i cedrus；lsmod | grep cedrus"
 fi
-# 用播放进程同样的 Python 绑定查元素：查得到就说明播放进程也用得上
-gst_has() {
-	python3 -c "import gi, sys; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); sys.exit(0 if Gst.ElementFactory.find('$1') else 1)" 2>/dev/null
-}
-if ! python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst' 2>/dev/null; then
+# 用播放进程同样的 Python 绑定查元素（一次查完）：查得到就说明播放进程也用得上
+if ! ELEMS=$(python3 -c 'import gi, sys; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None)
+print(" ".join(e for e in sys.argv[1:] if Gst.ElementFactory.find(e)))' v4l2slh264dec kmssink 2>/dev/null); then
 	fail "Python" "缺少 GStreamer 的 Python 绑定（apt install python3-gst-1.0 gir1.2-gst-plugins-base-1.0）"
 else
-	if gst_has v4l2slh264dec; then
-		say "硬解元素" "v4l2slh264dec ✓"
-	else
+	case " $ELEMS " in
+	*" v4l2slh264dec "*) say "硬解元素" "v4l2slh264dec ✓" ;;
+	*)
 		fail "硬解元素" "v4l2slh264dec 不可用——视频会退化成软解，发热、卡顿"
 		echo "               确认 cedrus 已加载（上一项），并已安装 gstreamer1.0-plugins-bad："
 		echo "               apt install gstreamer1.0-plugins-bad；rm -rf ~/.cache/gstreamer-1.0 后重试"
-	fi
-	gst_has kmssink || fail "kmssink" "不可用（apt install gstreamer1.0-plugins-bad）"
+		;;
+	esac
+	case " $ELEMS " in *" kmssink "*) ;; *) fail "kmssink" "不可用（apt install gstreamer1.0-plugins-bad）" ;; esac
 fi
 # cedrus 的解码缓冲（1440×900 一帧约 2MB，要二十来帧）、模板叠加层的两块帧缓冲（各约 5MB）、控制台帧缓冲
 # 都从 CMA（连续物理内存）里分；实测 128MB 在播放时只剩约 5MB，不够时视频直接放不出来。
+# install-agent.sh 按内存大小把 cma= 写进内核参数（1GB 板 256M，512MB 板 192M）：这里核对它生效了没有。
 CMA_T=$(awk '/^CmaTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 CMA_F=$(awk '/^CmaFree:/ {print int($2 / 1024)}' /proc/meminfo)
-MEM_MB=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
-# 与 install-agent.sh 一致：1GB 板 256M，512MB 板 192M
-if [ "${MEM_MB:-0}" -ge 768 ]; then CMA_WANT=256; else CMA_WANT=192; fi
+CMA_SET=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^cma=\([0-9]*\)M$/\1/p')
 if [ -z "$CMA_T" ]; then
 	say "CMA" "读不到（/proc/meminfo 里没有 CmaTotal）"
-elif [ "$CMA_T" -lt "$CMA_WANT" ]; then
-	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 偏小（${MEM_MB}MB 内存的板子建议 ${CMA_WANT}MB），换片时可能分不到缓冲"
-	echo "               重跑 install-agent.sh（会自动写入），或手工编辑 /boot/armbianEnv.txt，"
-	echo "               在 extraargs 里加上 cma=${CMA_WANT}M，然后 reboot。"
+elif [ -z "$CMA_SET" ] || [ "$CMA_T" -lt "$CMA_SET" ]; then
+	fail "CMA" "共 ${CMA_T}MB、空闲 ${CMA_F}MB —— 内核参数里${CMA_SET:+的 cma=${CMA_SET}M 没生效}${CMA_SET:-没有 cma=}，换片时可能分不到缓冲"
+	echo "               编辑 /boot/armbianEnv.txt，在 extraargs 里加上 cma=256M（512MB 内存的板子 192M），然后 reboot。"
 	echo "               CMA 空闲时仍可被普通内存借用，调大不浪费内存。"
 else
 	say "CMA" "共 ${CMA_T}MB，空闲 ${CMA_F}MB ✓"
@@ -83,21 +79,17 @@ fi
 echo
 echo "=== 3. 实际播放状态 ==="
 if [ ! -s "$STATUS" ]; then
-	say "播放状态" "还没有（$STATUS 不存在：display-agent 没在跑，或还没发过第一个心跳）"
+	say "播放状态" "还没有（$STATUS 不存在：display-agent 没在跑，或刚启动不到一个心跳周期）"
 else
-	HW=$(jget hwdec < "$STATUS")
-	OW=$(jget output_w < "$STATUS"); OH=$(jget output_h < "$STATUS")
-	if [ -n "${OW:-}" ] && [ "$OW" != "0" ]; then
-		if [ "$OW" = "$WANT_W" ] && [ "$OH" = "$WANT_H" ]; then
-			say "输出分辨率" "${OW}x${OH} ✓"
-		else
-			say "输出分辨率" "${OW}x${OH}（与 display_mode ${WANT} 不一致，画面按比例缩放；按第 1 项修）"
-		fi
-	fi
-	case "${HW:-}" in
+	case "$OUTPUT" in
+	"" | 0x0) ;;
+	"$WANT") say "输出分辨率" "$OUTPUT ✓" ;;
+	*) say "输出分辨率" "$OUTPUT（与 display_mode ${WANT} 不一致，画面按比例缩放；按第 1 项修）" ;;
+	esac
+	case "$HWDEC" in
 	"") say "解码方式" "还没放过视频" ;;
 	"no") fail "解码方式" "软解——硬解没起来，按第 2 项排查" ;;
-	*) say "解码方式" "硬解 $HW ✓" ;;
+	*) say "解码方式" "硬解 $HWDEC ✓" ;;
 	esac
 fi
 

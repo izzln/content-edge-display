@@ -4,7 +4,8 @@
 # 由 display-agent 拉起并守护（程序内嵌，每次启动重写，随 OTA 更新），stdin/stdout 上逐行收发 JSON：
 #   请求  {"id": 1, "cmd": "config", "width": 1440, "height": 900}   （测试可加 "fade": 秒 缩短过渡）
 #         {"id": 2, "cmd": "load", "items": [{"path": "...", "type": "image|video", "duration": 10}],
-#          "overlay": "/path/x.bgra" | null, "canvas": [1440, 900], "media": [x, y, w, h]}
+#          "overlay": "/path/x.bgra" | null, "media": [x, y, w, h]}
+#         （叠加图已由代理光栅化成输出分辨率的 BGRA，media 是媒体区在输出坐标里的位置）
 #         {"id": 3, "cmd": "stats"}   （代理的看门狗定时发它：回不来就重启本进程）
 #   回复  {"id": 1, "ok": true, ...} 或 {"id": 1, "error": "..."}
 #   事件  {"event": "playing", "index": 0, "path": "..."}  {"event": "error", "index": 0, "message": "..."}
@@ -12,9 +13,9 @@
 # 日志写 stderr（英文），由 display-agent 转进 journal。
 #
 # 画面由显示控制器（Allwinner DE2）的两个硬件图层叠出来，不经 GPU、不做整屏软件合成：
-#   - 上层（主图层，ARGB）：服务端渲染的模板叠加图，媒体区是全透明的"洞"。这一层由本进程经 libdrm
-#     直接驱动：自己设显示模式，两块哑缓冲轮换，画好后台那块再用 drmModeSetPlane 切过去。
-#   - 下层（VI 图层，能缩放、吃 NV12）：播放内容，从洞里透出来。每一项一条 playbin 管线，输出交给
+#   - 上层（主图层，ARGB）：服务端渲染的模板叠加图。媒体区（下面叫"洞"）是透明的，有底图时可能压着装饰。
+#     这一层由本进程经 libdrm 直接驱动：自己设显示模式，两块哑缓冲轮换，画好后台那块再用 drmModeSetPlane 切过去。
+#   - 下层（VI 图层，能缩放、吃 NV12）：播放内容，从洞里透明的地方透出来。每一项一条管线，输出交给
 #     kmssink（只管这一个图层，不设显示模式）：
 #       视频  解码器按 rank 自动选，有 cedrus 时就是 v4l2slh264dec（硬解，NV12 dmabuf 直接导入显示，零拷贝）；
 #             cover 撑满媒体区靠 videocrop 打裁剪标记、kmssink 按标记取源矩形，不拷像素。
@@ -24,9 +25,9 @@
 # 两边共用一个 fd（只有一个 DRM master），要是各自等翻页/vblank 事件，会互相抢走对方的事件、
 # 或者非阻塞翻页撞上另一边进行中的提交（EBUSY），表现为画面卡住不动、也不报错。
 #
-# 切换过渡（约 0.6 秒淡出到黑 → 淡入）在上层做：洞里填透明度渐变的黑色。下层的硬解视频帧碰不得
-# （dmabuf，CPU 改它太慢），而上层每一步只重画洞所在的那些行。切换的空档里洞是全黑的，
-# 所以拆旧管线、建新管线的那一下看不出来；模板属性区始终不动。
+# 切换过渡（约 0.6 秒淡出到黑 → 淡入）在上层做：洞里垫一层透明度渐变的黑幕，黑幕在叠加图之下——
+# 透明处变暗，压进媒体区的装饰不动。下层的硬解视频帧碰不得（dmabuf，CPU 改它太慢），而上层每一步只重画
+# 洞所在的那些行。切换的空档里洞里透明的地方是全黑的，所以拆旧管线、建新管线的那一下看不出来；模板属性区始终不动。
 #
 # 测试/无显示环境：环境变量 DISPLAY_PLAYER_SINK=fakesink 时下层换成 fakesink、上层不输出，不碰 DRM。
 
@@ -76,7 +77,7 @@ PLAYBIN_VIDEO, PLAYBIN_NATIVE_VIDEO = 0x1, 0x40  # 只要视频（屏幕一律�
 
 
 def log(msg):
-    print("player(gst): " + msg, file=sys.stderr, flush=True)
+    print("gstplayer: " + msg, file=sys.stderr, flush=True)
 
 
 def emit(obj):
@@ -238,16 +239,35 @@ def pick_planes(planes, crtc_bit=1):
     return (up["id"] if up else -1), (down["id"] if down else -1)
 
 
-# VEIL[a] 是透明度通道的查找表：叠加图的像素盖在透明度为 a 的黑幕上之后的透明度。
-# 预乘格式下黑幕不贡献颜色，所以 rgb 不变，只有 alpha 从 p 变成 p + a·(255−p)/255。
-VEIL = [bytes(p + (a * (255 - p) + 127) // 255 for p in range(256)) for a in range(256)]
+_veils = {}
 
 
-def paint(buf, pitch, width, base, hole, alpha, full):
+def veil(a):
+    """透明度通道的查找表：叠加图的像素盖在透明度为 a 的黑幕上之后的透明度（用到才算，按 a 缓存）。
+    预乘格式下黑幕不贡献颜色，所以 rgb 不变，只有 alpha 从 p 变成 p + a·(255−p)/255。"""
+    if a not in _veils:
+        _veils[a] = bytes(p + (a * (255 - p) + 127) // 255 for p in range(256))
+    return _veils[a]
+
+
+def deco_spans(base, row, hole):
+    """洞里每一行不透明像素（压进媒体区的装饰）所在的列范围 (起, 止)，没有就是 None。
+    每个画面算一次，淡入淡出的每一帧都用它（row 是 base 每行的字节数）。"""
+    x, y, w, h = hole
+    spans = []
+    for r in range(y, y + h):
+        a = base[r * row + x * 4 + 3:r * row + (x + w) * 4:4]
+        lead = w - len(a.lstrip(b"\0"))
+        spans.append(None if lead == w else (lead, len(a.rstrip(b"\0"))))
+    return spans
+
+
+def paint(buf, pitch, width, base, hole, spans, alpha, full):
     """把一帧上层画面画进 buf（每行 pitch 字节，宽 width 像素，BGRA 预乘）。
 
-    full 时先整幅铺上 base；然后洞里叠一层 alpha 的黑幕——黑幕在叠加图之下：洞里透明的地方变暗（视频淡出），
-    底图压进媒体区的装饰保持不动。alpha 为 0 时洞里还原 base。只改透明度通道、按行查表，走的是 C 实现。"""
+    full 时先整幅铺上 base；然后洞里垫一层 alpha 的黑幕——黑幕在叠加图之下：洞里透明的地方变暗（视频淡出），
+    底图压进媒体区的装饰（spans，见 deco_spans）保持不动。alpha 为 0 时洞里还原 base。
+    只改透明度通道、按行查表，走的是 C 实现。"""
     row = width * 4
     src = memoryview(base)
     if full:
@@ -264,8 +284,8 @@ def paint(buf, pitch, width, base, hole, alpha, full):
             o, s = r * pitch + x * 4, r * row + x * 4
             buf[o:o + w * 4] = src[s:s + w * 4]
         return
-    fill, lut = bytes((0, 0, 0, alpha)) * w, VEIL[alpha]
-    for r, span in zip(range(y, y + h), _deco_spans(base, row, hole)):
+    fill, lut = bytes((0, 0, 0, alpha)) * w, veil(alpha)
+    for r, span in zip(range(y, y + h), spans):
         o = r * pitch + x * 4
         buf[o:o + w * 4] = fill  # 洞里透明的地方：黑幕本身
         if span:  # 这一行有压进媒体区的装饰：只对这一段查表
@@ -274,22 +294,6 @@ def paint(buf, pitch, width, base, hole, alpha, full):
             seg = bytearray(src[s:s + (b - a) * 4])
             seg[3::4] = seg[3::4].translate(lut)
             buf[o + a * 4:o + b * 4] = seg
-
-
-_spans = {"base": None, "hole": None, "spans": None}
-
-
-def _deco_spans(base, row, hole):
-    """洞里每一行不透明像素所在的列范围 (起, 止)，没有就是 None。同一画面只算一次（淡入淡出每帧都要用）。"""
-    if _spans["base"] is not base or _spans["hole"] != hole:
-        x, y, w, h = hole
-        spans = []
-        for r in range(y, y + h):
-            a = base[r * row + x * 4 + 3:r * row + (x + w) * 4:4]
-            lead = w - len(a.lstrip(b"\0"))
-            spans.append(None if lead == w else (lead, len(a.rstrip(b"\0"))))
-        _spans.update(base=base, hole=hole, spans=spans)
-    return _spans["spans"]
 
 
 class Display:
@@ -394,13 +398,13 @@ class Display:
         return "%s, connector %d, crtc %d, %s@%dHz, overlay plane %d, video plane %d" % (
             self.path, self.conn, self.crtc, self.mode.name.decode(), self.mode.vrefresh, self.primary, self.video)
 
-    def show(self, base, hole, alpha):
+    def show(self, base, hole, spans, alpha):
         """把上层画到后台缓冲并切过去（阻塞到下一个 vblank 生效，之后前台那块才可以再画）。"""
         b = self.bufs[1 - self.front]
         drawn = b["drawn"]
         full = drawn is None or drawn[0] is not base or drawn[1] != hole
         if full or drawn[2] != alpha:
-            paint(b["map"], b["pitch"], self.width, base, hole, alpha, full)
+            paint(b["map"], b["pitch"], self.width, base, hole, spans, alpha, full)
             b["drawn"] = (base, hole, alpha)
         ret = self.drm.drmModeSetPlane(self.fd, self.primary, self.crtc, b["fb"], 0, 0, 0, self.width, self.height,
                                        0, 0, self.width << 16, self.height << 16)
@@ -451,9 +455,10 @@ class Player:
         self.display = None
         self.width = self.height = 0
         self.fade = FADE
-        self.hw_decoder = "avdec_h264"  # 有 cedrus 时是 v4l2slh264dec，见 configure
+        self.h264_decoder = "avdec_h264"  # 有 cedrus 时是 v4l2slh264dec（硬解），见 configure
         self.base = b""          # 上层叠加图（BGRA，预乘 alpha）；没有模板时全透明
         self.hole = (0, 0, 0, 0)  # 媒体区在显示坐标里的位置
+        self.spans = []           # 洞里压着装饰的列范围（deco_spans）
         self.scene = None
         self.items = []
         self.index = -1
@@ -464,7 +469,7 @@ class Player:
         self.source = ""          # 当前项的画面尺寸与裁剪（日志用）
         self.timer = 0            # 图片到点淡出 / 视频剩余时间巡检
         self.fading = 0           # 进行中的淡入淡出（GLib 定时器 id）
-        self.alpha = 255          # 洞里黑色的不透明度：255 全黑，0 透出播放内容
+        self.alpha = 255          # 洞里黑幕的不透明度：255 全黑，0 透出播放内容
         self.decoder = ""         # 最近一次视频用的解码器
         self.out_mode = None          # 当前视频项用的输出方式（VIDEO_OUTPUTS 的下标）
         self.video_mode = {}      # 视频文件 → 它放得起来的输出方式
@@ -485,21 +490,21 @@ class Player:
         raise ValueError("unknown command %r" % cmd)
 
     def configure(self, req):
-        if self.width:
-            return {}  # 显示模式只在启动时定一次
+        """设显示模式（代理在每次拉起本进程后只发一次）。"""
         width, height = int(req["width"]), int(req["height"])
         self.fade = float(req.get("fade", FADE))
         if Gst.ElementFactory.find("v4l2slh264dec"):
-            self.hw_decoder = "v4l2slh264dec"
+            self.h264_decoder = "v4l2slh264dec"
         if not self.test:
             self.display = Display(width, height)
             log("display " + self.display.describe())
-            if self.hw_decoder != "v4l2slh264dec":
+            if self.h264_decoder != "v4l2slh264dec":
                 log("WARNING: hardware decoder v4l2slh264dec is not available "
                     "(cedrus missing or gstreamer1.0-plugins-bad not installed); videos will be decoded in software")
         self.width, self.height = width, height
         self.base = bytes(width * height * 4)
         self.hole = (0, 0, width, height)
+        self.spans = [None] * height
         self._show()
         return {}
 
@@ -509,22 +514,20 @@ class Player:
         scene = {k: v for k, v in req.items() if k not in ("id", "cmd")}
         if scene == self.scene:
             return {}  # 内容没变（代理重发）：不打断播放
-        cw, ch = req.get("canvas") or (self.width, self.height)
         overlay = req.get("overlay")
         if overlay:
             with open(overlay, "rb") as f:
                 base = f.read()
             if len(base) != self.width * self.height * 4:
                 raise ValueError("overlay %s is not %dx%d BGRA" % (overlay, self.width, self.height))
-            mx, my, mw, mh = req["media"]
-            sx, sy = self.width / cw, self.height / ch
-            hole = (round(mx * sx), round(my * sy), round(mw * sx), round(mh * sy))
+            hole = tuple(req["media"])
         else:
             base, hole = bytes(self.width * self.height * 4), (0, 0, self.width, self.height)
         items = [it for it in req.get("items", []) if it.get("path")]
+        spans = deco_spans(base, self.width * 4, hole)
 
         def switch():
-            self.scene, self.base, self.hole, self.items = scene, base, hole, items
+            self.scene, self.base, self.hole, self.spans, self.items = scene, base, hole, spans, items
             self.shown = set()
             paths = {it["path"] for it in items}
             self.video_mode = {p: m for p, m in self.video_mode.items() if p in paths}
@@ -545,7 +548,7 @@ class Player:
 
     def _show(self):
         if self.display:
-            self.display.show(self.base, self.hole, self.alpha)
+            self.display.show(self.base, self.hole, self.spans, self.alpha)
 
     def _fade_to(self, target, done=None):
         steps = max(1, int(self.fade * 1000 / FADE_STEP_MS))
@@ -590,7 +593,7 @@ class Player:
         if item.get("type") == "video":
             mode = self.video_mode.get(item["path"], 0)
             name, desc = VIDEO_OUTPUTS[mode]
-            desc = desc.format(decoder=self.hw_decoder, sink=sink)
+            desc = desc.format(decoder=self.h264_decoder, sink=sink)
         else:
             name, desc = "playbin", IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
 
@@ -604,7 +607,7 @@ class Player:
         else:
             out = pipe = Gst.parse_launch(desc)
             pipe.get_by_name("src").set_property("location", item["path"])
-            self.decoder = self.hw_decoder
+            self.decoder = self.h264_decoder
             prime_decoder(pipe)
         if d:
             GstVideo.VideoOverlay.set_render_rectangle(out.get_by_name("sink"), x, y, w, h)
