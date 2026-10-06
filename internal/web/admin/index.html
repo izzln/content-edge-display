@@ -330,7 +330,7 @@
   </div>
   <div id="tab-manage" style="display:none">
     <nav class="seg mseg" role="tablist" aria-label="管理分组">
-      <button class="mtab active" role="tab" data-group="device" aria-selected="true">设备</button>
+      <button class="mtab active" role="tab" data-group="device" aria-selected="true">设备端</button>
       <button class="mtab" role="tab" data-group="server" aria-selected="false">服务端</button>
     </nav>
     <div id="mg-device" role="tabpanel">
@@ -340,7 +340,6 @@
     <div class="card">
       <div class="row">
         <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
-        备注 <input type="text" id="pkgNotes" placeholder="可选">
         <button class="primary" onclick="uploadPackage()">上传</button>
       </div>
       <div class="pbar" id="pkgBar" hidden><i></i></div>
