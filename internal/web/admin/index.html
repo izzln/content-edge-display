@@ -721,7 +721,6 @@ function renderDevices() {
   $("#globalBar").innerHTML = globalBar();
   $("#devTable").innerHTML = `<tr class="head"><th>状态</th><th>设备</th><th>属性</th><th>当前显示</th><th>操作</th></tr>${devices.map(deviceRow).join("") ||
     '<tr><td colspan="5" class="muted">暂无设备。新设备装机（见「管理」页）后会自动注册出现在这里。</td></tr>'}`;
-  tickContact();
 }
 
 // globalBar 是设备页顶部：全局模板，以及服务器时钟、ffmpeg、poppler 这些影响全局的问题。
@@ -749,9 +748,8 @@ function globalBar() {
 
 function deviceRow(d) {
   const st = d.online
-    ? `<span class="dot on"></span>在线<div class="contact" data-seen="${Date.parse(d.last_seen)}"
-        data-poll="${d.poll_interval_s}" data-offline="${d.offline_after_s}"></div>`
-    : `<span class="dot off"></span>离线<div class="muted">最后在线: ${esc(fmtTime(d.last_seen))}</div>`;
+    ? `<span class="dot on"></span>在线`
+    : `<span class="dot off"></span>离线<div class="muted">${d.last_seen ? "最后在线: " + esc(fmtTime(d.last_seen)) : "服务端启动后还没联系过"}</div>`;
   const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<span class="badge">${esc(k)}=${esc(v)}</span>`).join("") || '<span class="muted">-</span>';
   const [syncText, syncTip] = SYNC[d.sync] || [d.sync || "-", ""];
   let show = `<span class="sync ${esc(d.sync)}" title="${esc(syncTip)}">${esc(syncText)}</span>`;
@@ -787,24 +785,6 @@ function deviceRow(d) {
     </td></tr>`;
 }
 
-// tickContact 每秒刷新状态列里"设备多久前联系过"：一直等不到刷新时，让人知道设备是还没轮到，还是已经不来了。
-// 用服务器时间算（浏览器所在电脑的时钟可能不准）。
-const serverNow = () => Date.now() + ((info.server_time || infoFetchedAt) - infoFetchedAt);
-function tickContact() {
-  for (const el of document.querySelectorAll("#devTable .contact")) {
-    const age = Math.max(0, Math.round((serverNow() - +el.dataset.seen) / 1000));
-    const poll = +el.dataset.poll, offline = +el.dataset.offline;
-    let html = "";
-    if (age > 2 * poll) {
-      html = `<span class="warn">⚠ ${age} 秒未响应</span><div class="muted">${
-        age >= offline ? "可能已离线" : `${offline} 秒无响应判离线`}</div>`;
-    } else {
-      html = `<span class="muted">${age} 秒前联系过</span>`;
-    }
-    if (el.innerHTML !== html) el.innerHTML = html;
-  }
-}
-setInterval(tickContact, 1000);
 
 function deviceMenu(id) {
   actionSheet(id, [
