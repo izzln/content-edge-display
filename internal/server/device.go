@@ -31,10 +31,14 @@ import (
 // errUnknownDevice 表示请求里的设备编号没有登记（从未注册，或在后台被删除了）。
 var errUnknownDevice = errors.New("unknown device")
 
-// announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳（设备照办，见 manifest.HeaderPollInterval）。
+// announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳，以及用什么时区
+// （设备照办，见 manifest.HeaderPollInterval、manifest.HeaderTimezone）。
 func (s *Server) announceSchedule(w http.ResponseWriter) {
 	w.Header().Set(manifest.HeaderPollInterval, strconv.Itoa(s.cfg.PollIntervalS))
 	w.Header().Set(manifest.HeaderHeartbeatInterval, strconv.Itoa(s.cfg.HeartbeatIntervalS))
+	if s.zone != "" {
+		w.Header().Set(manifest.HeaderTimezone, s.zone)
+	}
 }
 
 // offlineAfter 返回设备多久没有任何请求就算离线：约 3 个轮询周期，至少 30 秒。

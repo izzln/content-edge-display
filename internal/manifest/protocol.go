@@ -8,6 +8,9 @@ import "regexp"
 const (
 	HeaderPollInterval      = "X-Poll-Interval"      // 秒
 	HeaderHeartbeatInterval = "X-Heartbeat-Interval" // 秒
+	// HeaderTimezone 是服务端的时区（IANA 名称，如 Asia/Shanghai）：设备把系统时区设成它，
+	// 设备上的 date、journalctl 与服务端看到的时间一致。服务端拿不到时区名称时不带。
+	HeaderTimezone = "X-Timezone"
 
 	DefaultPollIntervalS      = 10
 	DefaultHeartbeatIntervalS = 60

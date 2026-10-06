@@ -48,7 +48,8 @@
   .seg button.tab { appearance:none; border:none; margin:0; background:none; color:var(--label); font:inherit; font-size:13px; font-weight:500; line-height:1;
     padding:0 14px; height:28px; border-radius:7px; cursor:pointer; white-space:nowrap; transition:background .2s, box-shadow .2s; }
   .seg button.tab.active { background:var(--elev); box-shadow:0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04); font-weight:600; }
-  header .right { margin-left:auto; }
+  header .right { margin-left:auto; display:flex; gap:8px; }
+  header .right .tab.active { background:var(--blue-t); color:var(--blue); font-weight:600; }
   main { padding:20px max(20px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); max-width:1200px; margin:0 auto; }
   h2.sec { font-size:20px; font-weight:700; margin:28px 0 8px; letter-spacing:-.3px; }
   h2.sec .muted { font-weight:400; letter-spacing:0; display:block; margin-top:2px; }
@@ -296,9 +297,8 @@
   <nav class="seg" role="tablist">
     <button class="tab active" data-tab="devices">设备列表</button>
     <button class="tab" data-tab="templates">模板</button>
-    <button class="tab" data-tab="manage">管理</button>
   </nav>
-  <span class="right"><button class="sm" onclick="logout()">退出</button></span>
+  <span class="right"><button class="sm tab" data-tab="manage">管理</button><button class="sm" onclick="logout()">退出</button></span>
 </header>
 <main>
   <div id="tab-devices">

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/fsutil"
@@ -53,6 +54,10 @@ type Agent struct {
 	accRetry  retry
 	accessFP  string       // 已应用的访问凭据的指纹
 	accessSys accessTarget // 凭据落地的位置（测试里换成临时目录）
+
+	zoneSys   zoneTarget                    // 系统时区文件的位置（timezone.go）；零值 = 不设（测试、未以服务方式运行时）
+	zoneRetry retry                         // 设时区失败后隔一会儿再试
+	zone      atomic.Pointer[time.Location] // 设好的系统时区：救援屏按它显示时间（time.Local 只在启动时读一次）
 }
 
 // retry 记录一项随清单下发、失败后要隔一会儿再试的操作（程序更新、访问凭据）：原因随心跳上报。
@@ -82,6 +87,7 @@ func New(cfg *Config, p player.Player) *Agent {
 		updRetry:  retry{every: updateRetryInterval},
 		accRetry:  retry{every: accessRetryInterval},
 		accessSys: systemAccess,
+		zoneRetry: retry{every: accessRetryInterval},
 	}
 	a.accessFP = a.loadAccessFP()
 	return a
@@ -104,7 +110,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.resolveIdentity(); err != nil {
 		return err
 	}
-	a.clock.setSystem = setSystemClock // 以服务方式运行时才校准系统时钟（见 clock.go）
+	a.clock.setSystem = setSystemClock // 以服务方式运行时才校准系统时钟（见 clock.go）与系统时区（timezone.go）
+	a.zoneSys = systemZone
 	log.Printf("agent: device_id=%s version=%s host=%s serial=%s", a.identity.DeviceID, Version, a.hw.Hostname, a.hw.HWSerial)
 
 	if err := a.player.Start(ctx); err != nil {
@@ -181,6 +188,7 @@ func (a *Agent) step(ctx context.Context) error {
 	}
 	a.failures = 0
 	a.applyAccess()
+	a.applyZone()
 	return a.applyPendingUpdate(ctx)
 }
 
