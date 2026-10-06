@@ -10,12 +10,14 @@ import (
 	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
-// schedule 是设备的轮询与心跳间隔，以及系统该用的时区。都由服务端统一规定，随每个响应头下发
-// （manifest.HeaderPollInterval、manifest.HeaderTimezone），设备照办：改设置只改服务端一处，
-// 所有设备下一次请求就跟上。联系上服务端之前间隔用内置默认值，时区不动。
+// schedule 是设备的轮询与心跳间隔、系统该用的时区，以及分时段亮度。都由服务端统一规定，随每个响应头下发
+// （manifest.HeaderPollInterval、manifest.HeaderTimezone、manifest.HeaderBrightness），设备照办：
+// 改设置只改服务端一处，所有设备下一次请求就跟上。联系上服务端之前间隔用内置默认值，时区不动，
+// 亮度计划用上次存下的（brightness.go）。
 type schedule struct {
 	poll, heartbeat atomic.Int64 // 秒
 	zone            atomic.Pointer[string]
+	bright          atomic.Pointer[[]manifest.BrightnessPeriod] // nil = 还没从服务端学到
 }
 
 func newSchedule() *schedule {
@@ -27,6 +29,14 @@ func newSchedule() *schedule {
 
 func (s *schedule) Poll() time.Duration      { return time.Duration(s.poll.Load()) * time.Second }
 func (s *schedule) Heartbeat() time.Duration { return time.Duration(s.heartbeat.Load()) * time.Second }
+
+// Brightness 返回服务端的亮度计划；ok 为 false 表示还没学到。
+func (s *schedule) Brightness() (periods []manifest.BrightnessPeriod, ok bool) {
+	if p := s.bright.Load(); p != nil {
+		return *p, true
+	}
+	return nil, false
+}
 
 // Zone 返回服务端的时区名称（如 Asia/Shanghai）；还没学到时为空。
 func (s *schedule) Zone() string {
@@ -52,5 +62,12 @@ func (s *schedule) observe(h http.Header) {
 	learn(&s.heartbeat, manifest.HeaderHeartbeatInterval, manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS, "heartbeat")
 	if z := h.Get(manifest.HeaderTimezone); z != "" {
 		s.zone.Store(&z)
+	}
+	if v := h.Get(manifest.HeaderBrightness); v != "" {
+		if periods, err := manifest.ParseBrightness(v); err != nil {
+			log.Printf("agent: ignoring brightness schedule from server: %v", err)
+		} else {
+			s.bright.Store(&periods)
+		}
 	}
 }

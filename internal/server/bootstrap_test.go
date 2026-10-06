@@ -42,7 +42,7 @@ func TestBootstrapEndpoints(t *testing.T) {
 	pkg := agentPackage(t, testAgentVersion, agentBinaryFixture(t), true)
 	uploadPackage(t, h, pkg)
 	if w := get("/bootstrap/agent.tar.gz", s.cfg.EnrollToken); w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), pkg) {
-		t.Fatalf("应下载到最新上传的程序包：%d，%d 字节", w.Code, w.Body.Len())
+		t.Fatalf("应下载到当前的程序包：%d，%d 字节", w.Code, w.Body.Len())
 	}
 
 	// 管理后台、设备接口都不在 HTTP 端口上：跳到 HTTPS

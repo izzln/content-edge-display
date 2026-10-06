@@ -64,8 +64,8 @@ func TestDepsRepo(t *testing.T) {
 	if w := do(t, h, adminReq("GET", "/api/v1/admin/deps", nil), http.StatusOK); !strings.Contains(w.Body.String(), `"codename":"bookworm"`) {
 		t.Fatalf("列表应有 bookworm：%s", w.Body.String())
 	}
-	if w := do(t, h, adminReq("GET", "/api/v1/admin/packages", nil), http.StatusOK); w.Body.String() != "[]\n" {
-		t.Fatalf("依赖包不应出现在程序包列表里：%s", w.Body.String())
+	if w := do(t, h, adminReq("GET", "/api/v1/admin/package", nil), http.StatusOK); w.Body.String() != "null\n" {
+		t.Fatalf("依赖包不应被当成程序包：%s", w.Body.String())
 	}
 	do(t, h, adminReq("DELETE", "/api/v1/admin/deps/bookworm", nil), http.StatusNoContent)
 	if w := get("/apt/bookworm/Packages"); w.Code != http.StatusNotFound {

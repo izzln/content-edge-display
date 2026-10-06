@@ -38,13 +38,14 @@ type GST struct {
 	watchInterval time.Duration // 看门狗（兼状态查询）间隔
 	restartDelay  time.Duration // 播放进程退出后隔多久重启；接连起不来（如 HDMI 没接）时翻倍，最长 maxRestartDelay
 
-	mu        sync.Mutex
-	desired   *Scene
-	proc      *gstProc
-	hwdec     string // 看门狗最近一次问到的解码方式
-	paused    bool
-	runCancel context.CancelFunc // 结束当前这一轮播放进程（暂停时用）
-	wake      chan struct{}      // 恢复播放
+	mu         sync.Mutex
+	desired    *Scene
+	brightness int // 期望的画面亮度（百分比）；播放进程重启后补发
+	proc       *gstProc
+	hwdec      string // 看门狗最近一次问到的解码方式
+	paused     bool
+	runCancel  context.CancelFunc // 结束当前这一轮播放进程（暂停时用）
+	wake       chan struct{}      // 恢复播放
 }
 
 // NewGST 创建播放器；脚本写在 dir 下，显示输出分辨率为 width×height。
@@ -52,7 +53,7 @@ func NewGST(dir string, width, height int) *GST {
 	return &GST{
 		python: "python3", script: filepath.Join(dir, "gstplayer.py"), width: width, height: height,
 		callTimeout: 5 * time.Second, watchInterval: 10 * time.Second, restartDelay: 2 * time.Second,
-		wake: make(chan struct{}, 1),
+		wake: make(chan struct{}, 1), brightness: 100,
 	}
 }
 
@@ -77,6 +78,23 @@ func (p *GST) Load(scene Scene) error {
 		return nil
 	}
 	return p.send(proc, s)
+}
+
+// SetBrightness 记下期望亮度并交给播放进程；播放进程不在时，等它（重新）起来后补发。
+func (p *GST) SetBrightness(percent int) {
+	p.mu.Lock()
+	p.brightness = percent
+	proc := p.proc
+	p.mu.Unlock()
+	if proc != nil {
+		p.sendBrightness(proc, percent)
+	}
+}
+
+func (p *GST) sendBrightness(proc *gstProc, percent int) {
+	if err := proc.call(map[string]any{"cmd": "brightness", "percent": percent}, nil); err != nil {
+		log.Printf("player(gst): set brightness: %v", err)
+	}
 }
 
 // SetPaused 暂停时结束播放进程（DRM 随之释放，内核恢复控制台显示），恢复时重新拉起并补发当前画面。
@@ -235,8 +253,11 @@ func (p *GST) runOnce(ctx context.Context) {
 	}
 	p.mu.Lock()
 	p.proc = proc
-	scene := p.desired
+	scene, brightness := p.desired, p.brightness
 	p.mu.Unlock()
+	if brightness != 100 {
+		p.sendBrightness(proc, brightness)
+	}
 	if scene != nil {
 		if err := p.send(proc, *scene); err != nil {
 			log.Print(err)

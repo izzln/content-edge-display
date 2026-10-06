@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	_ "time/tzdata" // 时区数据编进程序：设备缺 tzdata 时也能按服务端时区判断亮度时段、显示时间
 
 	"github.com/izzln/content-edge-display/internal/agent"
 	"github.com/izzln/content-edge-display/internal/player"

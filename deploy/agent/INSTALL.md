@@ -23,7 +23,7 @@ curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=注册口令 sh
 ```
 
 - 注册口令就是服务端 `server.json` 里的 `enroll_token`；后台「管理」页上有这条命令可直接复制。
-- 脚本由服务端生成，已填好服务端的 HTTPS 地址（`:9001`）、证书指纹与证书；它下载最新上传的程序包、执行
+- 脚本由服务端生成，已填好服务端的 HTTPS 地址（`:9001`）、证书指纹与证书；它下载服务端当前的程序包、执行
   `install-agent.sh`，装完自动重启。设备随后自动注册，1~2 分钟内出现在后台设备列表。
 - 建议同时在后台上传离线依赖包（`make deps` 产出的 `display-deps-<代号>-armhf.tar.gz`，代号与设备
   `/etc/os-release` 的 `VERSION_CODENAME` 一致）：装机与之后 OTA 新增的依赖都从服务端局域网安装，几秒下完、不需要外网；

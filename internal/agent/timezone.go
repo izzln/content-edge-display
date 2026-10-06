@@ -89,8 +89,18 @@ func (a *Agent) applyZone() {
 	}
 }
 
-// localZone 是显示时间用的时区：服务端规定的那个，还没学到时用进程启动时的系统时区。
+// localZone 是显示时间、判断亮度时段用的时区：服务端规定的那个，还没学到时用进程启动时的系统时区。
+// 不依赖系统时区设没设成功（时区数据已编进程序，见 cmd/display-agent）。
 func (a *Agent) localZone() *time.Location {
+	if loc := a.zone.Load(); loc != nil && loc.String() == a.sched.Zone() {
+		return loc
+	}
+	if z := a.sched.Zone(); z != "" {
+		if loc, err := time.LoadLocation(z); err == nil {
+			a.zone.Store(loc)
+			return loc
+		}
+	}
 	if loc := a.zone.Load(); loc != nil {
 		return loc
 	}

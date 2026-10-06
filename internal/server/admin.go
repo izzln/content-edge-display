@@ -51,12 +51,13 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"GET /api/v1/admin/backgrounds/{file}":              s.handleGetBackground,
 		"GET /api/v1/admin/global":                          s.handleGetGlobal,
 		"PUT /api/v1/admin/global":                          s.handlePutGlobal,
-		"GET /api/v1/admin/packages":                        s.handleListPackages,
+		"PUT /api/v1/admin/brightness":                      s.handlePutBrightness,
+		"GET /api/v1/admin/package":                         s.handleGetPackage,
 		"POST /api/v1/admin/packages":                       s.handleUploadPackage,
-		"DELETE /api/v1/admin/packages/{version}":           s.handleDeletePackage,
 		"GET /api/v1/admin/deps":                            s.handleListDeps,
 		"DELETE /api/v1/admin/deps/{codename}":              s.handleDeleteDeps,
 		"PUT /api/v1/admin/rollout":                         s.handleRollout,
+		"DELETE /api/v1/admin/rollout":                      s.handleCancelRollout,
 		"GET /api/v1/admin/token":                           s.handleGetAdminToken,
 		"PUT /api/v1/admin/token":                           s.handlePutAdminToken,
 		"GET /api/v1/admin/access":                          s.handleGetAccess,
@@ -320,8 +321,11 @@ func (s *Server) handleGetGlobal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, g)
 }
 
+// handlePutGlobal 设全局默认模板（亮度计划另有接口，这里不动它）。
 func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
-	var g store.GlobalConfig
+	var g struct {
+		TemplateID string `json:"template_id"`
+	}
 	if !decodeJSON(w, r, 4<<10, &g) {
 		return
 	}
@@ -329,9 +333,27 @@ func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
 		if _, ok := st.Templates[g.TemplateID]; !ok {
 			return errBadRequest("模板不存在")
 		}
-		st.Global = g
+		st.Global.TemplateID = g.TemplateID
 		return nil
 	}) {
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handlePutBrightness 设分时段亮度：所有设备下一次联系服务端时学到（响应头 X-Brightness），之后到点自己切换。
+func (s *Server) handlePutBrightness(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Periods []manifest.BrightnessPeriod `json:"periods"`
+	}
+	if !decodeJSON(w, r, 8<<10, &req) {
+		return
+	}
+	if err := manifest.ValidateBrightness(req.Periods); err != nil {
+		writeError(w, errBadRequest("%v", err))
+		return
+	}
+	if s.update(w, func(st *store.State) error { st.Global.Brightness = req.Periods; return nil }) {
+		log.Printf("brightness schedule set: %s", manifest.FormatBrightness(req.Periods))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

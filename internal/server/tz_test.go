@@ -5,7 +5,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/izzln/content-edge-display/internal/store"
 )
 
 // 服务端时区名称：server.json 设了就用它；没设时从系统找（TZ、/etc/localtime 链接、/etc/timezone），找不到为空。
@@ -54,5 +57,43 @@ func TestDeviceResponsesAnnounceTimezone(t *testing.T) {
 	s.zone = ""
 	if _, ok := get().Header()["X-Timezone"]; ok {
 		t.Fatal("没有时区名称时不应带这个头")
+	}
+}
+
+// 分时段亮度：后台设置 → 每个设备响应带 X-Brightness；不合法的设置被拒；设全局模板不会冲掉亮度计划。
+func TestBrightnessSchedule(t *testing.T) {
+	s, _ := newTestServer(t)
+	h := s.Handler()
+	header := func() string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, signedRequest("GET", "/api/v1/device/manifest", nil))
+		return w.Header().Get("X-Brightness")
+	}
+	if got := header(); got != "none" {
+		t.Fatalf("没设置时应为 none：%q", got)
+	}
+	body := map[string]any{"periods": []map[string]any{
+		{"start": "22:00", "end": "07:00", "percent": 30}, {"start": "18:00", "end": "22:00", "percent": 70}}}
+	do(t, h, adminReq("PUT", "/api/v1/admin/brightness", body), http.StatusNoContent)
+	if got := header(); got != "18:00-22:00 70;22:00-07:00 30" {
+		t.Fatalf("应下发亮度计划（按起始时间排序）：%q", got)
+	}
+	bad := map[string]any{"periods": []map[string]any{
+		{"start": "22:00", "end": "07:00", "percent": 30}, {"start": "06:00", "end": "08:00", "percent": 50}}}
+	if w := do(t, h, adminReq("PUT", "/api/v1/admin/brightness", bad), http.StatusBadRequest); !strings.Contains(w.Body.String(), "重叠") {
+		t.Fatalf("重叠的时段应被拒：%s", w.Body.String())
+	}
+	var tpl string
+	s.store.View(func(st *store.State) { tpl = st.Global.TemplateID })
+	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]any{"template_id": tpl}), http.StatusNoContent)
+	if got := header(); got != "18:00-22:00 70;22:00-07:00 30" {
+		t.Fatalf("设全局模板不应冲掉亮度计划：%q", got)
+	}
+	if w := do(t, h, adminReq("GET", "/api/v1/admin/global", nil), http.StatusOK); !strings.Contains(w.Body.String(), `"percent":30`) {
+		t.Fatalf("后台应能读回亮度计划：%s", w.Body.String())
+	}
+	do(t, h, adminReq("PUT", "/api/v1/admin/brightness", map[string]any{"periods": []any{}}), http.StatusNoContent)
+	if got := header(); got != "none" {
+		t.Fatalf("清空后应为 none：%q", got)
 	}
 }

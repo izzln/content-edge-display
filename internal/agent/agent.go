@@ -55,6 +55,9 @@ type Agent struct {
 	accessFP  string       // 已应用的访问凭据的指纹
 	accessSys accessTarget // 凭据落地的位置（测试里换成临时目录）
 
+	brightness  int    // 当前设给播放器的亮度（百分比），见 brightness.go
+	brightSaved string // 已存盘的亮度计划（FormatBrightness 的结果）
+
 	zoneSys   zoneTarget                    // 系统时区文件的位置（timezone.go）；零值 = 不设（测试、未以服务方式运行时）
 	zoneRetry retry                         // 设时区失败后隔一会儿再试
 	zone      atomic.Pointer[time.Location] // 设好的系统时区：救援屏按它显示时间（time.Local 只在启动时读一次）
@@ -84,12 +87,14 @@ func New(cfg *Config, p player.Player) *Agent {
 		sched:   sched,
 		install: detectInstallLayout(),
 
-		updRetry:  retry{every: updateRetryInterval},
-		accRetry:  retry{every: accessRetryInterval},
-		accessSys: systemAccess,
-		zoneRetry: retry{every: accessRetryInterval},
+		updRetry:   retry{every: updateRetryInterval},
+		accRetry:   retry{every: accessRetryInterval},
+		accessSys:  systemAccess,
+		zoneRetry:  retry{every: accessRetryInterval},
+		brightness: 100,
 	}
 	a.accessFP = a.loadAccessFP()
+	a.loadBrightness()
 	return a
 }
 
@@ -117,10 +122,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.player.Start(ctx); err != nil {
 		return err
 	}
-	// 断网兜底：先恢复播放本地已缓存内容，再联网。
+	// 断网兜底：先恢复播放本地已缓存内容（连同上次存下的亮度计划），再联网。
 	if err := a.loadCurrent(); err != nil {
 		log.Printf("agent: no local playlist to restore (%v)", err)
 	}
+	a.applyBrightness()
 	sdNotify("READY=1")
 	if a.cfg.Player == "gst" { // 只有真正占着显示屏时才需要：插键盘按任意键交还控制台
 		go a.rescueLoop(ctx, watchKeyboards(ctx), vtConsole{}, rescueIdle)
@@ -130,7 +136,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	hbEvery := a.sched.Heartbeat()
 	hbTimer := time.NewTimer(hbEvery)
 	firstBeat := true
-	wd := time.NewTicker(watchdogInterval) // 等待期间（含失败退避的几分钟）持续喂狗
+	wd := time.NewTicker(watchdogInterval)    // 等待期间（含失败退避的几分钟）持续喂狗
+	bright := time.NewTicker(brightnessCheck) // 分时段亮度到点切换，与能否联系上服务端无关
+	defer bright.Stop()
 	defer pollTimer.Stop()
 	defer hbTimer.Stop()
 	defer wd.Stop()
@@ -140,6 +148,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		case <-wd.C:
 			sdNotify("WATCHDOG=1")
+		case <-bright.C:
+			a.applyBrightness()
 		case <-pollTimer.C:
 			err := a.step(ctx)
 			if errors.Is(err, ErrRestartForUpdate) {
@@ -189,6 +199,7 @@ func (a *Agent) step(ctx context.Context) error {
 	a.failures = 0
 	a.applyAccess()
 	a.applyZone()
+	a.applyBrightness()
 	return a.applyPendingUpdate(ctx)
 }
 
