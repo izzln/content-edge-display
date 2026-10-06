@@ -21,7 +21,7 @@ type Config struct {
 	FontPath        string `json:"font_path"`        // 模板渲染字体（中文需 CJK 字体）
 	AdminToken      string `json:"admin_token"`      // 管理后台口令
 	EnrollToken     string `json:"enroll_token"`     // 设备注册口令（一键装机时输入）
-	Timezone        string `json:"timezone"`         // 时段计划时区，默认系统时区
+	Timezone        string `json:"timezone"`         // 测试卡显示的时区，默认系统时区
 	// FFmpegPath 指定 ffmpeg；留空在服务进程的 PATH 里找。不可用时不能上传视频（后台会提示原因）。
 	FFmpegPath string `json:"ffmpeg_path"`
 	// 设备的轮询与心跳间隔：在这里统一规定，设备从响应头学到后照办（见 manifest.HeaderPollInterval）。

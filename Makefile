@@ -53,7 +53,7 @@ package-agent: agent-arm
 	@cp bin/display-agent-armv7 bin/stage/display-agent-$(VERSION)/display-agent
 	@tar -czf bin/display-agent-$(VERSION)-armv7.tar.gz -C bin/stage display-agent-$(VERSION)
 	@rm -rf bin/stage
-	@echo "→ bin/display-agent-$(VERSION)-armv7.tar.gz (设备端整包：后台「程序更新」上传它，装机与 OTA 都用它)"
+	@echo "→ bin/display-agent-$(VERSION)-armv7.tar.gz (设备端整包：后台「管理」页上传它，装机与 OTA 都用它)"
 
 package-server:
 	go build -ldflags="$(LDFLAGS)" -o bin/display-server ./cmd/display-server
@@ -71,7 +71,7 @@ package-server:
 	@echo "→ bin/display-server-$(VERSION)-$(HOST_ARCH).tar.gz (服务端)"
 
 # 设备端离线依赖包：后台上传一次，之后装机从局域网装依赖（需要 docker 与 qemu，见 scripts/build-deps.sh）。
-# DEBIAN 须与设备 Armbian 的 VERSION_CODENAME 一致，如 make deps DEBIAN=bookworm
+# DEBIAN 须与设备 Armbian 的 VERSION_CODENAME 一致，如 Ubuntu 系的 make deps DEBIAN=noble
 DEBIAN ?= trixie
 deps:
 	sh scripts/build-deps.sh $(DEBIAN)

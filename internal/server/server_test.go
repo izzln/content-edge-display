@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/izzln/content-edge-display/internal/sign"
-	"github.com/izzln/content-edge-display/internal/store"
 )
 
 func TestManifestRequiresAuth(t *testing.T) {
@@ -332,16 +331,6 @@ func TestContentKeyCoversManifestInputs(t *testing.T) {
 			tpl["image_duration_s"] = 25
 			put("/api/v1/admin/templates/"+gid, tpl)
 		}},
-		{"时段计划到点", func() {
-			w := do(t, h, adminReq("POST", "/api/v1/admin/templates", splitTemplate()), http.StatusOK)
-			var created store.Template
-			json.Unmarshal(w.Body.Bytes(), &created)
-			loc := now.In(s.loc)
-			start := loc.Add(time.Hour).Format("15:04")
-			end := loc.Add(2 * time.Hour).Format("15:04")
-			put("/api/v1/admin/schedules", []store.Schedule{{TemplateID: created.ID, Start: start, End: end}})
-			now = now.Add(time.Hour + time.Minute) // 时间走到时段里：没有任何写入，清单也会变
-		}},
 		{"测试屏", func() {
 			do(t, h, adminReq("POST", "/api/v1/admin/devices/"+testDeviceID+"/test", map[string]int{"duration_s": 60}), http.StatusNoContent)
 		}},
@@ -548,5 +537,18 @@ func TestAuthFailureLogBounded(t *testing.T) {
 	now = now.Add(time.Minute)
 	if !s.logAuthFailure("dev-new|bad") || len(s.authLogged) != 1 {
 		t.Fatalf("一分钟后应清掉旧记录再记新的：%d", len(s.authLogged))
+	}
+}
+
+// TLS 握手失败（浏览器还没信任自签证书、端口扫描）不写日志，其余错误照常写。
+func TestHTTPErrorLogDropsHandshakeErrors(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	l := HTTPErrorLog()
+	l.Printf("http: TLS handshake error from [::1]:59448: remote error: tls: unknown certificate")
+	l.Printf("http: panic serving 1.2.3.4: boom")
+	if out := buf.String(); strings.Contains(out, "handshake") || !strings.Contains(out, "panic serving") {
+		t.Fatalf("日志：%q", out)
 	}
 }

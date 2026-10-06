@@ -11,10 +11,10 @@ import (
 )
 
 // 列表接口在数据为空时必须返回 []，不能是 null：管理后台拿到 null 会在渲染时
-// 抛 TypeError，整页按钮失效（曾因 schedules 返回 null 导致“上传图片按钮无效”）。
+// 抛 TypeError，整页按钮失效（曾因列表返回 null 导致“上传图片按钮无效”）。
 func TestAdminListEndpointsReturnEmptyArrayNotNull(t *testing.T) {
 	_, h := newAdminTestServer(t)
-	for _, ep := range []string{"schedules", "templates", "packages", "devices"} {
+	for _, ep := range []string{"templates", "packages", "deps", "devices"} {
 		w := do(t, h, adminReq("GET", "/api/v1/admin/"+ep, nil), http.StatusOK)
 		body := strings.TrimSpace(w.Body.String())
 		if body == "null" {

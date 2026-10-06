@@ -38,7 +38,7 @@ main() {
 	case "$code" in
 	200) ;;
 	401) echo "注册口令不对（应与服务端 server.json 的 enroll_token 一致）" >&2; exit 1 ;;
-	404) echo "服务端还没有上传设备程序包：先在管理后台「程序更新」页上传 display-agent-<版本>-armv7.tar.gz" >&2; exit 1 ;;
+	404) echo "服务端还没有上传设备程序包：先在管理后台「管理」页上传 display-agent-<版本>-armv7.tar.gz" >&2; exit 1 ;;
 	000) echo "连不上服务端 $BOOTSTRAP（网线、IP、防火墙？）" >&2; exit 1 ;;
 	*) echo "下载失败：HTTP $code" >&2; exit 1 ;;
 	esac

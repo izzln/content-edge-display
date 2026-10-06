@@ -277,7 +277,7 @@ func TestInfoReportsFFmpegError(t *testing.T) {
 	}
 }
 
-// 后台要拿服务器时间与浏览器比对：离线环境下服务器没有 NTP，时钟漂移会让时段计划按错误时间切换。
+// 后台要拿服务器时间与浏览器比对：离线环境下服务器没有 NTP，时钟漂移会让测试屏到期、定时下发按错误时间发生。
 func TestInfoReportsServerTime(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	fixed := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)

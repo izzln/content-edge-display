@@ -1,4 +1,4 @@
-// Package store 持久化服务端可变状态：设备（含属性、显示配置、测试屏、更新目标）、模板、时段计划、程序包、
+// Package store 持久化服务端可变状态：设备（含属性、显示配置、测试屏、更新目标）、模板、程序包、
 // 缓存区配额、设备访问凭据与管理口令。规模小（几十台设备），用单个 JSON 文件 + 内存镜像 + 原子写，避免引入数据库依赖。
 package store
 
@@ -80,7 +80,8 @@ type Region struct {
 	FontSize int    `json:"font_size"`
 	Color    string `json:"color"`
 	Bg       string `json:"bg"`
-	Align    string `json:"align"` // "left" | "center" | "right"
+	Align    string `json:"align"`              // "left" | "center" | "right"
+	OffsetY  int    `json:"offset_y,omitempty"` // 文字在垂直居中的基础上下移的像素（负数上移）
 }
 
 // Rect 返回区域在画布上的矩形。
@@ -88,7 +89,7 @@ func (r Region) Rect() image.Rectangle { return image.Rect(r.X, r.Y, r.X+r.W, r.
 
 // DisplayConfig 是一台设备的显示配置。
 type DisplayConfig struct {
-	TemplateID string   `json:"template_id,omitempty"` // 本设备专属模板；空 = 跟随全局（时段计划 / 全局默认模板）
+	TemplateID string   `json:"template_id,omitempty"` // 本设备专属模板；空 = 跟随全局模板
 	Mirror     bool     `json:"mirror,omitempty"`      // 左右对调：属性在左还是在右，一个全局模板即可覆盖两种设备
 	Playlist   []string `json:"playlist,omitempty"`    // 媒体区播放顺序，文件位于 media_root/<设备>/
 }
@@ -147,15 +148,6 @@ type GlobalConfig struct {
 	TemplateID string `json:"template_id,omitempty"` // 全局默认模板
 }
 
-// Schedule 是一条时段计划：命中时用该模板替代全局默认模板。
-type Schedule struct {
-	ID         string `json:"id"`
-	TemplateID string `json:"template_id"`
-	Days       []int  `json:"days"`  // 0=周日 … 6=周六；空=每天
-	Start      string `json:"start"` // "HH:MM"
-	End        string `json:"end"`   // "HH:MM"；Start > End 表示跨午夜
-}
-
 // Access 是统一下发给所有设备的访问凭据（后台「设备访问」）。
 type Access struct {
 	RootPasswordHash  string    `json:"root_password_hash,omitempty"` // SHA-512 crypt（$6$），设备用 chpasswd -e 写入
@@ -177,7 +169,6 @@ type State struct {
 	Templates    map[string]Template `json:"templates"`
 	Packages     map[string]Package  `json:"packages"`
 	Global       GlobalConfig        `json:"global"`
-	Schedules    []Schedule          `json:"schedules"`
 	CacheQuotaGB int                 `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
 	Access       Access              `json:"access"`
 	Admin        Admin               `json:"admin"`
@@ -195,9 +186,6 @@ func (s *State) init() {
 	}
 	if s.Packages == nil {
 		s.Packages = map[string]Package{}
-	}
-	if s.Schedules == nil {
-		s.Schedules = []Schedule{}
 	}
 	if s.CacheQuotaGB <= 0 {
 		s.CacheQuotaGB = DefaultCacheQuotaGB
@@ -283,85 +271,6 @@ func (st *Store) Template(id string) (Template, bool) {
 	var ok bool
 	st.View(func(s *State) { t, ok = s.Templates[id] })
 	return t, ok
-}
-
-// ---- 时段计划 ----
-
-var timePattern = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
-
-func minutesOfDay(hhmm string) int {
-	var h, m int
-	fmt.Sscanf(hhmm, "%d:%d", &h, &m)
-	return h*60 + m
-}
-
-// ValidateSchedules 校验时段计划列表并填充默认值。
-func ValidateSchedules(list []Schedule, templates map[string]Template) error {
-	seen := map[string]bool{}
-	for i := range list {
-		sc := &list[i]
-		if sc.ID == "" {
-			sc.ID = fmt.Sprintf("s%d", i+1)
-		}
-		if !idPattern.MatchString(sc.ID) {
-			return fmt.Errorf("schedule %d: id 非法", i)
-		}
-		if seen[sc.ID] {
-			return fmt.Errorf("schedule %q: id 重复", sc.ID)
-		}
-		seen[sc.ID] = true
-		if _, ok := templates[sc.TemplateID]; !ok {
-			return fmt.Errorf("schedule %q: 模板 %q 不存在", sc.ID, sc.TemplateID)
-		}
-		if !timePattern.MatchString(sc.Start) || !timePattern.MatchString(sc.End) {
-			return fmt.Errorf("schedule %q: 时间格式须为 HH:MM", sc.ID)
-		}
-		if sc.Start == sc.End {
-			return fmt.Errorf("schedule %q: 开始与结束时间不能相同", sc.ID)
-		}
-		for _, d := range sc.Days {
-			if d < 0 || d > 6 {
-				return fmt.Errorf("schedule %q: 星期须为 0~6", sc.ID)
-			}
-		}
-		if sc.Days == nil {
-			sc.Days = []int{}
-		}
-	}
-	return nil
-}
-
-// ActiveSchedule 返回 now 时刻命中的第一条计划。
-// 跨午夜时段（Start > End）的午夜后部分按起始日的星期匹配。
-func ActiveSchedule(list []Schedule, now time.Time) (Schedule, bool) {
-	m := now.Hour()*60 + now.Minute()
-	today := int(now.Weekday())
-	yesterday := int(now.AddDate(0, 0, -1).Weekday())
-	for _, sc := range list {
-		s, e := minutesOfDay(sc.Start), minutesOfDay(sc.End)
-		var hit bool
-		var day int
-		switch {
-		case s < e:
-			hit, day = m >= s && m < e, today
-		case m >= s: // 跨午夜，午夜前部分
-			hit, day = true, today
-		case m < e: // 跨午夜，午夜后部分
-			hit, day = true, yesterday
-		}
-		if !hit {
-			continue
-		}
-		if len(sc.Days) == 0 {
-			return sc, true
-		}
-		for _, d := range sc.Days {
-			if d == day {
-				return sc, true
-			}
-		}
-	}
-	return Schedule{}, false
 }
 
 // ---- 校验 ----
@@ -454,6 +363,9 @@ func ValidateTemplate(t *Template) error {
 		}
 		if r.Bg != "" && !colorPattern.MatchString(r.Bg) {
 			return fmt.Errorf("region %q: 非法底色", r.ID)
+		}
+		if r.OffsetY < -r.H || r.OffsetY > r.H {
+			return fmt.Errorf("region %q: 垂直偏移不能超过区域高度 %d", r.ID, r.H)
 		}
 		switch r.Align {
 		case "":

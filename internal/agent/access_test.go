@@ -49,9 +49,11 @@ func TestAccessSettingsApplied(t *testing.T) {
 	}
 
 	key := sshKey("ops")
-	body, _ := json.Marshal(map[string]any{"root_password": "Secret-123", "ssh_keys": []string{key}})
-	if w := e.admin(t, "PUT", "/api/v1/admin/access", string(body)); w.Code != 204 {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
+	body, _ := json.Marshal(map[string]any{"ssh_keys": []string{key}})
+	for path, body := range map[string]string{"root-password": `{"root_password":"Secret-123"}`, "ssh-keys": string(body)} {
+		if w := e.admin(t, "PUT", "/api/v1/admin/access/"+path, body); w.Code != 204 {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
 	}
 	step()
 	if len(calls) != 2 || !strings.HasPrefix(calls[0], "chpasswd -e <root:$6$") || calls[1] != "systemctl try-reload-or-restart ssh <" {
@@ -76,8 +78,17 @@ func TestAccessSettingsApplied(t *testing.T) {
 		t.Fatalf("重启后不应重复执行：%v %v", err, calls)
 	}
 
+	// 已配过公钥的设备换一把新公钥：authorized_keys 整份换掉，不用重载 sshd（只允许密钥登录的配置没变）
+	key2 := sshKey("ops2")
+	body, _ = json.Marshal(map[string]any{"ssh_keys": []string{key2}})
+	e.admin(t, "PUT", "/api/v1/admin/access/ssh-keys", string(body))
+	step()
+	if b, _ := os.ReadFile(e.a.accessSys.authorizedKeys); string(b) != key2+"\n" {
+		t.Fatalf("换公钥后 authorized_keys 应只有新公钥：%q", b)
+	}
+
 	// 清空公钥：恢复密码 SSH
-	e.admin(t, "PUT", "/api/v1/admin/access", `{"ssh_keys":[]}`)
+	e.admin(t, "PUT", "/api/v1/admin/access/ssh-keys", `{"ssh_keys":[]}`)
 	step()
 	if _, err := os.Stat(e.a.accessSys.sshdDropIn); !os.IsNotExist(err) {
 		t.Fatal("公钥清空后应删除只允许密钥登录的配置")
@@ -88,7 +99,7 @@ func TestAccessSettingsApplied(t *testing.T) {
 
 	// 失败：随心跳上报，隔一会儿重试
 	fail = errors.New("chpasswd: boom")
-	e.admin(t, "PUT", "/api/v1/admin/access", `{"root_password":"Another-456","ssh_keys":[]}`)
+	e.admin(t, "PUT", "/api/v1/admin/access/root-password", `{"root_password":"Another-456"}`)
 	step()
 	if e.a.accRetry.err == "" || !strings.Contains(e.a.accRetry.err, "boom") {
 		t.Fatalf("失败原因应记下来随心跳上报：%q", e.a.accRetry.err)

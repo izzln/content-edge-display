@@ -256,7 +256,7 @@ func TestRolloutAndUpdate(t *testing.T) {
 	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"version": "9.9.9"}), http.StatusBadRequest)
 }
 
-func TestGlobalTemplateAndSchedules(t *testing.T) {
+func TestGlobalTemplate(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	day := splitTemplate()
 	day["id"] = "day"
@@ -296,44 +296,23 @@ func TestGlobalTemplateAndSchedules(t *testing.T) {
 		t.Fatal("per-device attribute must change rendered image")
 	}
 
-	// 时段计划：注入"周三 23:00"→ 命中 night；"周三 12:00"→ 无命中回落 global(day)
-	do(t, h, adminReq("PUT", "/api/v1/admin/schedules", []map[string]any{
-		{"template_id": "night", "start": "22:00", "end": "06:00"},
-	}), http.StatusNoContent)
-	wed := time.Date(2026, 9, 16, 12, 0, 0, 0, time.Local)
-	s.now = func() time.Time { return wed }
-	noon := deviceManifestAt(t, h, s.now())
-	s.now = func() time.Time { return wed.Add(11 * time.Hour) }
-	late := deviceManifestAt(t, h, s.now())
-	if noon.Items[0].SHA256 == late.Items[0].SHA256 {
-		t.Fatal("schedule hit at night should render a different template than daytime global")
-	}
-	if noon.Items[0].SHA256 != global.Items[0].SHA256 {
-		t.Fatal("outside schedule should fall back to global template")
-	}
-	s.now = time.Now
-
 	// 管理列表显示来源
 	w := do(t, h, adminReq("GET", "/api/v1/admin/devices", nil), http.StatusOK)
 	var statuses []DeviceView
 	json.Unmarshal(w.Body.Bytes(), &statuses)
-	if statuses[0].ActiveSource != "global" && statuses[0].ActiveSource != "schedule" {
+	if statuses[0].ActiveSource != "global" {
 		t.Fatalf("active source not reported: %+v", statuses[0])
 	}
 
-	// 时段引用的模板不可删除；非法时段被拒
-	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/night", nil), http.StatusConflict)
-	do(t, h, adminReq("PUT", "/api/v1/admin/schedules", []map[string]any{
-		{"template_id": "nope", "start": "22:00", "end": "06:00"},
-	}), http.StatusBadRequest)
 	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]string{"template_id": "nope"}), http.StatusBadRequest)
 
-	// 设备级覆盖优先于全局
+	// 设备级覆盖优先于全局；设备在用的模板不可删除
 	do(t, h, adminReq("PUT", "/api/v1/admin/devices/"+testDeviceID+"/display",
 		map[string]any{"template_id": "night"}), http.StatusNoContent)
 	if ov := deviceManifest(t, h); ov.Items[0].SHA256 == global.Items[0].SHA256 {
 		t.Fatal("device override should win over global template")
 	}
+	do(t, h, adminReq("DELETE", "/api/v1/admin/templates/night", nil), http.StatusConflict)
 	_ = s
 }
 

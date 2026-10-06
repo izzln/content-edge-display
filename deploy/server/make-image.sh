@@ -12,7 +12,7 @@
 # （注册口令仍在 agent.json 里，与手工装机相同）。
 set -eu
 SRC="${1:?用法见脚本开头}"
-: "${BOOTSTRAP:?需要 BOOTSTRAP，如 http://display.lan:9000（后台「程序更新」页装机命令里的地址）}"
+: "${BOOTSTRAP:?需要 BOOTSTRAP，如 http://display.lan:9000（后台「管理」页装机命令里的地址）}"
 : "${ENROLL_TOKEN:?需要 ENROLL_TOKEN（server.json 的 enroll_token）}"
 : "${ROOT_PASSWORD:?需要 ROOT_PASSWORD（装机期间的 root 密码，注册后换成后台「设备访问」里的）}"
 [ "$(id -u)" = 0 ] || { echo "请以 root 运行（要挂载镜像）" >&2; exit 1; }

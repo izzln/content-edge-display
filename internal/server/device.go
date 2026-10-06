@@ -167,7 +167,7 @@ const (
 
 // syncState 判断设备的内容状态（调用方持有 s.mu）。key 是这台设备显示输入的当前指纹，
 // 与它上次轮询时的不同，说明它该显示的内容变了而它还没来取。只看这台设备自己的输入：
-// 改别的设备、改没被用到的模板都不影响它；时段计划到点切换、测试屏到期也能及时体现。
+// 改别的设备、改没被用到的模板都不影响它；测试屏到期也能及时体现。
 func (s *Server) syncState(rt *deviceRuntime, online bool, key string) string {
 	switch {
 	case !online:
@@ -249,7 +249,7 @@ func (s *Server) manifestFor(deviceID string) (*manifest.Manifest, error) {
 // 清单缓存与后台的"等待刷新"也只看它的指纹（key）——指纹不可能漏掉清单的输入。
 type content struct {
 	TestUntil time.Time         `json:"test_until,omitzero"` // 非零：显示测试卡
-	Source    string            `json:"source"`              // test/override/schedule/global
+	Source    string            `json:"source"`              // test/override/global
 	Template  store.Template    `json:"template"`
 	Attrs     map[string]string `json:"attrs"`
 	Mirror    bool              `json:"mirror"`
@@ -277,7 +277,7 @@ func (s *Server) content(deviceID string, now time.Time) (content, error) {
 			return
 		}
 		c.Mirror, playlist = d.Display.Mirror, d.Display.Playlist
-		c.Template, c.Source, found = resolveTemplate(st, d.Display, now.In(s.loc))
+		c.Template, c.Source, found = resolveTemplate(st, d.Display)
 	})
 	switch {
 	case !found:
@@ -294,16 +294,11 @@ func (s *Server) content(deviceID string, now time.Time) (content, error) {
 	return c, nil
 }
 
-// resolveTemplate 决定设备当前应显示的模板及来源：设备专属模板 > 时段计划命中 > 全局默认模板。
+// resolveTemplate 决定设备当前应显示的模板及来源：设备专属模板 > 全局默认模板。
 // 被引用的模板不能删（handleDeleteTemplate），最后一个模板也不能删，所以正常情况下总能找到。
-func resolveTemplate(st *store.State, disp store.DisplayConfig, now time.Time) (store.Template, string, bool) {
+func resolveTemplate(st *store.State, disp store.DisplayConfig) (store.Template, string, bool) {
 	if t, ok := st.Templates[disp.TemplateID]; ok {
 		return t, "override", true
-	}
-	if sc, hit := store.ActiveSchedule(st.Schedules, now); hit {
-		if t, ok := st.Templates[sc.TemplateID]; ok {
-			return t, "schedule", true
-		}
 	}
 	t, ok := st.Templates[st.Global.TemplateID]
 	return t, "global", ok

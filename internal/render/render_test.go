@@ -92,6 +92,42 @@ func TestRenderMirror(t *testing.T) {
 	}
 }
 
+// 属性文字水平居中，offset_y 把它相对垂直中心整体上移/下移。
+func TestRenderAttrOffsetY(t *testing.T) {
+	r := newRenderer(t)
+	textBox := func(off int) image.Rectangle {
+		tpl := mediaTemplate()
+		tpl.Regions[0].OffsetY = off
+		if err := store.ValidateTemplate(&tpl); err != nil {
+			t.Fatal(err)
+		}
+		out, err := r.Render(tpl, map[string]string{"room": "302"}, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bg := color.RGBA{0x1E, 0x3A, 0x8A, 0xFF}
+		var box image.Rectangle
+		for y := 0; y < 900; y++ {
+			for x := 0; x < 720; x++ {
+				if out.RGBAAt(x, y) != bg {
+					box = box.Union(image.Rect(x, y, x+1, y+1))
+				}
+			}
+		}
+		if box.Empty() {
+			t.Fatal("属性区没画出文字")
+		}
+		return box
+	}
+	center, up := textBox(0), textBox(-200)
+	if up != center.Add(image.Pt(0, -200)) {
+		t.Fatalf("offset_y=-200 应整体上移 200px：%v → %v", center, up)
+	}
+	if mid := (center.Min.X + center.Max.X) / 2; mid < 350 || mid > 370 {
+		t.Fatalf("文字应水平居中：%v", center)
+	}
+}
+
 func TestRenderMediaRegionOverlayVsFullscreen(t *testing.T) {
 	r := newRenderer(t)
 	tpl := mediaTemplate()

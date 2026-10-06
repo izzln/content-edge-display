@@ -51,8 +51,6 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"GET /api/v1/admin/backgrounds/{file}":              s.handleGetBackground,
 		"GET /api/v1/admin/global":                          s.handleGetGlobal,
 		"PUT /api/v1/admin/global":                          s.handlePutGlobal,
-		"GET /api/v1/admin/schedules":                       s.handleGetSchedules,
-		"PUT /api/v1/admin/schedules":                       s.handlePutSchedules,
 		"GET /api/v1/admin/packages":                        s.handleListPackages,
 		"POST /api/v1/admin/packages":                       s.handleUploadPackage,
 		"DELETE /api/v1/admin/packages/{version}":           s.handleDeletePackage,
@@ -62,7 +60,8 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"GET /api/v1/admin/token":                           s.handleGetAdminToken,
 		"PUT /api/v1/admin/token":                           s.handlePutAdminToken,
 		"GET /api/v1/admin/access":                          s.handleGetAccess,
-		"PUT /api/v1/admin/access":                          s.handlePutAccess,
+		"PUT /api/v1/admin/access/root-password":            s.handlePutRootPassword,
+		"PUT /api/v1/admin/access/ssh-keys":                 s.handlePutSSHKeys,
 		"GET /api/v1/admin/cache":                           s.handleGetCache,
 		"PUT /api/v1/admin/cache":                           s.handlePutCache,
 		"POST /api/v1/admin/devices/{id}/media":             s.handleUploadDeviceMedia,
@@ -76,13 +75,15 @@ func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		ok, wait := s.auth.check(r.Header.Get("X-Admin-Token"), clientIP(r), s.now())
+		ip := clientIP(r)
+		ok, wait := s.auth.check(r.Header.Get("X-Admin-Token"), ip, s.now())
 		switch {
 		case wait > 0:
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 			http.Error(w, "口令错误次数过多，请 "+waitText(wait)+"后再试", http.StatusTooManyRequests)
 			return
 		case !ok:
+			w.Header().Set("X-Auth-Failures", strconv.Itoa(s.auth.failures(ip))) // 登录框显示"N 次口令尝试失败"
 			http.Error(w, "口令不对", http.StatusUnauthorized)
 			return
 		}
@@ -123,7 +124,7 @@ func (s *Server) handleAdminUI(w http.ResponseWriter, r *http.Request) {
 
 // serverInfo 是服务端的能力与限制，后台据此提示（例如没装 ffmpeg 时不能上传视频）、拼装机命令。
 type serverInfo struct {
-	// 服务器时间（毫秒）：时段计划、测试屏到期、定时下发都按它算。后台拿它和浏览器时间比，
+	// 服务器时间（毫秒）：测试屏到期、定时下发都按它算。后台拿它和浏览器时间比，
 	// 差得多就提示——离线环境下服务器没有 NTP，时钟漂移不会有人察觉。
 	ServerTime     int64  `json:"server_time"`
 	Timezone       string `json:"timezone"`
@@ -181,7 +182,7 @@ type DeviceView struct {
 	OfflineS     int                 `json:"offline_after_s"`     // 多久没来算离线
 	Heartbeat    *manifest.Heartbeat `json:"heartbeat,omitempty"`
 	TestUntil    *time.Time          `json:"test_until,omitempty"`
-	ActiveSource string              `json:"active_source"` // test/override/schedule/global
+	ActiveSource string              `json:"active_source"` // test/override/global
 	ActiveTpl    string              `json:"active_template,omitempty"`
 	Sync         string              `json:"sync"` // offline/waiting/syncing/latest，见 syncState
 }
@@ -311,7 +312,7 @@ func (s *Server) handlePutDisplay(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---- 全局模板 / 时段计划 ----
+// ---- 全局模板 ----
 
 func (s *Server) handleGetGlobal(w http.ResponseWriter, r *http.Request) {
 	var g store.GlobalConfig
@@ -329,32 +330,6 @@ func (s *Server) handlePutGlobal(w http.ResponseWriter, r *http.Request) {
 			return errBadRequest("模板不存在")
 		}
 		st.Global = g
-		return nil
-	}) {
-		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-func (s *Server) handleGetSchedules(w http.ResponseWriter, r *http.Request) {
-	var list []store.Schedule
-	s.store.View(func(st *store.State) { list = st.Schedules })
-	writeJSON(w, list)
-}
-
-// handlePutSchedules 整表替换时段计划。
-func (s *Server) handlePutSchedules(w http.ResponseWriter, r *http.Request) {
-	list := []store.Schedule{}
-	if !decodeJSON(w, r, 256<<10, &list) {
-		return
-	}
-	if list == nil {
-		list = []store.Schedule{}
-	}
-	if s.update(w, func(st *store.State) error {
-		if err := store.ValidateSchedules(list, st.Templates); err != nil {
-			return errBadRequest("%v", err)
-		}
-		st.Schedules = list
 		return nil
 	}) {
 		w.WriteHeader(http.StatusNoContent)
@@ -393,7 +368,7 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteTemplate 删除模板。
 //
-// 两条保护：仍被某台设备或某个时段直接引用的模板不能删（会让那些设备没有版式）；
+// 两条保护：仍被某台设备直接引用的模板不能删（会让那些设备没有版式）；
 // 最后一个模板也不能删（系统必须始终有一个全局默认模板可用）。
 // 删掉的正好是全局默认模板时不拦——删除后自动改指向剩下的模板。
 func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
@@ -403,11 +378,6 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		for _, d := range sortedByID(st.Devices) {
 			if d.Display.TemplateID == id {
 				inUse = append(inUse, "设备 "+d.ID)
-			}
-		}
-		for _, sc := range st.Schedules {
-			if sc.TemplateID == id {
-				inUse = append(inUse, "时段 "+sc.ID)
 			}
 		}
 		switch _, ok := st.Templates[id]; {

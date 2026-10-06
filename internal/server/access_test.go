@@ -29,20 +29,22 @@ func TestDeviceAccess(t *testing.T) {
 	}
 
 	for _, c := range []struct {
+		path string
 		body map[string]any
 		want string
 	}{
-		{map[string]any{"root_password": "short", "ssh_keys": []string{}}, "8~128"},
-		{map[string]any{"ssh_keys": []string{"ssh-ed25519 notbase64!"}}, "第 1 个公钥"},
-		{map[string]any{"ssh_keys": []string{"ssh-dss AAAA x"}}, "不支持"},
+		{"root-password", map[string]any{"root_password": "short"}, "8~128"},
+		{"ssh-keys", map[string]any{"ssh_keys": []string{"ssh-ed25519 notbase64!"}}, "第 1 个公钥"},
+		{"ssh-keys", map[string]any{"ssh_keys": []string{"ssh-dss AAAA x"}}, "不支持"},
 	} {
-		if w := do2(t, h, adminReq("PUT", "/api/v1/admin/access", c.body)); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.want) {
+		if w := do2(t, h, adminReq("PUT", "/api/v1/admin/access/"+c.path, c.body)); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), c.want) {
 			t.Errorf("%v：应被拒并提示 %q，得到 %d %s", c.body, c.want, w.Code, w.Body.String())
 		}
 	}
 
 	key := testSSHKey("ops@laptop", 1)
-	do(t, h, adminReq("PUT", "/api/v1/admin/access", map[string]any{"root_password": "Secret-123", "ssh_keys": []string{" " + key + " ", ""}}), http.StatusNoContent)
+	do(t, h, adminReq("PUT", "/api/v1/admin/access/root-password", map[string]any{"root_password": "Secret-123"}), http.StatusNoContent)
+	do(t, h, adminReq("PUT", "/api/v1/admin/access/ssh-keys", map[string]any{"ssh_keys": []string{" " + key + " ", ""}}), http.StatusNoContent)
 	w := do(t, h, adminReq("GET", "/api/v1/admin/access", nil), http.StatusOK)
 	if strings.Contains(w.Body.String(), "$6$") || !strings.Contains(w.Body.String(), "root_password_set_at") {
 		t.Fatalf("不应回传密码哈希，应显示设置时间：%s", w.Body.String())
@@ -61,8 +63,8 @@ func TestDeviceAccess(t *testing.T) {
 	}
 	hash := m.Access.RootHash
 
-	// 只改公钥、不填密码：密码保持不变
-	do(t, h, adminReq("PUT", "/api/v1/admin/access", map[string]any{"ssh_keys": []string{key, testSSHKey("new", 2)}}), http.StatusNoContent)
+	// 只改公钥：密码保持不变
+	do(t, h, adminReq("PUT", "/api/v1/admin/access/ssh-keys", map[string]any{"ssh_keys": []string{key, testSSHKey("new", 2)}}), http.StatusNoContent)
 	if m2 := deviceManifest(t, h); m2.Access.RootHash != hash || len(m2.Access.SSHKeys) != 2 || m2.Version == m.Version {
 		t.Fatalf("只改公钥时密码不变、版本变化：%+v", m2.Access)
 	}

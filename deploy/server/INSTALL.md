@@ -53,7 +53,7 @@ systemctl daemon-reload && systemctl enable --now display-server
   server.json         配置
   fonts/              渲染用字体
   data/               服务端状态（首次启动自动创建）：
-    state.json          设备、模板、时段、程序包、设备访问、管理口令哈希
+    state.json          设备、模板、程序包、设备访问、管理口令哈希
     cache.json          文件缓存区索引
     media/<设备ID>/     该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）；media/.store/ 是文件缓存区
     packages/ deps/     设备端程序包、离线依赖包
@@ -85,15 +85,15 @@ systemctl daemon-reload && systemctl enable --now display-server
 （`journalctl -u display-server | grep fingerprint`）。设备固定这个指纹，所以 **`data/tls/` 必须随 `state.json` 一起备份**——
 丢了重新生成指纹就变了，已装设备全部拒绝连接。
 
-管理后台：浏览器打开 `https://<服务器>:9001/admin`，输入 `admin_token`（之后可在后台「程序更新」页修改；
+管理后台：浏览器打开 `https://<服务器>:9001/admin`，输入 `admin_token`（之后可在后台「管理」页修改；
 忘了口令就把 server.json 的 `admin_token` 改成新值——例如 `openssl rand -base64 9` 生成——并重启服务端）。浏览器会提示证书不受信任
 （自签证书），选"高级 → 继续访问"；或把 `data/tls/server.crt` 导入管理电脑并设为信任。
 
 ## 新设备装机
 
-先在后台「程序更新」页上传设备端程序包（`display-agent-<版本>-armv7.tar.gz`）；建议再上传离线依赖包
+先在后台「管理」页上传设备端程序包（`display-agent-<版本>-armv7.tar.gz`）；建议再上传离线依赖包
 （`display-deps-<代号>-armhf.tar.gz`，装机从局域网装依赖、不需要外网）。然后在刷好公版 Armbian 的设备上以 root 运行
-（这条命令在「程序更新」页可直接复制）：
+（这条命令在「管理」页可直接复制）：
 
 ```sh
 curl -fsSL http://<服务器>:9000/install.sh | ENROLL_TOKEN=<server.json 里的 enroll_token> sh

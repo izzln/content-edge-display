@@ -155,6 +155,16 @@ func (a *adminAuth) quickCheck(sum [32]byte, empty bool, ip string, now time.Tim
 	return false, 0, false
 }
 
+// failures 返回 ip 目前累计猜错了几个不同的口令（后台登录框显示）。
+func (a *adminAuth) failures(ip string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if f := a.ips[ip]; f != nil {
+		return f.count
+	}
+	return 0
+}
+
 // prune 删掉很久没再猜错的 IP（每小时维护时调用）。
 func (a *adminAuth) prune(now time.Time) {
 	a.mu.Lock()

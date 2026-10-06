@@ -295,7 +295,7 @@ func (s *Server) saveUploadedMedia(deviceID string, part io.Reader, name string)
 		return "", 0, reject("不支持的文件类型（图片 png/jpg，视频 mp4/mov/mkv/webm 等，PDF）", "unsupported file type")
 	}
 	if st := s.cacheStats(); st.InUseBytes >= s.quotaBytes() {
-		return "", 0, reject(fmt.Sprintf("缓存区已被设备在用的文件占满（%s / %dGB），请在「存储」页调大缓存区，或先删除不再使用的内容",
+		return "", 0, reject(fmt.Sprintf("缓存区已被设备在用的文件占满（%s / %dGB），请在「管理」页的存储调大缓存区，或先删除不再使用的内容",
 			humanBytes(st.InUseBytes), st.QuotaGB), "cache quota is full of in-use files")
 	}
 	name, release, err := s.claimMediaName(deviceID, name)
