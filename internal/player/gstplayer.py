@@ -332,7 +332,8 @@ class Display:
             out = self._find_output(fd)
             if out:
                 self.fd, self.path = fd, path
-                self.conn, self.crtc, crtc_index, self.mode = out
+                self.conn, self.crtc, crtc_index, self.mode, self.mm = out
+                self.par = device_par(width, height, *self.mm)
                 break
             os.close(fd)  # H3 上 GPU 也是一个 card，没有显示接口
         if self.fd < 0:
@@ -375,7 +376,8 @@ class Display:
                     idx = self._crtc_index(fd, cc, crtcs)
                     if idx < 0:
                         raise RuntimeError("no CRTC for connector %d" % cc.connector_id)
-                    return cc.connector_id, crtcs[idx], idx, _ModeInfo.from_buffer_copy(mode)
+                    return (cc.connector_id, crtcs[idx], idx, _ModeInfo.from_buffer_copy(mode),
+                            (cc.mm_width, cc.mm_height))
                 finally:
                     drm.drmModeFreeConnector(c)
         finally:
@@ -416,8 +418,11 @@ class Display:
                 log("cannot set %s=%d on plane %d: %s" % (name, value, plane, os.strerror(ctypes.get_errno() or -ret)))
 
     def describe(self):
-        return "%s, connector %d, crtc %d, %s@%dHz, overlay plane %d, video plane %d" % (
-            self.path, self.conn, self.crtc, self.mode.name.decode(), self.mode.vrefresh, self.primary, self.video)
+        par = ""
+        if self.par != (1, 1):
+            par = ", monitor %dx%d mm -> pixel aspect %d/%d (compensated)" % (self.mm + self.par)
+        return "%s, connector %d, crtc %d, %s@%dHz, overlay plane %d, video plane %d%s" % (
+            self.path, self.conn, self.crtc, self.mode.name.decode(), self.mode.vrefresh, self.primary, self.video, par)
 
     def show(self, base, hole, spans, alpha, dim=0):
         """把上层画到后台缓冲并切过去（阻塞到下一个 vblank 生效，之后前台那块才可以再画）。
@@ -437,6 +442,30 @@ class Display:
             return
         self.failed = False
         self.front = 1 - self.front
+
+
+# kmssink 认定的显示屏像素宽高比：照抄 GStreamer 的 gst_video_calculate_device_ratio（sys/kms/gstkmsutils.c），
+# 结果必须与它一模一样才能抵消掉（见 device_par）。
+_DEVICE_PARS = ((1, 1), (16, 15), (11, 10), (54, 59), (64, 45), (5, 3), (4, 3))
+
+
+def device_par(width, height, mm_w, mm_h):
+    """kmssink 按显示器的物理尺寸（EDID 里的毫米数）算出的像素宽高比 (分子, 分母)。
+
+    kmssink 缩放时会按它"校正"画面比例：16:9 的屏跑 1440×900（16:10）时它算出 11/10，
+    于是把 1000×900 的媒体区缩成 909×900、两边留黑——视频就不撑满了。没有属性能关掉这个校正，
+    所以给送进 kmssink 的帧标上同样的像素宽高比（capssetter），两者相消，按像素 1:1 铺满。
+    EDID 没给尺寸（0）时是 1/1，不用处理；同一台机器每次开机读到的 EDID 也可能不同，所以每次启动现算。"""
+    if not (width and height and mm_w and mm_h):
+        ratio = 1.0
+    else:
+        ratio = mm_w * height / (mm_h * width)
+    best, delta = (1, 1), abs(ratio - 1.0)
+    for n, d in _DEVICE_PARS[1:]:
+        for a, b in ((n, d), (d, n)):
+            if abs(ratio - a / b) < delta:
+                best, delta = (a, b), abs(ratio - a / b)
+    return best
 
 
 def cover_crop(src_w, src_h, dst_w, dst_h):
@@ -657,6 +686,8 @@ class Player:
             sink = "fakesink name=sink sync=true"
         else:
             sink = "kmssink name=sink fd=%d connector-id=%d plane-id=%d skip-vsync=true" % (d.fd, d.conn, d.video)
+            if d.par != (1, 1):  # 抵消 kmssink 按显示器物理尺寸做的比例校正，见 device_par
+                sink = 'capssetter caps="video/x-raw,pixel-aspect-ratio=%d/%d" ! %s' % (d.par + (sink,))
         if item.get("type") == "video":
             name, desc = VIDEO_OUTPUTS[mode]
             desc = desc.format(decoder=self.h264_decoder, sink=sink)

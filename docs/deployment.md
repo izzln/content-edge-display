@@ -437,6 +437,11 @@ device scr-0018 online (192.168.1.58, agent 1.3.0)
 `cannot play <文件>: <原因>`；视频输出方式退一步记 `video output '…' failed: … retrying with '…'`；GStreamer 自己的 ERROR 行
 （以及 `kmssink`、`v4l2codecs` 的 WARN 行）也在其中。播放进程接连起不来（如 HDMI 没接）时重启间隔逐步拉长到 1 分钟。
 
+视频没铺满媒体区时，看每段视频开播一秒后的 `video plane: dst …, src …` 一行（`check-display.sh` 第 3 项"视频图层"同样内容）：
+`dst` 应等于模板媒体区，不等时行尾会注明 `not filling it`。播放进程启动时的 `display …` 一行若带
+`pixel aspect N/D (compensated)`，说明显示器 EDID 报的物理尺寸与输出分辨率比例不一致（如 16:9 的屏跑 1440×900），
+播放进程已经抵消了 kmssink 因此做的比例校正。
+
 ## 7. 服务端升级与数据迁移
 
 服务端的全部可变状态只有 **`data_dir`** 和 **`media_root`**，自包含布局下都在 `/srv/display` 里。

@@ -281,6 +281,17 @@ assert g.cover_crop(0, 0, 720, 900) == (0, 0, 0, 0)
 assert g.cover_crop(1000, 900, 994, 900) == (2, 4, 0, 0)  # 左偏移取偶数（NV12 色度 2×2 一组）
 assert g.cover_crop(1000, 901, 1000, 900) == (0, 0, 0, 1)  # 保留高度取偶数
 
+# kmssink 认定的显示屏像素宽高比（照抄 gst_video_calculate_device_ratio）：现场那台 16:9 屏跑 1440×900，
+# kmssink 把 1000×900 的媒体区缩成了 909×900——就是 11/10
+assert g.device_par(1440, 900, 527, 296) == (11, 10), g.device_par(1440, 900, 527, 296)
+assert g.device_par(1440, 900, 0, 0) == (1, 1)            # EDID 没给尺寸
+assert g.device_par(1440, 900, 474, 296) == (1, 1)        # 16:10 的屏跑 16:10：方像素
+assert g.device_par(1280, 1024, 527, 296) == (64, 45)     # 16:9 屏跑 5:4
+assert g.device_par(1440, 900, 296, 527) == (3, 5)        # 尺寸横竖反了：表里比例的倒数也参与比较
+from gi.repository import GstVideo
+ok, n, d = GstVideo.video_calculate_display_ratio(800, 720, 11, 10, 11, 10)
+assert ok and n * 720 == d * 800, (n, d)  # 帧标上同样的比例后两者相消：显示比例就是像素比例，铺满
+
 # 图层实际位置：从 debugfs 的 DRM 状态里取（格式照内核 drm_atomic_plane_print_state）
 import tempfile, os
 d = tempfile.mkdtemp()
@@ -432,6 +443,18 @@ def run(prime):
     return pts
 plain, primed = run(False), run(True)
 assert plain and primed == plain, (len(plain), len(primed), primed[:3])
+
+# 抵消 kmssink 比例校正的那一级（capssetter）：只改 caps 里的像素宽高比，帧照常流到底、宽高不变
+p = Gst.parse_launch(g.VIDEO_OUTPUTS[0][1].format(decoder="avdec_h264",
+    sink='capssetter caps="video/x-raw,pixel-aspect-ratio=11/10" ! fakesink name=sink sync=false'))
+p.get_by_name("src").set_property("location", sys.argv[1])
+p.set_state(Gst.State.PLAYING)
+msg = p.get_bus().timed_pop_filtered(10 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+caps = p.get_by_name("sink").get_static_pad("sink").get_current_caps()
+p.set_state(Gst.State.NULL)
+assert msg and msg.type == Gst.MessageType.EOS, msg and msg.parse_error()
+s = caps.to_string()
+assert "pixel-aspect-ratio=(fraction)11/10" in s and "format=(string)I420" in s, s
 `, video).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
