@@ -62,6 +62,9 @@ type Manifest struct {
 	Layout  *Layout `json:"layout,omitempty"`
 	Update  *Update `json:"update,omitempty"`
 	Access  *Access `json:"access,omitempty"`
+	// Expires 非零表示这是临时内容（测试卡），到这个时刻（服务端时间）失效：设备记着它，
+	// 联系不上服务端时也能到点自己退回之前的正常内容。
+	Expires time.Time `json:"expires,omitzero"`
 }
 
 // Downloads 返回本份清单需要设备端下载校验的全部文件（播放条目 + 叠加图）。
@@ -196,6 +199,9 @@ func Version(m Manifest) string {
 	}
 	if a := m.Access; a != nil {
 		fmt.Fprintf(h, "access|%s|%s\n", a.RootHash, strings.Join(a.SSHKeys, "|"))
+	}
+	if !m.Expires.IsZero() {
+		fmt.Fprintf(h, "expires|%d\n", m.Expires.Unix())
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }

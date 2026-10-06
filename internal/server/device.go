@@ -390,6 +390,9 @@ func (s *Server) buildManifest(deviceID string, c content) (*manifest.Manifest, 
 		items, layout.Overlay = media, png
 	}
 	m := &manifest.Manifest{Items: items, Layout: layout, Update: c.Update, Access: c.Access}
+	if !c.TestUntil.IsZero() {
+		m.Expires = c.TestUntil.UTC() // 设备到点自己退回正常内容，不依赖能联系上服务端
+	}
 	m.Version = manifest.Version(*m)
 	return m, nil
 }

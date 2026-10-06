@@ -41,8 +41,9 @@ type Agent struct {
 	hw       hardwareInfo
 
 	registered  bool
-	manifestVer string // 当前已应用的清单版本
-	failures    int    // 连续失败次数（决定重试退避）
+	manifestVer string    // 当前已应用的清单版本
+	testUntil   time.Time // 正在显示的测试卡的到期时间（服务端时间）；零值 = 不是测试卡，见 testcard.go
+	failures    int       // 连续失败次数（决定重试退避）
 	link        linkStatus
 
 	update   *manifest.Update // 清单里待执行的程序更新（update.go）
@@ -139,6 +140,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	firstBeat := true
 	wd := time.NewTicker(watchdogInterval)    // 等待期间（含失败退避的几分钟）持续喂狗
 	bright := time.NewTicker(brightnessCheck) // 分时段亮度到点切换，与能否联系上服务端无关
+	// 测试卡到点自己退回正常内容（联系不上服务端时也照样，见 testcard.go）；每次内容变化后重新排
+	testTimer := time.NewTimer(time.Hour)
+	armTest := func() {
+		testTimer.Stop()
+		if d, ok := a.testRemaining(); ok {
+			testTimer.Reset(d)
+		}
+	}
+	armTest()
+	defer testTimer.Stop()
 	defer bright.Stop()
 	defer pollTimer.Stop()
 	defer hbTimer.Stop()
@@ -151,11 +162,15 @@ func (a *Agent) Run(ctx context.Context) error {
 			sdNotify("WATCHDOG=1")
 		case <-bright.C:
 			a.applyBrightness()
+		case <-testTimer.C:
+			a.expireTest()
+			armTest()
 		case <-pollTimer.C:
 			err := a.step(ctx)
 			if errors.Is(err, ErrRestartForUpdate) {
 				return err
 			}
+			armTest()
 			pollTimer.Reset(a.retryDelay(err))
 			if firstBeat && a.registered { // 刚注册上：立刻心跳，确认新版本、让后台尽快看到健康数据
 				firstBeat = false
@@ -371,6 +386,7 @@ func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
 	if err != nil {
 		return err
 	}
+	a.keepBase(m) // 换成测试卡前记下正常内容，到期自己退回（testcard.go）
 	if err := fsutil.WriteFile(a.currentPath(), data, 0o644); err != nil {
 		return err
 	}
@@ -381,22 +397,50 @@ func (a *Agent) syncManifest(ctx context.Context, m *manifest.Manifest) error {
 	return nil
 }
 
-// loadCurrent 从本地 current.json 恢复播放（启动时断网兜底）。
+// loadCurrent 从本地 current.json 恢复播放（启动时断网兜底）。记着的是已经过期的测试卡时，
+// 恢复测试卡之前的正常内容。
 func (a *Agent) loadCurrent() error {
-	data, err := os.ReadFile(a.currentPath())
+	m, err := readManifest(a.currentPath())
 	if err != nil {
 		return err
 	}
-	var m manifest.Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return err
+	if a.testExpired(m.Expires) && a.backToBase() == nil {
+		return nil
 	}
-	for _, item := range m.Downloads() {
-		if !a.cached(item) {
-			return fmt.Errorf("cached file %s missing or truncated", item.Name)
+	return a.restore(m)
+}
+
+// restore 播放本地已缓存的清单 m。
+func (a *Agent) restore(m *manifest.Manifest) error {
+	// 个别文件坏了（SD 卡出错、被人删了）也要把其余的放起来，不能因为一个文件黑屏：
+	// 缺的条目跳过；叠加图缺了就整屏播放。这样恢复的列表不完整，不记它的版本号——
+	// 联系上服务端后拿到完整清单，把缺的补下载回来（记了版本号的话服务端只会回 304）。
+	var missing []string
+	items := m.Items[:0:0]
+	for _, it := range m.Items {
+		if a.cached(it) {
+			items = append(items, it)
+		} else {
+			missing = append(missing, it.Name)
 		}
 	}
-	return a.apply(&m)
+	if m.Layout != nil && !a.cached(m.Layout.Overlay) {
+		missing = append(missing, m.Layout.Overlay.Name)
+		m.Layout = nil
+	}
+	if len(missing) == 0 {
+		return a.apply(m)
+	}
+	if len(items) == 0 && m.Layout == nil {
+		return fmt.Errorf("cached files missing or truncated: %s", strings.Join(missing, ", "))
+	}
+	log.Printf("agent: cached files missing or truncated, playing the rest until the server is reachable: %s", strings.Join(missing, ", "))
+	m.Items = items
+	if err := a.apply(m); err != nil {
+		return err
+	}
+	a.manifestVer = ""
+	return nil
 }
 
 // cached 判断条目的文件已在本地缓存里：文件名内嵌内容哈希前缀、尺寸一致即视为完整（下载时已校验过 sha256）。
@@ -420,6 +464,7 @@ func (a *Agent) apply(m *manifest.Manifest) error {
 	a.manifestVer = m.Version
 	a.setUpdate(m.Update)
 	a.access = m.Access
+	a.testUntil = m.Expires
 	return nil
 }
 
@@ -428,10 +473,16 @@ func (a *Agent) localPath(item manifest.Item) string {
 	return filepath.Join(a.mediaDir(), item.SHA256[:12]+"_"+item.Name)
 }
 
-// cleanup 删除不再被当前清单引用的缓存文件。
+// cleanup 删除不再被当前清单引用的缓存文件。显示测试卡期间，测试卡之前的正常内容也保留（到期要退回去）。
 func (a *Agent) cleanup(m *manifest.Manifest) {
 	referenced := map[string]bool{}
-	for _, it := range m.Downloads() {
+	keep := m.Downloads()
+	if !m.Expires.IsZero() {
+		if b, err := readManifest(a.basePath()); err == nil {
+			keep = append(keep, b.Downloads()...)
+		}
+	}
+	for _, it := range keep {
 		referenced[filepath.Base(a.localPath(it))] = true
 	}
 	entries, err := os.ReadDir(a.mediaDir())
