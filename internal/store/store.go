@@ -133,7 +133,6 @@ type Package struct {
 	File       string    `json:"file"`
 	SHA256     string    `json:"sha256"`
 	Size       int64     `json:"size"`
-	Notes      string    `json:"notes,omitempty"`
 	UploadedAt time.Time `json:"uploaded_at"`
 }
 
