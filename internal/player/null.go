@@ -12,6 +12,7 @@ type Null struct {
 	scene      Scene
 	paused     bool
 	brightness int
+	noMedia    bool
 }
 
 func NewNull() *Null { return &Null{brightness: 100} }
@@ -54,11 +55,18 @@ func (p *Null) Paused() bool {
 
 func (p *Null) Stats() Stats { return Stats{} }
 
-func (p *Null) SetBrightness(percent int) {
+func (p *Null) SetBrightness(percent int, media bool) {
 	p.mu.Lock()
-	p.brightness = percent
+	p.brightness, p.noMedia = percent, !media
 	p.mu.Unlock()
-	log.Printf("player(null): brightness %d%%", percent)
+	log.Printf("player(null): brightness %d%%, media %v", percent, media)
+}
+
+// Media 返回媒体区是否在播放（测试用）。
+func (p *Null) Media() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.noMedia
 }
 
 // Brightness 返回最近一次设置的亮度（测试用）。

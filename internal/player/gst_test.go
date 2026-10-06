@@ -225,8 +225,10 @@ func TestRestartBacksOff(t *testing.T) {
 		return out
 	}
 	testutil.WaitFor(t, 5*time.Second, "起了 4 次", func() bool { return len(starts()) >= 4 })
+	// 间隔依次是 50、100、200 毫秒，再加上每次拉起进程本身的耗时（负载高时几十到上百毫秒、忽大忽小）。
+	// 比较差值而不是倍数，把拉起耗时抵消掉：第三次比第一次多等 150 毫秒，留出抖动余量。
 	s := starts()
-	if g1, g3 := s[1]-s[0], s[3]-s[2]; g3 < 3*g1 {
+	if g1, g3 := s[1]-s[0], s[3]-s[2]; g3-g1 < 100 {
 		t.Fatalf("重启间隔应翻倍增长：%v", s)
 	}
 }
@@ -526,13 +528,24 @@ func TestPlayerScriptSequencing(t *testing.T) {
 			t.Fatalf("放过视频后应报告解码方式：%v", st)
 		}
 	}
-	send(map[string]any{"id": 5, "cmd": "brightness", "percent": 30})
+	send(map[string]any{"id": 5, "cmd": "brightness", "percent": 30, "media": true})
 	testutil.WaitFor(t, 3*time.Second, "亮度", func() bool { mu.Lock(); defer mu.Unlock(); return replies[5] != nil })
 	mu.Lock()
 	if r := replies[5]; r["error"] != nil {
 		t.Fatalf("亮度命令应被接受：%v", r)
 	}
 	mu.Unlock()
+
+	// 停播媒体区：当前项淡出后停掉，之后不再切换；恢复后接着播
+	send(map[string]any{"id": 6, "cmd": "brightness", "percent": 30, "media": false})
+	time.Sleep(time.Second) // 淡出（测试里 fade 也是默认的 0.6 秒）
+	n0 := len(played())
+	time.Sleep(2500 * time.Millisecond)
+	if len(played()) != n0 {
+		t.Fatalf("停播媒体区期间不应再播放：%v", played()[n0:])
+	}
+	send(map[string]any{"id": 7, "cmd": "brightness", "percent": 100, "media": true})
+	testutil.WaitFor(t, 3*time.Second, "恢复播放", func() bool { return len(played()) > n0 })
 
 	// 换成单张图片：一直显示，不再切换
 	send(map[string]any{"id": 4, "cmd": "load", "items": []map[string]any{{"path": img2, "type": "image", "duration": 1}}, "overlay": nil})

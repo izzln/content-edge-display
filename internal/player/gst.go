@@ -40,7 +40,8 @@ type GST struct {
 
 	mu         sync.Mutex
 	desired    *Scene
-	brightness int // 期望的画面亮度（百分比）；播放进程重启后补发
+	brightness int  // 期望的画面亮度（百分比）；播放进程重启后补发
+	noMedia    bool // 期望停播媒体区；同上
 	proc       *gstProc
 	hwdec      string // 看门狗最近一次问到的解码方式
 	paused     bool
@@ -80,19 +81,19 @@ func (p *GST) Load(scene Scene) error {
 	return p.send(proc, s)
 }
 
-// SetBrightness 记下期望亮度并交给播放进程；播放进程不在时，等它（重新）起来后补发。
-func (p *GST) SetBrightness(percent int) {
+// SetBrightness 记下期望亮度与媒体区开关并交给播放进程；播放进程不在时，等它（重新）起来后补发。
+func (p *GST) SetBrightness(percent int, media bool) {
 	p.mu.Lock()
-	p.brightness = percent
+	p.brightness, p.noMedia = percent, !media
 	proc := p.proc
 	p.mu.Unlock()
 	if proc != nil {
-		p.sendBrightness(proc, percent)
+		p.sendBrightness(proc, percent, media)
 	}
 }
 
-func (p *GST) sendBrightness(proc *gstProc, percent int) {
-	if err := proc.call(map[string]any{"cmd": "brightness", "percent": percent}, nil); err != nil {
+func (p *GST) sendBrightness(proc *gstProc, percent int, media bool) {
+	if err := proc.call(map[string]any{"cmd": "brightness", "percent": percent, "media": media}, nil); err != nil {
 		log.Printf("player(gst): set brightness: %v", err)
 	}
 }
@@ -253,10 +254,10 @@ func (p *GST) runOnce(ctx context.Context) {
 	}
 	p.mu.Lock()
 	p.proc = proc
-	scene, brightness := p.desired, p.brightness
+	scene, brightness, noMedia := p.desired, p.brightness, p.noMedia
 	p.mu.Unlock()
-	if brightness != 100 {
-		p.sendBrightness(proc, brightness)
+	if brightness != 100 || noMedia {
+		p.sendBrightness(proc, brightness, !noMedia) // 先于画面发：停播媒体区时新画面一上来就不播
 	}
 	if scene != nil {
 		if err := p.send(proc, *scene); err != nil {

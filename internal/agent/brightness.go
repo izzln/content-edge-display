@@ -13,7 +13,8 @@ import (
 
 // 分时段亮度：后台设若干时段与亮度（manifest.BrightnessPeriod），随响应头下发（schedule.go）。
 // 设备按服务端时区自己判断此刻在哪一段、到点切换：不依赖轮询成功，断网照样按时调暗/恢复。
-// 计划存进缓存目录，断网重启后也照旧。画面亮度由播放器在整屏最上层叠黑幕实现（player.SetBrightness）。
+// 计划存进缓存目录，断网重启后也照旧。画面亮度由播放器在整屏最上层叠黑幕实现，时段还可以停播媒体区
+// （player.SetBrightness）。
 
 // brightnessCheck 是到点切换的检查间隔。
 const brightnessCheck = 30 * time.Second
@@ -58,13 +59,18 @@ func (a *Agent) applyBrightness() {
 	}
 	now := a.clock.Now().In(a.localZone())
 	pct, period := manifest.BrightnessAt(periods, now.Hour()*60+now.Minute())
-	if pct == a.brightness {
+	noMedia := period != nil && period.HideMedia
+	if pct == a.brightness && noMedia == a.noMedia {
 		return
 	}
-	a.brightness = pct
-	a.player.SetBrightness(pct)
+	a.brightness, a.noMedia = pct, noMedia
+	a.player.SetBrightness(pct, !noMedia)
+	media := ""
+	if noMedia {
+		media = ", media area off"
+	}
 	if period != nil {
-		log.Printf("agent: brightness %d%% (period %s-%s)", pct, period.Start, period.End)
+		log.Printf("agent: brightness %d%%%s (period %s-%s)", pct, media, period.Start, period.End)
 	} else {
 		log.Printf("agent: brightness %d%%", pct)
 	}

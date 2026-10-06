@@ -6,7 +6,7 @@ import (
 )
 
 func TestBrightnessSchedule(t *testing.T) {
-	p := []BrightnessPeriod{{Start: "22:00", End: "07:00", Percent: 30}, {Start: "18:00", End: "22:00", Percent: 70}}
+	p := []BrightnessPeriod{{Start: "22:00", End: "07:00", Percent: 30, HideMedia: true}, {Start: "18:00", End: "22:00", Percent: 70}}
 	if err := ValidateBrightness(p); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestBrightnessSchedule(t *testing.T) {
 	}
 
 	h := FormatBrightness(p)
-	if h != "18:00-22:00 70;22:00-07:00 30" {
+	if h != "18:00-22:00 70;22:00-07:00 30 nomedia" {
 		t.Fatalf("响应头格式：%q", h)
 	}
 	back, err := ParseBrightness(h)
@@ -58,7 +58,13 @@ func TestBrightnessSchedule(t *testing.T) {
 			t.Errorf("%+v：应报 %q，得到 %v", c.p, c.want, err)
 		}
 	}
-	if _, err := ParseBrightness("garbage"); err == nil {
-		t.Fatal("乱码应解析失败")
+	for _, bad := range []string{"garbage", "09:00-10:00 50 media", "09:00-10:00 50 nomedia x"} {
+		if _, err := ParseBrightness(bad); err == nil {
+			t.Fatalf("%q 应解析失败", bad)
+		}
+	}
+	// 100% 也可以只停播媒体区
+	if got, err := ParseBrightness("01:00-05:00 100 nomedia"); err != nil || !got[0].HideMedia || got[0].Percent != 100 {
+		t.Fatalf("100%% + 停播媒体区应合法：%+v %v", got, err)
 	}
 }

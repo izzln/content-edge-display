@@ -7,7 +7,8 @@
 #          "overlay": "/path/x.bgra" | null, "media": [x, y, w, h]}
 #         （叠加图已由代理光栅化成输出分辨率的 BGRA，media 是媒体区在输出坐标里的位置）
 #         {"id": 3, "cmd": "stats"}   （代理的看门狗定时发它：回不来就重启本进程）
-#         {"id": 4, "cmd": "brightness", "percent": 30}   （分时段亮度：整屏叠黑幕，100 = 原样）
+#         {"id": 4, "cmd": "brightness", "percent": 30, "media": true}
+#             （分时段亮度：整屏叠黑幕，100 = 原样；media 为 false 时停播媒体区，媒体区黑着、属性区照常）
 #   回复  {"id": 1, "ok": true, ...} 或 {"id": 1, "error": "..."}
 #   事件  {"event": "playing", "index": 0, "path": "..."}  {"event": "error", "index": 0, "message": "..."}
 #         {"event": "crop", "size": [w, h], "crop": [左, 右, 上, 下]}
@@ -501,6 +502,7 @@ class Player:
         self.base = b""          # 上层叠加图（BGRA，预乘 alpha）；没有模板时全透明
         self.dim = 0              # 分时段亮度的黑幕（0 = 原样，255 = 全黑）
         self.dimmed = b""         # 按 dim 压暗过的 base（dim_frame），上层实际画的是它
+        self.media = True         # 是否播放媒体区（分时段亮度可以停播）
         self.hole = (0, 0, 0, 0)  # 媒体区在显示坐标里的位置
         self.spans = []           # 洞里压着装饰的列范围（deco_spans）
         self.scene = None
@@ -554,14 +556,23 @@ class Player:
         return {}
 
     def set_brightness(self, req):
-        """整屏画面亮度（百分比）：上层叠一层黑幕，属性区、底图、图片、视频一起变暗。立即生效。"""
+        """整屏画面亮度（百分比）：上层叠一层黑幕，属性区、底图、图片、视频一起变暗。立即生效。
+        media 为 false 时停播媒体区：当前项淡出后停掉，媒体区保持黑；恢复时从下一项接着播。"""
         percent = min(100, max(0, int(req["percent"])))
+        media = bool(req.get("media", True))
         dim = round(255 * (100 - percent) / 100)
         if dim != self.dim:
             self.dim = dim
             self.dimmed = dim_frame(self.base, dim)
             self._show()
             log("brightness %d%%" % percent)
+        if media != self.media:
+            self.media = media
+            log("media area " + ("on" if media else "off"))
+            if not media:
+                self._fade_to(255, self._stop_item)
+            elif self.items and not self.pipe:
+                self._play(self.index + 1)
         return {}
 
     def load(self, req):
@@ -636,6 +647,8 @@ class Player:
     # ---- 下层：播放项 ----
 
     def _play(self, index, mode=0):
+        if not self.media:
+            return  # 停播媒体区的时段：不起管线，恢复时 set_brightness 接着播
         self.index = index % len(self.items)
         item = self.items[self.index]
         x, y, w, h = self.hole
