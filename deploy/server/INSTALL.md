@@ -57,7 +57,7 @@ systemctl daemon-reload && systemctl enable --now display-server
     cache.json          文件缓存区索引
     media/<设备ID>/     该设备要播的图片、视频、PDF（后台上传，也可直接拷进来）；media/.store/ 是文件缓存区
     packages/ deps/     设备端程序包、离线依赖包
-    backgrounds/        模板底图
+    top-layers/         模板叠图
     thumbs/ rendered/   缩略图与视频抽帧、渲染结果（可重新生成）
     incoming/           上传与处理的暂存区（启动时清空）
     tls/                服务端证书与私钥（必须备份）

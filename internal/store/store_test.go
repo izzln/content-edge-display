@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"image"
 	"path/filepath"
@@ -8,6 +9,17 @@ import (
 	"testing"
 	"time"
 )
+
+// 旧版本的"底图"（压在文字下面）升级后作废：state.json 里的旧字段不再被认成叠图（盖在最上面会挡住文字）。
+func TestOldBackgroundImageIgnored(t *testing.T) {
+	var tpl Template
+	if err := json.Unmarshal([]byte(`{"id":"t","background_image":"bg-0123456789abcdef.png","background_image_mirror":"bg-fedcba9876543210.png"}`), &tpl); err != nil {
+		t.Fatal(err)
+	}
+	if tpl.TopLayer != "" || tpl.TopLayerMirror != "" {
+		t.Fatalf("旧底图字段不应成为叠图：%+v", tpl)
+	}
+}
 
 func TestPersistAndReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")

@@ -109,7 +109,9 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	}
 	// incoming/ 是上传与处理的暂存区（原片、解包、临时文件）：任务只在内存里，重启后已无人认领，清掉。
 	os.RemoveAll(s.incomingDir())
-	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.backgroundsDir(), s.thumbsDir(), s.incomingDir()} {
+	// 旧版本的"底图"目录：底图已改为盖在最上层的叠图，旧图按底图设计、会盖住文字，升级时作废（模板里的旧字段也已不认）
+	os.RemoveAll(filepath.Join(cfg.DataDir, "backgrounds"))
+	for _, dir := range []string{cfg.MediaRoot, s.renderedDir(), s.packagesDir(), s.depsDir(), s.topLayersDir(), s.thumbsDir(), s.incomingDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
@@ -128,7 +130,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 	if err := s.syncAdminToken(); err != nil {
 		return nil, err
 	}
-	if s.renderer, err = render.New(cfg.FontPath, s.backgroundsDir()); err != nil {
+	if s.renderer, err = render.New(cfg.FontPath, s.topLayersDir()); err != nil {
 		return nil, err
 	}
 	if cfg.FontPath == "" {
@@ -169,12 +171,12 @@ func (s *Server) Close() {
 }
 
 // data_dir 下的目录。
-func (s *Server) renderedDir() string    { return filepath.Join(s.cfg.DataDir, "rendered") }    // 渲染图（叠加图、整屏图、测试卡）
-func (s *Server) packagesDir() string    { return filepath.Join(s.cfg.DataDir, "packages") }    // 设备程序包
-func (s *Server) depsDir() string        { return filepath.Join(s.cfg.DataDir, "deps") }        // 离线依赖仓库
-func (s *Server) backgroundsDir() string { return filepath.Join(s.cfg.DataDir, "backgrounds") } // 模板底图
-func (s *Server) thumbsDir() string      { return filepath.Join(s.cfg.DataDir, "thumbs") }      // 缩略图与视频抽帧
-func (s *Server) incomingDir() string    { return filepath.Join(s.cfg.DataDir, "incoming") }    // 暂存区
+func (s *Server) renderedDir() string  { return filepath.Join(s.cfg.DataDir, "rendered") }   // 渲染图（叠加图、整屏图、测试卡）
+func (s *Server) packagesDir() string  { return filepath.Join(s.cfg.DataDir, "packages") }   // 设备程序包
+func (s *Server) depsDir() string      { return filepath.Join(s.cfg.DataDir, "deps") }       // 离线依赖仓库
+func (s *Server) topLayersDir() string { return filepath.Join(s.cfg.DataDir, "top-layers") } // 模板叠图
+func (s *Server) thumbsDir() string    { return filepath.Join(s.cfg.DataDir, "thumbs") }     // 缩略图与视频抽帧
+func (s *Server) incomingDir() string  { return filepath.Join(s.cfg.DataDir, "incoming") }   // 暂存区
 func (s *Server) deviceMediaDir(deviceID string) string {
 	return filepath.Join(s.cfg.MediaRoot, deviceID)
 }

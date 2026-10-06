@@ -444,7 +444,7 @@ func uploadSizeHint(r *http.Request) string {
 	return "size unknown"
 }
 
-// checkImage 在完整解码之前先读文件头（媒体图片与模板底图共用）：挡住伪装成图片的文件与超大图（解压炸弹）。
+// checkImage 在完整解码之前先读文件头（媒体图片与模板叠图共用）：挡住伪装成图片的文件与超大图（解压炸弹）。
 // 返回尺寸与格式（png | jpeg）。
 func checkImage(path string) (image.Config, string, *rejectReason) {
 	f, err := os.Open(path)

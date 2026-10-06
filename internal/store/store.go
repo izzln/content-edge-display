@@ -38,21 +38,21 @@ type Template struct {
 	W          int    `json:"w"`
 	H          int    `json:"h"`
 	Background string `json:"background"`
-	// 底图（节日主题等区域画不出来的画面，PNG）：data_dir/backgrounds/ 下的文件，按内容命名（IsBackgroundFile）。
+	// 叠图（节日主题等区域画不出来的画面，PNG）：data_dir/top-layers/ 下的文件，按内容命名（IsTopLayerFile）。
 	// 压在媒体区上方：媒体区里透明的地方露出视频，不透明的装饰盖在视频上。
-	// 开了左右对调的设备用对调版；没有对调版时用原图（不翻转：底图里的文字翻过来就是反字）。
-	BackgroundImage       string   `json:"background_image,omitempty"`
-	BackgroundImageMirror string   `json:"background_image_mirror,omitempty"`
-	ImageDurationS        int      `json:"image_duration_s"` // 媒体区里每张图片停留几秒（视频播完即切）
-	Regions               []Region `json:"regions"`
+	// 开了左右对调的设备用对调版；没有对调版时用原图（不翻转：叠图里的文字翻过来就是反字）。
+	TopLayer       string   `json:"top_layer,omitempty"`
+	TopLayerMirror string   `json:"top_layer_mirror,omitempty"`
+	ImageDurationS int      `json:"image_duration_s"` // 媒体区里每张图片停留几秒（视频播完即切）
+	Regions        []Region `json:"regions"`
 }
 
-// BackgroundFor 返回这个模板在 mirror 设置下要用的底图（可能为空）。
-func (t Template) BackgroundFor(mirror bool) string {
-	if mirror && t.BackgroundImageMirror != "" {
-		return t.BackgroundImageMirror
+// TopLayerFor 返回这个模板在 mirror 设置下要用的叠图（可能为空）。
+func (t Template) TopLayerFor(mirror bool) string {
+	if mirror && t.TopLayerMirror != "" {
+		return t.TopLayerMirror
 	}
-	return t.BackgroundImage
+	return t.TopLayer
 }
 
 // MediaRect 返回模板的媒体区在画布上的位置（mirror 时是左右对调后的）；没有媒体区时 ok 为 false。
@@ -264,16 +264,16 @@ func (st *Store) Template(id string) (Template, bool) {
 // ---- 校验 ----
 
 var (
-	idPattern         = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	colorPattern      = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
-	backgroundPattern = regexp.MustCompile(`^bg-[0-9a-f]{16}\.png$`)
+	idPattern       = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	colorPattern    = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+	topLayerPattern = regexp.MustCompile(`^top-[0-9a-f]{16}\.png$`)
 )
 
-// IsBackgroundFile 判断 name 是不是底图文件名（见 BackgroundFile）。
-func IsBackgroundFile(name string) bool { return backgroundPattern.MatchString(name) }
+// IsTopLayerFile 判断 name 是不是叠图文件名（见 TopLayerFile）。
+func IsTopLayerFile(name string) bool { return topLayerPattern.MatchString(name) }
 
-// BackgroundFile 是底图的文件名：bg-<内容 sha256（十六进制）前 16 位>.png。按内容命名，换图就换名。
-func BackgroundFile(sha256Hex string) string { return "bg-" + sha256Hex[:16] + ".png" }
+// TopLayerFile 是叠图的文件名：top-<内容 sha256（十六进制）前 16 位>.png。按内容命名，换图就换名。
+func TopLayerFile(sha256Hex string) string { return "top-" + sha256Hex[:16] + ".png" }
 
 // ValidateTemplate 填充默认值并校验模板定义。
 func ValidateTemplate(t *Template) error {
@@ -295,13 +295,13 @@ func ValidateTemplate(t *Template) error {
 	if !colorPattern.MatchString(t.Background) {
 		return fmt.Errorf("template: 非法背景色 %q", t.Background)
 	}
-	for _, f := range []string{t.BackgroundImage, t.BackgroundImageMirror} {
-		if f != "" && !IsBackgroundFile(f) {
-			return fmt.Errorf("template: 非法底图 %q（请在后台「底图」里上传）", f)
+	for _, f := range []string{t.TopLayer, t.TopLayerMirror} {
+		if f != "" && !IsTopLayerFile(f) {
+			return fmt.Errorf("template: 非法叠图 %q（请在后台「叠图」里上传）", f)
 		}
 	}
-	if t.BackgroundImage == "" && t.BackgroundImageMirror != "" {
-		return errors.New("template: 有对调版底图时必须先有常规底图")
+	if t.TopLayer == "" && t.TopLayerMirror != "" {
+		return errors.New("template: 有对调版叠图时必须先有常规叠图")
 	}
 	if len(t.Regions) == 0 {
 		return errors.New("template: 至少需要一个区域")
