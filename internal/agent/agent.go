@@ -391,12 +391,35 @@ func (a *Agent) loadCurrent() error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return err
 	}
-	for _, item := range m.Downloads() {
-		if !a.cached(item) {
-			return fmt.Errorf("cached file %s missing or truncated", item.Name)
+	// 个别文件坏了（SD 卡出错、被人删了）也要把其余的放起来，不能因为一个文件黑屏：
+	// 缺的条目跳过；叠加图缺了就整屏播放。这样恢复的列表不完整，不记它的版本号——
+	// 联系上服务端后拿到完整清单，把缺的补下载回来（记了版本号的话服务端只会回 304）。
+	var missing []string
+	items := m.Items[:0:0]
+	for _, it := range m.Items {
+		if a.cached(it) {
+			items = append(items, it)
+		} else {
+			missing = append(missing, it.Name)
 		}
 	}
-	return a.apply(&m)
+	if m.Layout != nil && !a.cached(m.Layout.Overlay) {
+		missing = append(missing, m.Layout.Overlay.Name)
+		m.Layout = nil
+	}
+	if len(missing) == 0 {
+		return a.apply(&m)
+	}
+	if len(items) == 0 && m.Layout == nil {
+		return fmt.Errorf("cached files missing or truncated: %s", strings.Join(missing, ", "))
+	}
+	log.Printf("agent: cached files missing or truncated, playing the rest until the server is reachable: %s", strings.Join(missing, ", "))
+	m.Items = items
+	if err := a.apply(&m); err != nil {
+		return err
+	}
+	a.manifestVer = ""
+	return nil
 }
 
 // cached 判断条目的文件已在本地缓存里：文件名内嵌内容哈希前缀、尺寸一致即视为完整（下载时已校验过 sha256）。

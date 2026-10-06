@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/player"
 	"github.com/izzln/content-edge-display/internal/server"
+	"github.com/izzln/content-edge-display/internal/testutil"
 )
 
 func TestEndToEnd(t *testing.T) {
@@ -135,6 +137,85 @@ func TestRestoreFromLocalCache(t *testing.T) {
 	}
 	if a2.manifestVer != e.a.manifestVer || !strings.HasSuffix(nowPlaying(p2), "_a.jpg") {
 		t.Fatalf("player not restored: %q %q", a2.manifestVer, nowPlaying(p2))
+	}
+}
+
+// 断网开机：服务端连不上时，代理照常启动并立即播放上次的内容，不黑屏等网络。走完整的 Run。
+func TestOfflineBootPlaysCache(t *testing.T) {
+	e := newEnv(t, true)
+	os.WriteFile(filepath.Join(e.devDir, "a.jpg"), []byte("cached-a"), 0o644)
+	os.WriteFile(filepath.Join(e.devDir, "b.jpg"), []byte("cached-b"), 0o644)
+	if err := e.a.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := *e.a.cfg
+	cfg.ServerURL = "https://127.0.0.1:1" // 没人监听：连接立即被拒
+	p := player.NewNull()
+	a := New(&cfg, p)
+	a.accessSys = e.a.accessSys
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	testutil.WaitFor(t, 3*time.Second, "断网开机播放缓存内容", func() bool { return len(p.Scene().Items) == 2 })
+	if !strings.HasSuffix(nowPlaying(p), "_a.jpg") {
+		t.Fatalf("应播放上次的内容：%+v", p.Scene())
+	}
+	time.Sleep(300 * time.Millisecond) // 期间注册一直失败
+	if len(p.Scene().Items) != 2 {
+		t.Fatalf("连不上服务端不应清掉正在播放的内容：%+v", p.Scene())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 缓存里个别文件坏了：其余照常播放，不黑屏；不记版本号，联系上服务端后把缺的补回来。
+func TestRestorePartialCache(t *testing.T) {
+	e := newEnv(t, true)
+	os.WriteFile(filepath.Join(e.devDir, "a.jpg"), []byte("cached-a"), 0o644)
+	os.WriteFile(filepath.Join(e.devDir, "b.jpg"), []byte("cached-b"), 0o644)
+	ctx := context.Background()
+	if err := e.a.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var lost string
+	for _, it := range e.p.Scene().Items {
+		if strings.HasSuffix(it.Path, "_b.jpg") {
+			lost = it.Path
+		}
+	}
+	os.Truncate(lost, 3)
+
+	p := player.NewNull()
+	a := New(e.a.cfg, p)
+	a.identity, a.registered = e.a.identity, true
+	if err := a.loadCurrent(); err != nil {
+		t.Fatalf("个别文件坏了也应恢复其余的：%v", err)
+	}
+	if sc := p.Scene(); len(sc.Items) != 1 || !strings.HasSuffix(sc.Items[0].Path, "_a.jpg") || a.manifestVer != "" {
+		t.Fatalf("应只播完好的那个、且不记版本号：%+v %q", sc, a.manifestVer)
+	}
+	if err := a.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(lost); len(p.Scene().Items) != 2 || fi.Size() != int64(len("cached-b")) {
+		t.Fatalf("联系上服务端后应补回缺的文件：%+v", p.Scene())
+	}
+
+	// 媒体文件全没了：叠加图（模板）还在就照样显示模板
+	for _, it := range p.Scene().Items {
+		os.Remove(it.Path)
+	}
+	p3 := player.NewNull()
+	if err := New(e.a.cfg, p3).loadCurrent(); err != nil || p3.Scene().OverlayPNG == "" || len(p3.Scene().Items) != 0 {
+		t.Fatalf("模板还在时应显示模板：%v %+v", err, p3.Scene())
+	}
+	// 连叠加图也没了才算恢复失败
+	os.RemoveAll(a.mediaDir())
+	if err := New(e.a.cfg, player.NewNull()).loadCurrent(); err == nil {
+		t.Fatal("一个文件都没有时应报错")
 	}
 }
 
