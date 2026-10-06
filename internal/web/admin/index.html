@@ -779,7 +779,7 @@ async function contentDialog(id) {
     <div id="mirrorWarn"></div>
     <hr>
     <div id="contentBody"></div>
-    <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果（按已保存的配置）</button>
+    <div class="row"><button onclick="previewDevice('${esc(id)}')">预览当前效果</button>
       <select id="pvItem" hidden onchange="previewDevice('${esc(id)}')" aria-label="预览播放列表里的哪一项"></select></div><div id="previewBox"></div>`,
     `${CLOSE}<button class="primary" onclick="saveContent('${esc(id)}')">保存模板设置</button>`);
   modalGuard = plCloseGuard;
