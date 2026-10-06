@@ -39,12 +39,12 @@ func TestBrightnessFollowsServer(t *testing.T) {
 		t.Fatalf("没设置时应是 100%%：%d", e.p.Brightness())
 	}
 	set([]map[string]any{
-		{"start": hm(now.Add(-2 * time.Hour)), "end": hm(now.Add(2 * time.Hour)), "percent": 30},
+		{"start": hm(now.Add(-2 * time.Hour)), "end": hm(now.Add(2 * time.Hour)), "percent": 30, "hide_media": true},
 		{"start": hm(now.Add(3 * time.Hour)), "end": hm(now.Add(4 * time.Hour)), "percent": 70},
 	})
 	step()
-	if e.p.Brightness() != 30 {
-		t.Fatalf("此刻在 30%% 的时段里：%d", e.p.Brightness())
+	if e.p.Brightness() != 30 || e.p.Media() {
+		t.Fatalf("此刻在 30%%、停播媒体区的时段里：%d %v", e.p.Brightness(), e.p.Media())
 	}
 	if _, err := os.Stat(e.a.brightnessPath()); err != nil {
 		t.Fatal("亮度计划应存盘")
@@ -54,15 +54,15 @@ func TestBrightnessFollowsServer(t *testing.T) {
 	p2 := player.NewNull()
 	a2 := New(e.a.cfg, p2)
 	a2.applyBrightness()
-	if p2.Brightness() != 30 {
-		t.Fatalf("重启后凭存下的计划应照样调暗：%d", p2.Brightness())
+	if p2.Brightness() != 30 || p2.Media() {
+		t.Fatalf("重启后凭存下的计划应照样调暗、停播媒体区：%d %v", p2.Brightness(), p2.Media())
 	}
 
 	// 时段不含此刻 → 100%；清空 → 100%
 	set([]map[string]any{{"start": hm(now.Add(3 * time.Hour)), "end": hm(now.Add(4 * time.Hour)), "percent": 70}})
 	step()
-	if e.p.Brightness() != 100 {
-		t.Fatalf("此刻不在任何时段里应是 100%%：%d", e.p.Brightness())
+	if e.p.Brightness() != 100 || !e.p.Media() {
+		t.Fatalf("此刻不在任何时段里应是 100%%、正常播放：%d %v", e.p.Brightness(), e.p.Media())
 	}
 	set([]map[string]any{{"start": hm(now.Add(-2 * time.Hour)), "end": hm(now.Add(2 * time.Hour)), "percent": 50}})
 	step()

@@ -45,15 +45,21 @@
     display:flex; gap:12px 16px; align-items:center; flex-wrap:wrap; }
   header h1 { font-size:17px; font-weight:600; margin:0; letter-spacing:-.2px; }
   .seg { display:inline-flex; background:var(--fill); border-radius:9px; padding:2px; gap:2px; }
-  .seg button.tab { appearance:none; border:none; margin:0; background:none; color:var(--label); font:inherit; font-size:13px; font-weight:500; line-height:1;
+  .seg button.tab, .seg button.mtab { appearance:none; border:none; margin:0; background:none; color:var(--label); font:inherit; font-size:13px; font-weight:500; line-height:1;
     padding:0 14px; height:28px; border-radius:7px; cursor:pointer; white-space:nowrap; transition:background .2s, box-shadow .2s; }
-  .seg button.tab.active { background:var(--elev); box-shadow:0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04); font-weight:600; }
+  .seg button.tab.active, .seg button.mtab.active { background:var(--elev); box-shadow:0 1px 3px rgba(0,0,0,.12), 0 0 0 .5px rgba(0,0,0,.04); font-weight:600; }
   header .right { margin-left:auto; display:flex; gap:8px; }
   header .right .tab.active { background:var(--blue-t); color:var(--blue); font-weight:600; }
   main { padding:20px max(20px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); max-width:1200px; margin:0 auto; }
   h2.sec { font-size:20px; font-weight:700; margin:28px 0 8px; letter-spacing:-.3px; }
   h2.sec .muted { font-weight:400; letter-spacing:0; display:block; margin-top:2px; }
   h3.sub { font-size:15px; font-weight:600; margin:18px 0 8px; }
+  /* 「管理」页的分组：内容区里的分段控件，一次只看一组 */
+  .mseg { display:flex; max-width:360px; margin:0 auto 4px; }
+  .mseg button.mtab { flex:1; }
+  .mg-note { margin:10px 0 0; }
+  .tpick { display:inline-flex; align-items:center; gap:2px; white-space:nowrap; }
+  .tpick select { width:auto; padding:0 24px 0 8px; background-position:right 8px center; font-variant-numeric:tabular-nums; }
   h3.sub .muted { font-size:13px; font-weight:400; display:block; margin-top:1px; }
   .bright-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; padding:6px 0; border-bottom:.5px solid var(--sep); }
   .bright-row:last-child { border-bottom:none; }
@@ -90,14 +96,14 @@
   button.sm { height:26px; padding:0 9px; font-size:13px; border-radius:7px; }
   button.link { background:none; color:var(--blue); height:auto; padding:0 4px; font-size:inherit; margin:0; }
   button[disabled] { opacity:.35; cursor:not-allowed; }
-  button:focus-visible, .seg button.tab:focus-visible { outline:3px solid var(--blue-t); outline-offset:1px; }
+  button:focus-visible, .seg button.tab:focus-visible, .seg button.mtab:focus-visible { outline:3px solid var(--blue-t); outline-offset:1px; }
   @media (hover:hover) {
     button:hover:not([disabled]) { filter:brightness(.96); }
     button.primary:hover:not([disabled]) { filter:brightness(1.08); }
   }
 
   /* 输入框 */
-  input[type=text], input[type=password], input[type=number], input[type=time], input[type=datetime-local], select, textarea {
+  input[type=text], input[type=password], input[type=number], input[type=date], select, textarea {
     font:inherit; color:var(--label); background:var(--fill2); border:.5px solid var(--sep); border-radius:8px; padding:0 10px; height:var(--ctl);
     outline:none; transition:box-shadow .15s, border-color .15s; max-width:100%; }
   select { padding-right:28px; appearance:none; -webkit-appearance:none; cursor:pointer;
@@ -256,8 +262,8 @@
     :root { --ctl:44px; }
     button { font-size:16px; padding:0 16px; border-radius:10px; }
     button.sm { height:36px; padding:0 12px; font-size:15px; }
-    .seg button.tab { height:34px; font-size:14px; }
-    input[type=text], input[type=password], input[type=number], input[type=time], input[type=datetime-local], select, textarea { font-size:16px; border-radius:10px; }
+    .seg button.tab, .seg button.mtab { height:34px; font-size:14px; }
+    input[type=text], input[type=password], input[type=number], input[type=date], select, textarea { font-size:16px; border-radius:10px; }
     input[type=checkbox] { width:51px; height:31px; border-radius:16px; }
     input[type=checkbox]::after { width:27px; height:27px; }
     input[type=checkbox]:checked::after { transform:translateX(20px); }
@@ -323,7 +329,12 @@
     <table id="tplTable" class="cards"></table>
   </div>
   <div id="tab-manage" style="display:none">
-    <h2 class="sec" style="margin-top:0">设备 <span class="muted">统一作用于所有设备：保存后在线设备一个轮询周期内生效，离线设备上线即生效</span></h2>
+    <nav class="seg mseg" role="tablist" aria-label="管理分组">
+      <button class="mtab active" role="tab" data-group="device" aria-selected="true">设备</button>
+      <button class="mtab" role="tab" data-group="server" aria-selected="false">服务端</button>
+    </nav>
+    <div id="mg-device" role="tabpanel">
+    <p class="muted mg-note">统一作用于所有设备：保存后在线设备一个轮询周期内生效，离线设备上线即生效。</p>
 
     <h3 class="sub">程序更新</h3>
     <div class="card">
@@ -354,7 +365,8 @@
       <div id="brightRows"></div>
       <div class="row" style="margin-top:8px"><button onclick="addBrightRow()">添加时段</button>
         <button class="primary" onclick="saveBrightness()">保存</button></div>
-      <span class="muted">调的是画面亮度（整屏叠一层黑幕，属性、图片、视频一起变暗），显示器背光不变。</span>
+      <span class="muted">调的是画面亮度（整屏叠一层黑幕，属性、图片、视频一起变暗），显示器背光不变。
+        关掉「播放媒体区」的时段里停播图片和视频，媒体区黑着、属性区照常（亮度可以仍是 100%）。</span>
     </div>
 
     <h3 class="sub">设备访问</h3>
@@ -372,7 +384,8 @@
       <div class="row" style="margin-top:8px"><button class="primary" onclick="saveSSHKeys()">保存公钥</button></div>
     </div>
 
-    <h2 class="sec">服务端</h2>
+    </div>
+    <div id="mg-server" role="tabpanel" hidden>
     <h3 class="sub">管理口令</h3>
     <div class="card">
       <p class="muted" style="margin-top:0">所有人共用的后台口令，服务器上只存哈希。忘了口令：在服务器上把 server.json 的 admin_token 改成一个新值并重启服务端。</p>
@@ -384,6 +397,7 @@
 
     <h3 class="sub">存储</h3>
     <div id="storageBox" class="card">读取中…</div>
+    </div>
   </div>
 </main>
 <div id="overlay"><div id="modal" role="dialog" aria-modal="true"></div></div>
@@ -579,9 +593,33 @@ tabs.forEach(b => b.onclick = () => {
   }
   if (b.dataset.tab === "manage") loadManage();
 });
+// 「管理」页的分组（设备 / 服务端）：分段控件切换，记住上次看的那组
+const mtabs = [...document.querySelectorAll(".mtab")];
+function showGroup(g) {
+  for (const x of mtabs) {
+    const on = x.dataset.group === g;
+    x.classList.toggle("active", on);
+    x.setAttribute("aria-selected", on);
+    $("#mg-" + x.dataset.group).hidden = !on;
+  }
+  try { localStorage.setItem("manage_group", g); } catch { /* 忽略 */ }
+}
+mtabs.forEach(b => b.onclick = () => showGroup(b.dataset.group));
+try { const g = localStorage.getItem("manage_group"); if (g === "server") showGroup(g); } catch { /* 忽略 */ }
 
 let devices = [], templates = [], global = {}, pkg = null, deps = [], info = {}, infoFetchedAt = 0;
-const fmtTime = s => s ? new Date(s).toLocaleString() : "-";
+// 时间一律 24 小时制、与浏览器语言无关：2026-10-06 21:05（sec 时带秒）；fmtClock 只要时刻
+const pad2 = n => String(n).padStart(2, "0");
+const fmtClock = (d, sec = true) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}${sec ? ":" + pad2(d.getSeconds()) : ""}`;
+const fmtDate = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const fmtTime = (s, sec = false) => { if (!s) return "-"; const d = new Date(s); return fmtDate(d) + " " + fmtClock(d, sec); };
+// timePicker 是 24 小时制的时刻选择（时、分两个下拉框；系统自带的时间输入框会随浏览器语言显示上午/下午）
+const numOpts = (n, sel) => Array.from({ length: n }, (_, i) => `<option${i === +sel ? " selected" : ""}>${pad2(i)}</option>`).join("");
+function timePicker(cls, value = "00:00") {
+  const [h, m] = value.split(":");
+  return `<span class="tpick ${cls}"><select class="tp-h" aria-label="时">${numOpts(24, h)}</select>:<select class="tp-m" aria-label="分">${numOpts(60, m)}</select></span>`;
+}
+const readTime = el => el.querySelector(".tp-h").value + ":" + el.querySelector(".tp-m").value;
 const tplById = id => templates.find(t => t.id === id);
 const devById = id => devices.find(d => d.id === id);
 // tplOptions 生成模板下拉框的选项
@@ -696,7 +734,7 @@ function globalBar() {
   const skewMin = Math.round((info.server_time - infoFetchedAt) / 60000);
   if (Math.abs(skewMin) >= 2) {
     bar += `<div class="bad-note">⚠ 服务器时间与本机相差约 <b>${Math.abs(skewMin)} 分钟</b>
-      （服务器：${esc(new Date(info.server_time).toLocaleString())}，时区 ${esc(info.timezone)}）。
+      （服务器：${esc(fmtTime(info.server_time, true))}，时区 ${esc(info.timezone)}）。
       测试屏到期、定时下发程序按服务器时间计算，请校准服务器时钟；设备播放与认证不受影响。</div>`;
   }
   if (!info.transcode) {
@@ -721,7 +759,7 @@ function deviceRow(d) {
   const tplName = tplById(d.active_template)?.name || d.active_template;
   show += `<div class="muted"><span class="${d.active_source === "test" ? "warn" : ""}">${SOURCE[d.active_source] || esc(d.active_source)}</span>${
     d.active_source !== "test" && tplName ? "：" + esc(tplName) : ""}</div>`;
-  if (d.test_until) show += `<div class="muted">测试至 ${esc(new Date(d.test_until).toLocaleTimeString())}</div>`;
+  if (d.test_until) show += `<div class="muted">测试至 ${esc(fmtClock(new Date(d.test_until)))}</div>`;
   const agentVer = d.agent_version;
   let ver = `<div class="muted">程序 ${esc(agentVer || "?")}`;
   if (d.update_target) {
@@ -1529,22 +1567,20 @@ function showPreview(url, target) {
 // ================= 模板 / 全局 =================
 const REGION_LABEL = { attribute: "属性", text: "文字", media: "播放内容" };
 function renderTemplates() {
-  const only = templates.length === 1; // 最后一个模板不能删：系统始终需要一个全局默认模板
+  const only = templates.length === 1; // 最后一个模板不能删（系统始终需要一个全局默认模板）：不显示删除
   const rows = templates.map(t => `<tr>
     <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒${t.background_image ? ` · 底图${t.background_image_mirror ? "（含对调版）" : ""}` : ""}</div>
       ${mirroredMissing(t).length ? `<div class="warn">${mirroredMissing(t).length} 台对调的设备在用它，缺对调版底图</div>` : ""}</td>
     <td data-label="区域">${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
     <td class="acts">
-      ${global.template_id === t.id ? "" : `<button onclick="setGlobal('${esc(t.id)}')">设为全局</button>`}
       <button onclick="showPreview(tplPath('${esc(t.id)}') + '/preview')">预览</button>
       <button onclick="templateForm('${esc(t.id)}')">编辑</button>
       <button onclick="backgroundDialog('${esc(t.id)}')">底图</button>
       <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
-      <button class="danger" onclick="deleteTemplate('${esc(t.id)}')" ${only ? 'disabled title="这是最后一个模板，不能删除"' : ""}>删除</button>
+      ${only ? "" : `<button class="danger" onclick="deleteTemplate('${esc(t.id)}')">删除</button>`}
     </td></tr>`).join("");
   $("#tplTable").innerHTML = `<tr class="head"><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
-function setGlobal(id) { $("#globalSel").value = id; saveGlobal(); }
 
 // ---- 模板底图：节日主题等模板画不出来的画面，压在播放内容上方 ----
 const tplPath = id => `/api/v1/admin/templates/${encodeURIComponent(id)}`;
@@ -1796,11 +1832,14 @@ async function uploadPackage() {
 const deleteDeps = c => confirmSend(`删除离线依赖包 ${c}？`, "之后这个 Debian 版本的设备装机与 OTA 改为在线安装依赖。", "/api/v1/admin/deps/" + encodeURIComponent(c));
 function rolloutDialog() {
   if (!pkg) return;
-  const version = pkg.version;
+  const version = pkg.version, soon = new Date(Date.now() + 3600e3);
+  soon.setMinutes(0);
   const devOpts = devices.map(d => `<label><input type="checkbox" class="rl-dev" value="${esc(d.id)}" onchange="document.querySelector('input[name=who][value=some]').checked=true"> <span>${esc(d.id)} <span class="muted">当前 ${esc(d.agent_version || "?")}</span></span></label>`).join("");
   modal(`下发程序 ${esc(version)}`, `
     <div class="row"><label><input type="radio" name="when" value="now" checked> 立即</label>
-      <label><input type="radio" name="when" value="at"> 定时</label> <input type="datetime-local" id="rlAt"></div>
+      <label><input type="radio" name="when" value="at"> 定时</label>
+      <input type="date" id="rlDate" value="${fmtDate(soon)}" onchange="document.querySelector('input[name=when][value=at]').checked=true">
+      ${timePicker("rl-time", fmtClock(soon, false))}</div>
     <div class="row"><label><input type="radio" name="who" value="all" checked> 全部设备</label>
       <label><input type="radio" name="who" value="some"> 指定设备：</label></div>
     <div class="checklist">${devOpts || '<label class="muted">暂无设备</label>'}</div>
@@ -1812,8 +1851,8 @@ function rolloutDialog() {
 function doRollout() {
   const body = {};
   if (document.querySelector('input[name=when]:checked').value === "at") {
-    const at = $("#rlAt").value; if (!at) { toast("请选择定时时间"); return; }
-    body.not_before = new Date(at).toISOString();
+    const day = $("#rlDate").value; if (!day) { toast("请选择定时日期"); return; }
+    body.not_before = new Date(`${day}T${readTime($(".rl-time"))}:00`).toISOString();
   }
   if (document.querySelector('input[name=who]:checked').value === "some") {
     body.devices = [...document.querySelectorAll(".rl-dev:checked")].map(x => x.value);
@@ -1835,23 +1874,24 @@ function brightEmpty() {
   const box = $("#brightRows");
   if (!box.querySelector(".bright-row")) box.innerHTML = '<div class="muted bright-empty">全天 100%</div>';
 }
-function addBrightRow(p = { start: "22:00", end: "07:00", percent: 30 }) {
+function addBrightRow(p = { start: "22:00", end: "07:00", percent: 30, hide_media: false }) {
   $("#brightRows .bright-empty")?.remove();
   const row = document.createElement("div");
   row.className = "bright-row";
-  row.innerHTML = `从 <input type="time" class="b-start" value="${esc(p.start)}"> 到 <input type="time" class="b-end" value="${esc(p.end)}">
-    亮度 <input type="range" class="b-pct" min="10" max="100" step="10" value="${+p.percent || 100}" aria-label="亮度">
-    <output>${+p.percent || 100}%</output>
+  row.innerHTML = `<span>从 ${timePicker("b-start", p.start)} 到 ${timePicker("b-end", p.end)}</span>
+    <span>亮度 <input type="range" class="b-pct" min="10" max="100" step="10" value="${+p.percent || 100}" aria-label="亮度">
+    <output>${+p.percent || 100}%</output></span>
+    <label><input type="checkbox" class="b-media" ${p.hide_media ? "" : "checked"}> 播放媒体区</label>
     <button class="danger sm" aria-label="删除这个时段">删除</button>`;
   const range = row.querySelector(".b-pct"), out = row.querySelector("output");
   range.oninput = () => out.textContent = range.value + "%";
-  row.querySelector("button").onclick = () => { row.remove(); brightEmpty(); };
+  row.querySelector("button.danger").onclick = () => { row.remove(); brightEmpty(); };
   $("#brightRows").append(row);
 }
 async function saveBrightness() {
   const periods = [...document.querySelectorAll("#brightRows .bright-row")].map(r => ({
-    start: r.querySelector(".b-start").value, end: r.querySelector(".b-end").value, percent: +r.querySelector(".b-pct").value }));
-  if (periods.some(p => !p.start || !p.end)) { toast("请填写每个时段的起止时间"); return; }
+    start: readTime(r.querySelector(".b-start")), end: readTime(r.querySelector(".b-end")),
+    percent: +r.querySelector(".b-pct").value, hide_media: !r.querySelector(".b-media").checked }));
   if (await send("PUT", "/api/v1/admin/brightness", { periods }, "亮度已保存，设备将在一个轮询周期内更新")) loadBrightness();
 }
 

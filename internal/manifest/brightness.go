@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-// 分时段亮度：后台设若干时段，每段一个亮度（如 22:00–07:00 30%），不在任何时段内是 100%。
+// 分时段亮度：后台设若干时段，每段一个亮度（如 22:00–07:00 30%），还可以停播媒体区（只留模板），
+// 不在任何时段内是 100%、正常播放。
 // 设置统一下发给所有设备（响应头 HeaderBrightness，与轮询间隔、时区同一条路），
 // 设备按服务端时区自己判断此刻在哪一段——到点切换不依赖网络。
 
@@ -23,10 +24,12 @@ const (
 )
 
 // BrightnessPeriod 是一个亮度时段：[Start, End)，"HH:MM"，End 早于 Start 表示跨午夜。
+// HideMedia 为真时这段时间不播放媒体区（停掉图片/视频，媒体区黑着，属性区照常）。
 type BrightnessPeriod struct {
-	Start   string `json:"start"`
-	End     string `json:"end"`
-	Percent int    `json:"percent"`
+	Start     string `json:"start"`
+	End       string `json:"end"`
+	Percent   int    `json:"percent"`
+	HideMedia bool   `json:"hide_media,omitempty"`
 }
 
 // minuteOfDay 解析 "HH:MM"。
@@ -96,7 +99,7 @@ func BrightnessAt(periods []BrightnessPeriod, m int) (int, *BrightnessPeriod) {
 	return 100, nil
 }
 
-// FormatBrightness 把亮度计划写成响应头的值："18:00-22:00 70;22:00-07:00 30"，没有时段为 "none"。
+// FormatBrightness 把亮度计划写成响应头的值："18:00-22:00 70;22:00-07:00 30 nomedia"，没有时段为 "none"。
 func FormatBrightness(periods []BrightnessPeriod) string {
 	if len(periods) == 0 {
 		return "none"
@@ -104,6 +107,9 @@ func FormatBrightness(periods []BrightnessPeriod) string {
 	parts := make([]string, len(periods))
 	for i, p := range periods {
 		parts[i] = fmt.Sprintf("%s-%s %d", p.Start, p.End, p.Percent)
+		if p.HideMedia {
+			parts[i] += " nomedia"
+		}
 	}
 	return strings.Join(parts, ";")
 }
@@ -119,13 +125,16 @@ func ParseBrightness(v string) ([]BrightnessPeriod, error) {
 	}
 	var out []BrightnessPeriod
 	for _, part := range strings.Split(v, ";") {
-		span, pct, ok := strings.Cut(strings.TrimSpace(part), " ")
-		start, end, ok2 := strings.Cut(span, "-")
-		n, err := strconv.Atoi(pct)
-		if !ok || !ok2 || err != nil {
+		f := strings.Fields(part)
+		if len(f) < 2 || len(f) > 3 || len(f) == 3 && f[2] != "nomedia" {
 			return nil, fmt.Errorf("bad brightness period %q", part)
 		}
-		out = append(out, BrightnessPeriod{Start: start, End: end, Percent: n})
+		start, end, ok := strings.Cut(f[0], "-")
+		n, err := strconv.Atoi(f[1])
+		if !ok || err != nil {
+			return nil, fmt.Errorf("bad brightness period %q", part)
+		}
+		out = append(out, BrightnessPeriod{Start: start, End: end, Percent: n, HideMedia: len(f) == 3})
 	}
 	if err := ValidateBrightness(out); err != nil {
 		return nil, err

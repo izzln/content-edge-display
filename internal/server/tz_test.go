@@ -73,9 +73,9 @@ func TestBrightnessSchedule(t *testing.T) {
 		t.Fatalf("没设置时应为 none：%q", got)
 	}
 	body := map[string]any{"periods": []map[string]any{
-		{"start": "22:00", "end": "07:00", "percent": 30}, {"start": "18:00", "end": "22:00", "percent": 70}}}
+		{"start": "22:00", "end": "07:00", "percent": 30, "hide_media": true}, {"start": "18:00", "end": "22:00", "percent": 70}}}
 	do(t, h, adminReq("PUT", "/api/v1/admin/brightness", body), http.StatusNoContent)
-	if got := header(); got != "18:00-22:00 70;22:00-07:00 30" {
+	if got := header(); got != "18:00-22:00 70;22:00-07:00 30 nomedia" {
 		t.Fatalf("应下发亮度计划（按起始时间排序）：%q", got)
 	}
 	bad := map[string]any{"periods": []map[string]any{
@@ -86,7 +86,7 @@ func TestBrightnessSchedule(t *testing.T) {
 	var tpl string
 	s.store.View(func(st *store.State) { tpl = st.Global.TemplateID })
 	do(t, h, adminReq("PUT", "/api/v1/admin/global", map[string]any{"template_id": tpl}), http.StatusNoContent)
-	if got := header(); got != "18:00-22:00 70;22:00-07:00 30" {
+	if got := header(); got != "18:00-22:00 70;22:00-07:00 30 nomedia" {
 		t.Fatalf("设全局模板不应冲掉亮度计划：%q", got)
 	}
 	if w := do(t, h, adminReq("GET", "/api/v1/admin/global", nil), http.StatusOK); !strings.Contains(w.Body.String(), `"percent":30`) {

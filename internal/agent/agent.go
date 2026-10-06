@@ -56,6 +56,7 @@ type Agent struct {
 	accessSys accessTarget // 凭据落地的位置（测试里换成临时目录）
 
 	brightness  int    // 当前设给播放器的亮度（百分比），见 brightness.go
+	noMedia     bool   // 当前是否停播媒体区（同上）
 	brightSaved string // 已存盘的亮度计划（FormatBrightness 的结果）
 
 	zoneSys   zoneTarget                    // 系统时区文件的位置（timezone.go）；零值 = 不设（测试、未以服务方式运行时）
