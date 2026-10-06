@@ -92,6 +92,12 @@ else
 	*) say "解码方式" "硬解 $HWDEC ✓" ;;
 	esac
 fi
+# 视频图层此刻在屏幕上的位置与取源范围（内核 DRM 状态）：正在放视频时，显示矩形应等于模板媒体区，
+# 取源是 cover 裁剪后的那块（与 journalctl 里 showing 一行的 crop 对得上）
+PLANE=$(awk '/^plane\[/ { p = $0; nv = 0 } /format=(NV12|YU12)/ { nv = 1 }
+	nv && /crtc-pos=/ { d = $1 } nv && /src-pos=/ { gsub(/\.[0-9]+/, "", $1); print p, d, $1; exit }' \
+	/sys/kernel/debug/dri/*/state 2>/dev/null | sed 's/\t//g; s/crtc-pos=/显示 /; s/src-pos=/← 取源 /')
+[ -n "$PLANE" ] && say "视频图层" "${PLANE#* * }"
 
 echo
 echo "=== 4. SoC 温度与降频 ==="

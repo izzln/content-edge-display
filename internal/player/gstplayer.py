@@ -33,9 +33,11 @@
 
 import ctypes
 import ctypes.util
+import glob
 import json
 import mmap
 import os
+import re
 import sys
 
 # GStreamer 自己的错误与少数关键元素的警告也写进日志：现场排查"放不出来"全靠它们说清是哪一环、为什么。
@@ -431,6 +433,27 @@ def cover_crop(src_w, src_h, dst_w, dst_h):
     return 0, 0, cut // 2 & ~1, cut - (cut // 2 & ~1)
 
 
+def plane_state(plane_id, pattern="/sys/kernel/debug/dri/*/state"):
+    """内核里这个图层此刻的实际位置：(显示矩形, 取源矩形)，形如 ("1000x900+0+0", "800x720+240+0")。
+    读 debugfs 的 DRM 状态（root 可读，Armbian 默认挂着）；读不到返回 None。
+    视频的裁剪、缩放全交给 kmssink 与图层，这里是唯一能确认"真正送进硬件的是什么"的地方。"""
+    for path in glob.glob(pattern):
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.search(r"^plane\[%d\]:.*?(?=^\S|\Z)" % plane_id, text, re.S | re.M)
+        if not m:
+            continue
+        dst = re.search(r"crtc-pos=(\S+)", m.group(0))
+        src = re.search(r"src-pos=(\S+)", m.group(0))
+        if dst and src:
+            # 取源坐标是 16.16 定点数，打印成 "800.000000x720.000000+240.000000+0.000000"：去掉小数
+            return dst.group(1), re.sub(r"\.\d+", "", src.group(1))
+    return None
+
+
 def prime_decoder(pipe):
     """让解码器先白解一次第一帧。
 
@@ -688,6 +711,8 @@ class Player:
                 how = ", %s via %s" % (self.decoder, VIDEO_OUTPUTS[self.out_mode][0])
             log("showing %s (%s%s%s)" % (os.path.basename(item["path"]), item.get("type"), how,
                                         ", " + self.source if self.source else ""))
+            if item.get("type") == "video" and self.display:
+                GLib.timeout_add(1000, self._log_plane, self.pipe)
         emit({"event": "playing", "index": self.index, "path": item["path"]})
         self._fade_to(0)
         if len(self.items) == 1 and item.get("type") != "video":
@@ -701,6 +726,22 @@ class Player:
     def _image_done(self):
         self.timer = 0
         self._fade_to(255, self._next)
+        return False
+
+    def _log_plane(self, pipe):
+        """视频开播一秒后记下图层的实际位置，与媒体区、裁剪比对：不一致说明裁剪或缩放没生效。"""
+        if pipe is not self.pipe:
+            return False
+        st = plane_state(self.display.video)
+        if not st:
+            log("video plane: state not readable (is debugfs mounted at /sys/kernel/debug?)")
+            return False
+        x, y, w, h = self.hole
+        want = "%dx%d%+d%+d" % (w, h, x, y)
+        sink = pipe.get_by_name("sink")
+        scale = sink.get_property("can-scale") if sink else None
+        log("video plane: dst %s, src %s, sink can-scale=%s%s" % (
+            st[0], st[1], scale, "" if st[0] == want else " -- expected dst %s (media area): not filling it" % want))
         return False
 
     def _check_remaining(self):
