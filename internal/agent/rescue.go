@@ -19,7 +19,7 @@ import (
 // 设备在线时后台就有它的 IP，直接 SSH 即可，这里只解决"连不上、又不知道 IP"的情形。
 
 // rescueIdle 是救援控制台在键盘无操作后自动恢复播放的时间。
-const rescueIdle = 15 * time.Minute
+const rescueIdle = time.Minute
 
 // console 显示/收起救援信息（Linux 实现见 rescue_linux.go）。
 type console interface {
