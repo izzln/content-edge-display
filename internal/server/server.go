@@ -33,6 +33,7 @@ type Server struct {
 	hashes   *manifest.HashCache
 	renderer *render.Renderer
 	loc      *time.Location
+	zone     string // loc 的 IANA 名称（下发给设备）；拿不到时为空，见 zoneName
 	tools    tools
 	cache    *contentCache // 文件缓存区，见 cache.go
 	jobs     *jobQueue     // 视频转码、PDF 渲染，见 jobs.go
@@ -102,7 +103,7 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 		}
 	}
 	s := &Server{
-		cfg: cfg, store: st, hashes: manifest.NewHashCache(), loc: loc, tools: t, jobs: newJobQueue(),
+		cfg: cfg, store: st, hashes: manifest.NewHashCache(), loc: loc, zone: zoneName(cfg.Timezone, systemZoneFiles), tools: t, jobs: newJobQueue(),
 		devices: map[string]*deviceRuntime{}, authLogged: map[string]time.Time{}, uploading: map[string]map[string]bool{},
 		now: time.Now,
 	}

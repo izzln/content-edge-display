@@ -145,7 +145,7 @@ type serverInfo struct {
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	info := serverInfo{
-		ServerTime: s.now().UnixMilli(), Timezone: s.loc.String(),
+		ServerTime: s.now().UnixMilli(), Timezone: cmp.Or(s.zone, s.loc.String()),
 		Transcode: s.tools.enc != nil, FFmpegError: s.tools.encErr,
 		PDF: s.tools.pdf != nil, PDFError: s.tools.pdfErr,
 		TLSFingerprint: s.certFP, Video: transcode.DefaultSpec(),

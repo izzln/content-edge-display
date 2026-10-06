@@ -10,11 +10,12 @@ import (
 	"github.com/izzln/content-edge-display/internal/manifest"
 )
 
-// schedule 是设备的轮询与心跳间隔。间隔由服务端统一规定，随每个响应头下发
-// （manifest.HeaderPollInterval），设备照办：改间隔只改服务端一处，所有设备下一次请求就跟上。
-// 联系上服务端之前用内置默认值。
+// schedule 是设备的轮询与心跳间隔，以及系统该用的时区。都由服务端统一规定，随每个响应头下发
+// （manifest.HeaderPollInterval、manifest.HeaderTimezone），设备照办：改设置只改服务端一处，
+// 所有设备下一次请求就跟上。联系上服务端之前间隔用内置默认值，时区不动。
 type schedule struct {
 	poll, heartbeat atomic.Int64 // 秒
+	zone            atomic.Pointer[string]
 }
 
 func newSchedule() *schedule {
@@ -26,6 +27,14 @@ func newSchedule() *schedule {
 
 func (s *schedule) Poll() time.Duration      { return time.Duration(s.poll.Load()) * time.Second }
 func (s *schedule) Heartbeat() time.Duration { return time.Duration(s.heartbeat.Load()) * time.Second }
+
+// Zone 返回服务端的时区名称（如 Asia/Shanghai）；还没学到时为空。
+func (s *schedule) Zone() string {
+	if z := s.zone.Load(); z != nil {
+		return *z
+	}
+	return ""
+}
 
 // observe 从响应头学习间隔；超出合理范围的值收进范围内（服务端配错了也不能把设备带偏）。
 func (s *schedule) observe(h http.Header) {
@@ -41,4 +50,7 @@ func (s *schedule) observe(h http.Header) {
 	}
 	learn(&s.poll, manifest.HeaderPollInterval, manifest.MinPollIntervalS, manifest.MaxPollIntervalS, "poll")
 	learn(&s.heartbeat, manifest.HeaderHeartbeatInterval, manifest.MinHeartbeatIntervalS, manifest.MaxHeartbeatIntervalS, "heartbeat")
+	if z := h.Get(manifest.HeaderTimezone); z != "" {
+		s.zone.Store(&z)
+	}
 }

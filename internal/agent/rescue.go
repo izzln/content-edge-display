@@ -125,13 +125,13 @@ func (a *Agent) rescueInfo(now time.Time, ifaces []netIface, idle time.Duration)
 	if okAt.IsZero() {
 		row("Connection", "has not reached the server since the agent started")
 	} else {
-		row("Connection", fmt.Sprintf("last contact %s (%s ago)", okAt.Format("2006-01-02 15:04:05"), now.Sub(okAt).Round(time.Second)))
+		row("Connection", fmt.Sprintf("last contact %s (%s ago)", okAt.In(a.localZone()).Format("2006-01-02 15:04:05"), now.Sub(okAt).Round(time.Second)))
 	}
 	if errMsg != "" && errAt.After(okAt) {
 		if len(errMsg) > 300 {
 			errMsg = errMsg[:300] + "..."
 		}
-		row("Last error", fmt.Sprintf("%s (%s)", errMsg, errAt.Format("15:04:05")))
+		row("Last error", fmt.Sprintf("%s (%s)", errMsg, errAt.In(a.localZone()).Format("15:04:05")))
 	}
 	row("Agent", Version)
 	fmt.Fprintf(&b, "\n  Playback is paused. It resumes after %.0f minutes without keyboard input\n", idle.Minutes())
