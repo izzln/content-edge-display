@@ -100,7 +100,7 @@ func (s *Server) handleUploadPackage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	p := store.Package{Version: version, File: name, SHA256: up.sha, Size: up.size, Notes: up.fields["notes"], UploadedAt: s.now()}
+	p := store.Package{Version: version, File: name, SHA256: up.sha, Size: up.size, UploadedAt: s.now()}
 	var old string
 	retargeted := 0
 	if !s.update(w, func(st *store.State) error {

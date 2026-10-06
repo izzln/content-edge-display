@@ -129,7 +129,6 @@ func uploadPackageRaw(t *testing.T, h http.Handler, content []byte) *httptest.Re
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	mw.WriteField("notes", "test build")
 	fw, _ := mw.CreateFormFile("file", "display-agent.tar.gz")
 	fw.Write(content)
 	mw.Close()

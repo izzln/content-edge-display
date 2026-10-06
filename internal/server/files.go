@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // 上传落盘与目录清理：媒体、程序包/依赖包、底图共用。上传一律先流式写进暂存区 incoming/（边写边算 sha256，
@@ -42,16 +41,14 @@ func (s *Server) receive(r io.Reader, limit int64) (path, sha string, n int64, e
 	return f.Name(), hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-// uploadedFile 是一个单文件上传表单：字段 file 落在暂存区，其余字段是短文本。
+// uploadedFile 是一个单文件上传表单：字段 file 落在暂存区。
 type uploadedFile struct {
 	path, sha string
 	size      int64
-	fields    map[string]string
 }
 
-// receiveUpload 读取 multipart 表单（字段 file 至多 limit 字节）。成功后由调用方移走或删除 up.path。
+// receiveUpload 读取 multipart 表单（字段 file 至多 limit 字节，其余字段忽略）。成功后由调用方移走或删除 up.path。
 func (s *Server) receiveUpload(r *http.Request, limit int64) (up uploadedFile, err error) {
-	up.fields = map[string]string{}
 	mr, err := r.MultipartReader()
 	if err != nil {
 		return up, err
@@ -73,10 +70,6 @@ func (s *Server) receiveUpload(r *http.Request, limit int64) (up uploadedFile, e
 		}
 		if part.FormName() == "file" && up.path == "" {
 			up.path, up.sha, up.size, err = s.receive(part, limit)
-		} else {
-			var b []byte
-			b, err = io.ReadAll(io.LimitReader(part, 1<<10))
-			up.fields[part.FormName()] = strings.TrimSpace(string(b))
 		}
 		part.Close()
 		if err != nil {

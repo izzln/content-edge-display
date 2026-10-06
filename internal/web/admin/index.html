@@ -340,7 +340,6 @@
     <div class="card">
       <div class="row">
         <input type="file" id="pkgFile" accept=".tar.gz,.tgz,application/gzip">
-        备注 <input type="text" id="pkgNotes" placeholder="可选">
         <button class="primary" onclick="uploadPackage()">上传</button>
       </div>
       <div class="pbar" id="pkgBar" hidden><i></i></div>
@@ -1783,7 +1782,7 @@ async function changeToken() {
 }
 function renderPackages() {
   const f = pkg, rows = !f ? "" : `<tr>
-    <td><b>${esc(f.version)}</b><div class="muted">${esc(f.notes || "")}</div></td>
+    <td><b>${esc(f.version)}</b></td>
     <td data-label="大小">${fmtSize(f.size)}<div class="muted">sha256 ${esc(f.sha256.slice(0, 12))}…</div></td>
     <td data-label="上传时间">${esc(fmtTime(f.uploaded_at))}</td>
     <td data-label="覆盖">${devices.filter(d => d.agent_version === f.version).length} / ${devices.length} 台在用</td>
@@ -1802,11 +1801,11 @@ function renderPackages() {
 async function uploadPackage() {
   const f = $("#pkgFile").files[0];
   if (!f) { toast("请选择要上传的包"); return; }
-  const fd = new FormData(); fd.append("file", f); fd.append("notes", $("#pkgNotes").value);
+  const fd = new FormData(); fd.append("file", f);
   const msg = p => p.codename ? "已上传离线依赖包 " + p.codename
     : "当前程序包为 " + p.package.version + (p.retargeted ? `，${p.retargeted} 台设备的待更新已改为该版本` : "");
   if (await upload("/api/v1/admin/packages", fd, $("#pkgBar"), msg)) {
-    $("#pkgFile").value = ""; $("#pkgNotes").value = "";
+    $("#pkgFile").value = "";
   }
 }
 const deleteDeps = c => confirmSend(`删除离线依赖包 ${c}？`, "之后这个 Debian 版本的设备装机与 OTA 改为在线安装依赖。", "/api/v1/admin/deps/" + encodeURIComponent(c));
