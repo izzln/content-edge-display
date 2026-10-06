@@ -344,7 +344,7 @@ func (s *Server) runCache(stop <-chan struct{}) {
 	defer t.Stop()
 	for {
 		s.reconcileCache()
-		s.gcTopLayers()
+		s.gcBackgrounds()
 		s.gcThumbs()
 		s.hashes.Prune()
 		s.auth.prune(time.Now())

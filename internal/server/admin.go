@@ -45,10 +45,10 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 		"PUT /api/v1/admin/templates/{id}":                  s.handlePutTemplate,
 		"DELETE /api/v1/admin/templates/{id}":               s.handleDeleteTemplate,
 		"GET /api/v1/admin/templates/{id}/preview":          s.handlePreview,
-		"POST /api/v1/admin/templates/{id}/top-layer":       s.handleUploadTopLayer,
-		"DELETE /api/v1/admin/templates/{id}/top-layer":     s.handleDeleteTopLayer,
-		"GET /api/v1/admin/templates/{id}/guide":            s.handleTopLayerGuide,
-		"GET /api/v1/admin/top-layers/{file}":               s.handleGetTopLayer,
+		"POST /api/v1/admin/templates/{id}/background":      s.handleUploadBackground,
+		"DELETE /api/v1/admin/templates/{id}/background":    s.handleDeleteBackground,
+		"GET /api/v1/admin/templates/{id}/guide":            s.handleBackgroundGuide,
+		"GET /api/v1/admin/backgrounds/{file}":              s.handleGetBackground,
 		"GET /api/v1/admin/global":                          s.handleGetGlobal,
 		"PUT /api/v1/admin/global":                          s.handlePutGlobal,
 		"PUT /api/v1/admin/brightness":                      s.handlePutBrightness,
@@ -365,7 +365,7 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 
 // handlePutTemplate 新建或修改模板。模板 ID 由服务端生成：它只是内部标识，
 // 运营方不需要关心，管理后台也不显示——新建时（POST）自动分配。
-// 叠图只由叠图接口改：修改时保留原来的，新建（包括复制别的模板）时没有叠图。
+// 底图只由底图接口改：修改时保留原来的，新建（包括复制别的模板）时没有底图。
 func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	var t store.Template
 	if !decodeJSON(w, r, 256<<10, &t) {
@@ -374,7 +374,7 @@ func (s *Server) handlePutTemplate(w http.ResponseWriter, r *http.Request) {
 	t.ID = cmp.Or(r.PathValue("id"), t.ID, store.NewTemplateID())
 	if s.update(w, func(st *store.State) error {
 		old := st.Templates[t.ID]
-		t.TopLayer, t.TopLayerMirror = old.TopLayer, old.TopLayerMirror
+		t.BackgroundImage, t.BackgroundImageMirror = old.BackgroundImage, old.BackgroundImageMirror
 		if err := store.ValidateTemplate(&t); err != nil {
 			return errBadRequest("%v", err)
 		}
@@ -411,14 +411,14 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		store.EnsureGlobalTemplate(st)
 		return nil
 	}) {
-		s.kickCache() // 维护协程回收它的叠图
+		s.kickCache() // 维护协程回收它的底图
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 // handlePreview 渲染模板预览图。?mirror=1 单独预览对调后的版式。
 // ?device= 用某台设备的属性、左右对调与播放列表：把播放列表里 ?item=（默认第一项）的一帧按设备的方式铺进媒体区，
-// 再盖上模板，与设备上看到的一致（含压在媒体区上的叠图装饰）。没有播放内容时出整屏图（媒体区填自己的底色）。
+// 再盖上模板，与设备上看到的一致（含压在媒体区上的底图装饰）。没有播放内容时出整屏图（媒体区填自己的底色）。
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var (

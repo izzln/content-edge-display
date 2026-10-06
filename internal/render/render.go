@@ -1,4 +1,4 @@
-// Package render 在服务端把显示模板/测试卡合成为位图：模板的静态部分（叠图、属性、文字、底色）
+// Package render 在服务端把显示模板/测试卡合成为位图：模板的静态部分（底图、属性、文字、底色）
 // 由服务端画，媒体区留给设备端播放（见 Render 的 overlayMode）。
 package render
 
@@ -29,25 +29,25 @@ import (
 	"github.com/izzln/content-edge-display/internal/store"
 )
 
-// Renderer 持有渲染用字体，并缓存缩放好的叠图。
+// Renderer 持有渲染用字体，并缓存缩放好的底图。
 type Renderer struct {
-	font     *opentype.Font
-	layerDir string // 叠图目录（模板的 top_layer 在这里）
+	font  *opentype.Font
+	bgDir string // 底图目录（模板的 background_image 在这里）
 
-	mu     sync.Mutex
-	layers map[layerKey]*image.RGBA // 解码并缩放到画布大小的叠图：各设备渲染同一模板时不重复解码
+	mu  sync.Mutex
+	bgs map[bgKey]*image.RGBA // 解码并缩放到画布大小的底图：各设备渲染同一模板时不重复解码
 }
 
-type layerKey struct {
+type bgKey struct {
 	file string
 	w, h int
 }
 
-const maxCachedLayers = 8
+const maxCachedBackgrounds = 8
 
 // New 创建渲染器。fontPath 为空时退回内嵌的 Go Regular 字体
-// （仅覆盖拉丁字符，中文会显示为方框——生产环境必须配置 CJK 字体）。layerDir 是叠图目录。
-func New(fontPath, layerDir string) (*Renderer, error) {
+// （仅覆盖拉丁字符，中文会显示为方框——生产环境必须配置 CJK 字体）。bgDir 是底图目录。
+func New(fontPath, bgDir string) (*Renderer, error) {
 	data := goregular.TTF
 	if fontPath != "" {
 		b, err := os.ReadFile(fontPath)
@@ -60,7 +60,7 @@ func New(fontPath, layerDir string) (*Renderer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("font_path: cannot parse font: %w", err)
 	}
-	return &Renderer{font: f, layerDir: layerDir, layers: map[layerKey]*image.RGBA{}}, nil
+	return &Renderer{font: f, bgDir: bgDir, bgs: map[bgKey]*image.RGBA{}}, nil
 }
 
 // parseFont 解析单个字体，或字体集合（.ttc，如 NotoSansCJK-Regular.ttc）——集合里优先取简体中文（SC）那一款。
@@ -100,8 +100,7 @@ func parseFont(data []byte) (*opentype.Font, error) {
 //     正是显示图层要的格式）
 //   - false：填上自己的底色，得到一张整屏静态图——用于模板没有媒体区、或媒体区还没有内容的情形
 //
-// 叠图（PNG）最后整张盖在最上面，压在区域底色与文字之上：媒体区里它透明的地方露出视频，
-// 不透明的装饰压在视频上；文字处也要透明，否则文字被盖住。
+// 底图（PNG）在媒体区之后、文字之前整张叠上去：媒体区里它透明的地方露出视频，不透明的装饰压在视频上。
 func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, overlayMode bool) (*image.RGBA, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
 	fill(canvas, canvas.Bounds(), parseColor(tpl.Background))
@@ -119,6 +118,15 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 			fill(canvas, reg.Rect(), parseColor(reg.Bg))
 		}
 	}
+	if file := tpl.BackgroundFor(mirror); file != "" {
+		// 底图丢了不让整个清单生成失败（设备会一直拿不到新内容）：退回纯底色并记下原因
+		if bg, err := r.background(file, tpl.W, tpl.H); err != nil {
+			log.Printf("template %s: background image skipped: %v", tpl.ID, err)
+		} else {
+			draw.Draw(canvas, canvas.Bounds(), bg, image.Point{}, draw.Over)
+		}
+	}
+
 	for _, reg := range regions {
 		if reg.Type == store.RegionMedia {
 			continue
@@ -142,27 +150,19 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 			}
 		}
 	}
-	if file := tpl.TopLayerFor(mirror); file != "" {
-		// 叠图丢了不让整个清单生成失败（设备会一直拿不到新内容）：不盖叠图并记下原因
-		if layer, err := r.topLayer(file, tpl.W, tpl.H); err != nil {
-			log.Printf("template %s: top layer skipped: %v", tpl.ID, err)
-		} else {
-			draw.Draw(canvas, canvas.Bounds(), layer, image.Point{}, draw.Over)
-		}
-	}
 	return canvas, nil
 }
 
-// topLayer 返回铺满 w×h 画布的叠图：等比缩放到刚好盖住画布，居中裁掉多出来的一边。
-func (r *Renderer) topLayer(file string, w, h int) (*image.RGBA, error) {
-	key := layerKey{file, w, h}
+// background 返回铺满 w×h 画布的底图：等比缩放到刚好盖住画布，居中裁掉多出来的一边。
+func (r *Renderer) background(file string, w, h int) (*image.RGBA, error) {
+	key := bgKey{file, w, h}
 	r.mu.Lock()
-	img := r.layers[key]
+	img := r.bgs[key]
 	r.mu.Unlock()
 	if img != nil {
 		return img, nil
 	}
-	f, err := os.Open(filepath.Join(r.layerDir, file))
+	f, err := os.Open(filepath.Join(r.bgDir, file))
 	if err != nil {
 		return nil, err
 	}
@@ -173,10 +173,10 @@ func (r *Renderer) topLayer(file string, w, h int) (*image.RGBA, error) {
 	}
 	img = CoverImage(src, w, h)
 	r.mu.Lock()
-	if len(r.layers) >= maxCachedLayers {
-		clear(r.layers)
+	if len(r.bgs) >= maxCachedBackgrounds {
+		clear(r.bgs)
 	}
-	r.layers[key] = img
+	r.bgs[key] = img
 	r.mu.Unlock()
 	return img, nil
 }
@@ -216,7 +216,7 @@ func TransparentShare(img *image.RGBA, rect image.Rectangle) float64 {
 }
 
 // Preview 把播放内容的一帧 content 按设备的方式铺进媒体区 media，再盖上叠加模式渲染出的模板 overlay，
-// 得到与设备上一致的画面（含压在媒体区上的叠图装饰）。
+// 得到与设备上一致的画面（含压在媒体区上的底图装饰）。
 func Preview(overlay *image.RGBA, media image.Rectangle, content image.Image) *image.RGBA {
 	out := image.NewRGBA(overlay.Bounds())
 	fill(out, out.Bounds(), color.RGBA{A: 0xFF})
@@ -225,8 +225,8 @@ func Preview(overlay *image.RGBA, media image.Rectangle, content image.Image) *i
 	return out
 }
 
-// RenderGuide 生成叠图设计参考图（画布原尺寸）：浅灰底，媒体区是红块并写明位置——叠图在这块要透明，视频/图片
-// 从透明处露出，装饰可以压进来；文字/属性区域描边并标注——叠图盖在文字之上，文字处也要透明。mirror 出对调版。
+// RenderGuide 生成底图设计参考图（画布原尺寸）：浅灰底，媒体区是红块并写明位置——底图在这块要透明，视频/图片
+// 从透明处露出，装饰可以压进来；文字/属性区域描边并标注（区域没设底色时透明，透出底图）。mirror 出对调版。
 func (r *Renderer) RenderGuide(tpl store.Template, mirror bool) (*image.RGBA, error) {
 	canvas := image.NewRGBA(image.Rect(0, 0, tpl.W, tpl.H))
 	fill(canvas, canvas.Bounds(), color.RGBA{0xE5, 0xE5, 0xEA, 0xFF})
@@ -241,15 +241,15 @@ func (r *Renderer) RenderGuide(tpl store.Template, mirror bool) (*image.RGBA, er
 		case store.RegionMedia:
 			c = color.RGBA{0xFF, 0x3B, 0x30, 0xFF}
 			fill(canvas, rect, c)
-			lines = []string{"媒体区：叠图在这里要透明", fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H),
+			lines = []string{"媒体区：底图在这里要透明", fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H),
 				"视频/图片从透明处露出", "装饰可以压进来", fmt.Sprintf("画布 %d×%d", tpl.W, tpl.H)}
 			c = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
 		case store.RegionAttribute:
 			c = color.RGBA{0x00, 0x7A, 0xFF, 0xFF}
-			lines = []string{"属性 " + reg.Key, "叠图在文字处要透明", fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H)}
+			lines = []string{"属性 " + reg.Key, fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H)}
 		default:
 			c = color.RGBA{0x34, 0xC7, 0x59, 0xFF}
-			lines = []string{"文字：" + reg.Key, "叠图在文字处要透明", fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H)}
+			lines = []string{"文字：" + reg.Key, fmt.Sprintf("x=%d y=%d  %d×%d", reg.X, reg.Y, reg.W, reg.H)}
 		}
 		if reg.Type != store.RegionMedia {
 			stroke(canvas, rect, max(2, tpl.W/360), c)
