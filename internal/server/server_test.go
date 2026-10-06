@@ -429,9 +429,6 @@ func TestOnlineFromAnyRequestAndServerDefinedIntervals(t *testing.T) {
 		t.Fatalf("轮询过就应在线（且没有伪造的空心跳）：%+v", st)
 	}
 	// 设备照服务端规定的 10 秒轮询 → 30 秒没来就离线
-	if st := status(); st.PollS != 10 || st.OfflineS != 30 {
-		t.Fatalf("离线阈值应为 3 个轮询周期：%+v", st)
-	}
 	now = now.Add(25 * time.Second)
 	if !status().Online {
 		t.Fatal("25 秒没来（不到 3 个轮询周期）仍应在线")
@@ -550,5 +547,49 @@ func TestHTTPErrorLogDropsHandshakeErrors(t *testing.T) {
 	l.Printf("http: panic serving 1.2.3.4: boom")
 	if out := buf.String(); strings.Contains(out, "handshake") || !strings.Contains(out, "panic serving") {
 		t.Fatalf("日志：%q", out)
+	}
+}
+
+// 离线阈值按规律联系的周期算：轮询与心跳中较短的那个的 3 倍，至少 30 秒。
+func TestOfflineThreshold(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, c := range []struct {
+		poll, hb int
+		want     time.Duration
+	}{
+		{10, 60, 30 * time.Second},   // 默认：按轮询
+		{120, 30, 90 * time.Second},  // 轮询比心跳还慢：按心跳
+		{5, 60, 30 * time.Second},    // 下限 30 秒
+		{300, 600, 15 * time.Minute}, // 都很慢
+	} {
+		s.cfg.PollIntervalS, s.cfg.HeartbeatIntervalS = c.poll, c.hb
+		if got := s.offlineAfter(); got != c.want {
+			t.Errorf("轮询 %ds、心跳 %ds：阈值应为 %s，得到 %s", c.poll, c.hb, c.want, got)
+		}
+	}
+}
+
+// 下载文件期间数据在传就算联系（节流），长下载不会被判离线。
+func TestDownloadKeepsDeviceOnline(t *testing.T) {
+	s, _ := newTestServer(t)
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	w := &contactWriter{ResponseWriter: httptest.NewRecorder(), s: s, id: testDeviceID, last: now}
+	seen := func() time.Time { s.mu.Lock(); defer s.mu.Unlock(); return s.runtime(testDeviceID).lastSeen }
+	w.Write([]byte("x"))
+	if !seen().IsZero() {
+		t.Fatal("节流间隔内的写入不应刷新")
+	}
+	for i := 1; i <= 3; i++ {
+		now = now.Add(10 * time.Second)
+		w.Write([]byte("x"))
+		if !seen().Equal(now) {
+			t.Fatalf("第 %d 段数据后应刷新最近联系时间", i)
+		}
+	}
+	now = now.Add(2 * time.Second)
+	w.Write([]byte("x"))
+	if seen().Equal(now) {
+		t.Fatal("5 秒内的多次写入只应记一次")
 	}
 }

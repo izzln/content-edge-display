@@ -45,10 +45,12 @@ func (s *Server) announceSchedule(w http.ResponseWriter) {
 	}
 }
 
-// offlineAfter 返回设备多久没有任何请求就算离线：约 3 个轮询周期，至少 30 秒。
-// 要连续几次没来才算，偶尔一次请求失败不会让状态来回跳。
+// offlineAfter 返回设备多久没有任何联系就算离线：约 3 个联系周期，至少 30 秒。
+// 正常运行时设备至少每 min(轮询间隔, 心跳间隔) 联系一次（下载文件期间见 contactWriter）；
+// 乘 3 是要连续几次没来才算，偶尔丢一两次请求不会让状态来回跳。
 func (s *Server) offlineAfter() time.Duration {
-	return max(3*time.Duration(s.cfg.PollIntervalS)*time.Second, 30*time.Second)
+	every := min(s.cfg.PollIntervalS, s.cfg.HeartbeatIntervalS)
+	return max(3*time.Duration(every)*time.Second, 30*time.Second)
 }
 
 // deviceAuth 校验设备签名请求；失败时回 401 并说明原因、记日志（同一设备同一原因每分钟最多一条）。
@@ -130,15 +132,41 @@ func (s *Server) runtime(id string) *deviceRuntime {
 // noteContact 记下设备最近一次联系，用于判断在线。任何签名通过的请求都算：轮询、心跳、下载文件——
 // 设备下载大文件时轮询会暂停，只看轮询的话"正在刷新"的设备反而会被判离线。
 func (s *Server) noteContact(dev store.Device, r *http.Request) {
-	now := s.now()
-	s.mu.Lock()
-	rt := s.runtime(dev.ID)
-	seen := rt.lastSeen
-	rt.lastSeen = now
-	s.mu.Unlock()
-	if seen.IsZero() || now.Sub(seen) > s.offlineAfter() {
+	if seen, now := s.touch(dev.ID); seen.IsZero() || now.Sub(seen) > s.offlineAfter() {
 		log.Printf("device %s online (%s, agent %s)", dev.ID, clientIP(r), cmp.Or(dev.AgentVersion, "?"))
 	}
+}
+
+// touch 把设备的最近联系时间记为现在，返回之前的值与现在。
+func (s *Server) touch(id string) (seen, now time.Time) {
+	now = s.now()
+	s.mu.Lock()
+	rt := s.runtime(id)
+	seen, rt.lastSeen = rt.lastSeen, now
+	s.mu.Unlock()
+	return seen, now
+}
+
+// contactTouchEvery 是下载期间刷新最近联系时间的最小间隔。
+const contactTouchEvery = 5 * time.Second
+
+// contactWriter 让下载期间持续算联系：设备下载文件时轮询、心跳都停着（同一个循环里串行），
+// 一个大文件可能要下好几分钟，只在请求开始时记一次的话，正在刷新的设备会被判离线。
+// 只要数据还在往设备流就刷新（节流）；连接卡死、设备断电时数据不再流动，一个阈值后照常判离线。
+// 包了这一层 http.ServeFile 就用不上 sendfile，改走普通拷贝——服务器上这点开销可以忽略。
+type contactWriter struct {
+	http.ResponseWriter
+	s    *Server
+	id   string
+	last time.Time
+}
+
+func (w *contactWriter) Write(p []byte) (int, error) {
+	if now := w.s.now(); now.Sub(w.last) >= contactTouchEvery {
+		w.last = now
+		w.s.touch(w.id)
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 // serveDeviceFile 生成设备下载文件的处理器（媒体、渲染图、程序包共用）：
@@ -159,7 +187,7 @@ func (s *Server) serveDeviceFile(dirOf func(deviceID string, r *http.Request) st
 			http.Error(w, "bad file name", http.StatusBadRequest)
 			return
 		}
-		http.ServeFile(w, r, filepath.Join(dir, name))
+		http.ServeFile(&contactWriter{ResponseWriter: w, s: s, id: dev.ID, last: s.now()}, r, filepath.Join(dir, name))
 	}
 }
 

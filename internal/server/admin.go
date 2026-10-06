@@ -179,8 +179,6 @@ type DeviceView struct {
 
 	Online       bool                `json:"online"`
 	LastSeen     *time.Time          `json:"last_seen,omitempty"` // 最近一次任何请求（轮询/心跳/下载）
-	PollS        int                 `json:"poll_interval_s"`     // 设备多久该来一次
-	OfflineS     int                 `json:"offline_after_s"`     // 多久没来算离线
 	Heartbeat    *manifest.Heartbeat `json:"heartbeat,omitempty"`
 	TestUntil    *time.Time          `json:"test_until,omitempty"`
 	ActiveSource string              `json:"active_source"` // test/override/global
@@ -221,7 +219,6 @@ func (s *Server) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	for i := range views {
 		v, rt := &views[i], s.devices[views[i].ID]
-		v.PollS, v.OfflineS = s.cfg.PollIntervalS, int(offline/time.Second)
 		if rt != nil && !rt.lastSeen.IsZero() {
 			seen := rt.lastSeen
 			v.LastSeen, v.Online, v.Heartbeat = &seen, now.Sub(seen) <= offline, rt.hb
