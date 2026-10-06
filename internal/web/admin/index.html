@@ -401,7 +401,7 @@ function showLogin(fails = 0, lockSec = 0) {
     return;
   }
   showAlert(`<div class="body"><h3>输入管理口令</h3>
-      ${fails ? `<p class="fails">${fails} 次口令尝试失败</p>` : "<p>server.json 里的 admin_token，或在后台改过的口令</p>"}
+      ${fails ? `<p class="fails">${fails} 次口令尝试失败</p>` : ""}
       <input type="password" id="alertInput" autocomplete="current-password" autocapitalize="off" spellcheck="false">
       <label class="remember"><input type="checkbox" id="rememberChk" ${remembered() ? "checked" : ""}> 记住这台电脑</label></div>
     <div class="btns"><button class="default" onclick="submitLogin()">登录</button></div>`, "login" + (fails ? " shake" : ""));
