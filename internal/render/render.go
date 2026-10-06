@@ -141,11 +141,11 @@ func (r *Renderer) Render(tpl store.Template, attrs map[string]string, mirror, o
 			if text == "" {
 				text = "-"
 			}
-			if err := r.drawText(canvas, rect, text, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
+			if err := r.drawText(canvas, rect.Add(image.Pt(0, reg.OffsetY)), text, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
 				return nil, err
 			}
 		case store.RegionText:
-			if err := r.drawText(canvas, rect, reg.Key, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
+			if err := r.drawText(canvas, rect.Add(image.Pt(0, reg.OffsetY)), reg.Key, reg.FontSize, parseColor(reg.Color), reg.Align); err != nil {
 				return nil, err
 			}
 		}

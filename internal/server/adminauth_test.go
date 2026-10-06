@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,7 +114,10 @@ func TestAdminAuthHTTP(t *testing.T) {
 		t.Fatalf("口令对应 200 且不缓存：%d", w.Code)
 	}
 	for i := range 6 {
-		get("wrong-" + string(rune('a'+i)))
+		w := get("wrong-" + string(rune('a'+i)))
+		if i < 5 && (w.Code != http.StatusUnauthorized || w.Header().Get("X-Auth-Failures") != strconv.Itoa(i+1)) {
+			t.Fatalf("第 %d 个错口令应 401 并带上失败次数：%d %q", i+1, w.Code, w.Header().Get("X-Auth-Failures"))
+		}
 	}
 	if w := get(adminToken); w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), "分钟后再试") {
 		t.Fatalf("猜错 6 次后应锁定：%d %s", w.Code, w.Body.String())

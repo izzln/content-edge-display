@@ -16,7 +16,7 @@
 # 按 OTA 布局安装到 /usr/local/lib/display-agent（布局说明见 internal/agent/update.go），之后的程序更新都由 OTA 完成。
 set -eu
 : "${SERVER_URL:?需要 SERVER_URL，如 https://display.lan:9001（建议用域名而非 IP：server_url 写在设备上，换服务器只改解析）}"
-: "${TLS_FINGERPRINT:?需要 TLS_FINGERPRINT（管理后台「程序更新」页显示的服务端证书指纹）}"
+: "${TLS_FINGERPRINT:?需要 TLS_FINGERPRINT（管理后台「管理」页显示的服务端证书指纹）}"
 : "${ENROLL_TOKEN:?需要 ENROLL_TOKEN（与服务端 server.json 的 enroll_token 一致）}"
 case "$SERVER_URL" in https://*) ;; *) echo "SERVER_URL 必须是 https:// 地址" >&2; exit 1 ;; esac
 [ "$(id -u)" = 0 ] || { echo "请以 root 运行" >&2; exit 1; }

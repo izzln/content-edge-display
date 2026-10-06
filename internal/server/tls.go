@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -89,3 +90,17 @@ func (s *Server) TLSConfig() *tls.Config {
 
 // CertFingerprint 返回服务端证书的公钥指纹（装机时写进设备的 agent.json）。
 func (s *Server) CertFingerprint() string { return s.certFP }
+
+// HTTPErrorLog 是 HTTPS 端口的 http.Server.ErrorLog：其余照常写日志，只丢掉 TLS 握手失败
+// （"http: TLS handshake error from …"）。浏览器还没信任自签证书时每建一条连接就有一行（remote error: tls:
+// unknown certificate），端口扫描、半开连接也会有，都不需要处理；设备连错服务端时原因写在设备日志里。
+func HTTPErrorLog() *log.Logger { return log.New(handshakeFilter{}, "", 0) }
+
+type handshakeFilter struct{}
+
+func (handshakeFilter) Write(p []byte) (int, error) {
+	if !bytes.Contains(p, []byte("TLS handshake error")) {
+		log.Print(string(p))
+	}
+	return len(p), nil
+}

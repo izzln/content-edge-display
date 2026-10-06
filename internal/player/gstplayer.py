@@ -64,7 +64,8 @@ IMAGE_OUTPUT = ("videoconvert ! videocrop name=crop ! videoscale method=4-tap ! 
 #   - 系统内存 caps：放开的话会协商成 DMA_DRM caps，这条路上的分配查询拿不到 VideoMeta，解码器判协商失败；
 #     限定之后帧仍是解码器自己的 dmabuf，kmssink 照样直接导入显示，不拷贝。
 #   - 线性格式：硬解出 NV12，软解（没有 cedrus 时）出 I420，图层都能直接显示。
-# 每个文件按顺序尝试，记住它第一个放得起来的方式；只有前一种放不出来时才往后退：
+# 每次播放都从第一种开始，只有前一种放不出来时才往后退。不记住退到了哪一种：一次偶然的失败（如换片时 CMA
+# 一时分不出来）不能让这个视频从此不裁剪撑满、也不再垫牺牲帧（cedrus 首帧绿斑）：
 VIDEO_CAPS = 'capsfilter caps="video/x-raw,format=(string){{NV12,I420}}"'
 VIDEO_DIRECT = "filesrc name=src ! qtdemux ! h264parse name=parse ! {decoder} name=dec ! " + VIDEO_CAPS
 VIDEO_OUTPUTS = (
@@ -472,7 +473,6 @@ class Player:
         self.alpha = 255          # 洞里黑幕的不透明度：255 全黑，0 透出播放内容
         self.decoder = ""         # 最近一次视频用的解码器
         self.out_mode = None          # 当前视频项用的输出方式（VIDEO_OUTPUTS 的下标）
-        self.video_mode = {}      # 视频文件 → 它放得起来的输出方式
 
     # ---- 请求 ----
 
@@ -529,8 +529,6 @@ class Player:
         def switch():
             self.scene, self.base, self.hole, self.spans, self.items = scene, base, hole, spans, items
             self.shown = set()
-            paths = {it["path"] for it in items}
-            self.video_mode = {p: m for p, m in self.video_mode.items() if p in paths}
             self._stop_item()
             self.alpha = 255
             self._show()
@@ -580,7 +578,7 @@ class Player:
 
     # ---- 下层：播放项 ----
 
-    def _play(self, index):
+    def _play(self, index, mode=0):
         self.index = index % len(self.items)
         item = self.items[self.index]
         x, y, w, h = self.hole
@@ -589,13 +587,11 @@ class Player:
             sink = "fakesink name=sink sync=true"
         else:
             sink = "kmssink name=sink fd=%d connector-id=%d plane-id=%d skip-vsync=true" % (d.fd, d.conn, d.video)
-        mode = None
         if item.get("type") == "video":
-            mode = self.video_mode.get(item["path"], 0)
             name, desc = VIDEO_OUTPUTS[mode]
             desc = desc.format(decoder=self.h264_decoder, sink=sink)
         else:
-            name, desc = "playbin", IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
+            mode, name, desc = None, "playbin", IMAGE_OUTPUT.format(w=w, h=h, sink=sink)
 
         if name == "playbin":
             out = Gst.parse_bin_from_description(desc, True)
@@ -676,13 +672,11 @@ class Player:
         if item.get("type") != "video" or self.started:
             return False
         if self.out_mode + 1 >= len(VIDEO_OUTPUTS):
-            self.video_mode.pop(item["path"], None)  # 下次从头再试
             return False
-        self.video_mode[item["path"]] = self.out_mode + 1
         log("video output '%s' failed for %s: %s; retrying with '%s'" % (
             VIDEO_OUTPUTS[self.out_mode][0], os.path.basename(item["path"]), detail, VIDEO_OUTPUTS[self.out_mode + 1][0]))
         self._stop_item()
-        self._play(self.index)
+        self._play(self.index, self.out_mode + 1)
         return True
 
     def _on_started(self):
@@ -691,7 +685,6 @@ class Player:
             self.shown.add(self.index)
             how = ""
             if item.get("type") == "video":
-                self.video_mode[item["path"]] = self.out_mode
                 how = ", %s via %s" % (self.decoder, VIDEO_OUTPUTS[self.out_mode][0])
             log("showing %s (%s%s%s)" % (os.path.basename(item["path"]), item.get("type"), how,
                                         ", " + self.source if self.source else ""))

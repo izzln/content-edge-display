@@ -43,11 +43,33 @@ func (s *Server) handleGetAccess(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, v)
 }
 
-// handlePutAccess 设置 SSH 公钥（整份替换），root_password 非空时同时重设 root 密码（服务端只存哈希）。
-func (s *Server) handlePutAccess(w http.ResponseWriter, r *http.Request) {
+// handlePutRootPassword 重设所有设备的 root 密码（服务端只存 SHA-512 crypt 哈希）。
+func (s *Server) handlePutRootPassword(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RootPassword string   `json:"root_password"`
-		SSHKeys      []string `json:"ssh_keys"`
+		RootPassword string `json:"root_password"`
+	}
+	if !decodeJSON(w, r, 4<<10, &req) {
+		return
+	}
+	if n := len([]rune(req.RootPassword)); n < minRootPasswordLen || n > 128 {
+		http.Error(w, fmt.Sprintf("root 密码须为 %d~128 位", minRootPasswordLen), http.StatusBadRequest)
+		return
+	}
+	hash, now := sha512Crypt(req.RootPassword, ""), s.now()
+	if s.update(w, func(st *store.State) error {
+		st.Access.RootPasswordHash, st.Access.RootPasswordSetAt = hash, now
+		return nil
+	}) {
+		log.Printf("device access: root password changed")
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handlePutSSHKeys 整份替换允许 SSH 登录 root 的公钥（空列表 = 清空，设备恢复密码 SSH）。
+// 设备上的 authorized_keys 每次都按这份整份重写，所以换公钥、增删公钥都只是再下发一次。
+func (s *Server) handlePutSSHKeys(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SSHKeys []string `json:"ssh_keys"`
 	}
 	if !decodeJSON(w, r, 64<<10, &req) {
 		return
@@ -64,27 +86,8 @@ func (s *Server) handlePutAccess(w http.ResponseWriter, r *http.Request) {
 		}
 		keys = append(keys, k)
 	}
-	var hash string
-	if req.RootPassword != "" {
-		if n := len([]rune(req.RootPassword)); n < minRootPasswordLen || n > 128 {
-			http.Error(w, fmt.Sprintf("root 密码须为 %d~128 位", minRootPasswordLen), http.StatusBadRequest)
-			return
-		}
-		hash = sha512Crypt(req.RootPassword, "")
-	}
-	now := s.now()
-	if s.update(w, func(st *store.State) error {
-		st.Access.SSHKeys = keys
-		if hash != "" {
-			st.Access.RootPasswordHash, st.Access.RootPasswordSetAt = hash, now
-		}
-		return nil
-	}) {
-		what := ""
-		if hash != "" {
-			what = ", root password changed"
-		}
-		log.Printf("device access updated: %d SSH key(s)%s", len(keys), what)
+	if s.update(w, func(st *store.State) error { st.Access.SSHKeys = keys; return nil }) {
+		log.Printf("device access: %d SSH key(s) set", len(keys))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

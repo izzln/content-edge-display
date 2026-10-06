@@ -37,6 +37,7 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           s.Handler(),
 		TLSConfig:         s.TLSConfig(),
+		ErrorLog:          server.HTTPErrorLog(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// 空闲长连接比设备端（90 秒）晚关：总是设备先放手。反过来的话，服务端刚关掉一条连接、
 		// 设备恰好拿它发请求，就是一次 connection reset by peer。
