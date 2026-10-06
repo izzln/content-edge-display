@@ -8,12 +8,13 @@ import (
 
 // Null 是不驱动真实显示的播放器实现，用于集成测试与无显示环境验证。
 type Null struct {
-	mu     sync.Mutex
-	scene  Scene
-	paused bool
+	mu         sync.Mutex
+	scene      Scene
+	paused     bool
+	brightness int
 }
 
-func NewNull() *Null { return &Null{} }
+func NewNull() *Null { return &Null{brightness: 100} }
 
 func (p *Null) Start(ctx context.Context) error { return nil }
 
@@ -52,3 +53,17 @@ func (p *Null) Paused() bool {
 }
 
 func (p *Null) Stats() Stats { return Stats{} }
+
+func (p *Null) SetBrightness(percent int) {
+	p.mu.Lock()
+	p.brightness = percent
+	p.mu.Unlock()
+	log.Printf("player(null): brightness %d%%", percent)
+}
+
+// Brightness 返回最近一次设置的亮度（测试用）。
+func (p *Null) Brightness() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.brightness
+}

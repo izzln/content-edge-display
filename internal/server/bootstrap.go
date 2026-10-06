@@ -41,16 +41,15 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBootstrapPackage 给装机脚本下载最新上传的设备程序包，凭注册口令（X-Enroll-Token）。
+// handleBootstrapPackage 给装机脚本下载当前的设备程序包，凭注册口令（X-Enroll-Token）。
 func (s *Server) handleBootstrapPackage(w http.ResponseWriter, r *http.Request) {
 	if !tokenOK(r.Header.Get("X-Enroll-Token"), s.cfg.EnrollToken) {
 		http.Error(w, "bad enroll token", http.StatusUnauthorized)
 		return
 	}
-	var latest store.Package
-	var ok bool
-	s.store.View(func(st *store.State) { latest, ok = st.LatestPackage() })
-	if !ok {
+	var latest *store.Package
+	s.store.View(func(st *store.State) { latest = st.Package })
+	if latest == nil {
 		http.Error(w, "no agent package uploaded yet", http.StatusNotFound)
 		return
 	}

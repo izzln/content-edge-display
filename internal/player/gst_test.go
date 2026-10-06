@@ -348,6 +348,19 @@ for pitch in (16, 24):
     assert pixels(buf, pitch) == [K, K, T, D] * 2, (pitch, pixels(buf, pitch))
     g.paint(buf, pitch, 4, bytes(32), hole, [None, None], 0, True)  # 换画面：整幅重画
     assert pixels(buf, pitch) == [(0, 0, 0, 0)] * 8
+
+# 分时段亮度：整幅压一层黑幕。颜色乘 (255−d)/255、不透明度加上去；完全透明的像素保持透明（洞里由 paint 垫黑幕）
+dimmed = g.dim_frame(base, 128)
+assert g.dim_frame(base, 0) is base
+dk, dd = (4, 4, 4, 255), (2, 2, 2, 192)
+assert pixels(dimmed, 16) == [dk, dk, T, dd] * 2, pixels(dimmed, 16)
+assert g.deco_spans(dimmed, 16, hole) == spans
+for pitch in (16, 24):
+    buf = bytearray(pitch * 2)
+    g.paint(buf, pitch, 4, dimmed, hole, spans, 0, True, 128)  # 正常播放时：洞里透明处是黑幕本身，视频跟着变暗
+    assert pixels(buf, pitch) == [dk, dk, (0, 0, 0, 128), dd] * 2, (pitch, pixels(buf, pitch))
+    g.paint(buf, pitch, 4, dimmed, hole, spans, 128, False, 128)  # 淡出中：两层黑幕叠加，装饰只叠淡出的那层
+    assert pixels(buf, pitch) == [dk, dk, (0, 0, 0, 192), (2, 2, 2, 224)] * 2, (pitch, pixels(buf, pitch))
 `).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
@@ -513,6 +526,13 @@ func TestPlayerScriptSequencing(t *testing.T) {
 			t.Fatalf("放过视频后应报告解码方式：%v", st)
 		}
 	}
+	send(map[string]any{"id": 5, "cmd": "brightness", "percent": 30})
+	testutil.WaitFor(t, 3*time.Second, "亮度", func() bool { mu.Lock(); defer mu.Unlock(); return replies[5] != nil })
+	mu.Lock()
+	if r := replies[5]; r["error"] != nil {
+		t.Fatalf("亮度命令应被接受：%v", r)
+	}
+	mu.Unlock()
 
 	// 换成单张图片：一直显示，不再切换
 	send(map[string]any{"id": 4, "cmd": "load", "items": []map[string]any{{"path": img2, "type": "image", "duration": 1}}, "overlay": nil})

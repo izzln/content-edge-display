@@ -31,9 +31,13 @@ import (
 // errUnknownDevice 表示请求里的设备编号没有登记（从未注册，或在后台被删除了）。
 var errUnknownDevice = errors.New("unknown device")
 
-// announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳，以及用什么时区
-// （设备照办，见 manifest.HeaderPollInterval、manifest.HeaderTimezone）。
+// announceSchedule 在响应头里告诉设备该按什么间隔轮询、心跳，用什么时区，以及分时段亮度
+// （设备照办，见 manifest.HeaderPollInterval、manifest.HeaderTimezone、manifest.HeaderBrightness）。
+// 这些设置不进清单：改了不会让设备重新加载内容。
 func (s *Server) announceSchedule(w http.ResponseWriter) {
+	var bright []manifest.BrightnessPeriod
+	s.store.View(func(st *store.State) { bright = st.Global.Brightness })
+	w.Header().Set(manifest.HeaderBrightness, manifest.FormatBrightness(bright))
 	w.Header().Set(manifest.HeaderPollInterval, strconv.Itoa(s.cfg.PollIntervalS))
 	w.Header().Set(manifest.HeaderHeartbeatInterval, strconv.Itoa(s.cfg.HeartbeatIntervalS))
 	if s.zone != "" {

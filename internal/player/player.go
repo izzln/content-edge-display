@@ -37,6 +37,9 @@ type Player interface {
 	SetPaused(paused bool)
 	// Stats 返回随心跳上报的播放器运行状态（实际解码方式、输出分辨率）；不阻塞，问不到的项留空。
 	Stats() Stats
+	// SetBrightness 设整屏画面亮度（百分比，100 = 原样）：分时段亮度用它（见 agent/brightness.go）。
+	// 播放进程重启后照样生效。
+	SetBrightness(percent int)
 }
 
 // Stats 是播放器的运行状态，用于后台观察现场是否正常。

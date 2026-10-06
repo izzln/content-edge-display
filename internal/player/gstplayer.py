@@ -7,6 +7,7 @@
 #          "overlay": "/path/x.bgra" | null, "media": [x, y, w, h]}
 #         （叠加图已由代理光栅化成输出分辨率的 BGRA，media 是媒体区在输出坐标里的位置）
 #         {"id": 3, "cmd": "stats"}   （代理的看门狗定时发它：回不来就重启本进程）
+#         {"id": 4, "cmd": "brightness", "percent": 30}   （分时段亮度：整屏叠黑幕，100 = 原样）
 #   回复  {"id": 1, "ok": true, ...} 或 {"id": 1, "error": "..."}
 #   事件  {"event": "playing", "index": 0, "path": "..."}  {"event": "error", "index": 0, "message": "..."}
 #         {"event": "crop", "size": [w, h], "crop": [左, 右, 上, 下]}
@@ -253,6 +254,20 @@ def veil(a):
     return _veils[a]
 
 
+def dim_frame(base, d):
+    """整幅叠加图压上一层透明度 d 的黑幕（分时段亮度）：颜色乘 (255−d)/255，透明度从 a 变成 a + d·(255−a)/255。
+    完全透明的像素保持透明——洞里由 paint 统一垫黑幕（视频也要一起变暗），这样 deco_spans 也不受影响。"""
+    if not d:
+        return base
+    rgb = bytes((v * (255 - d) + 127) // 255 for v in range(256))
+    alpha = bytes(0 if v == 0 else v + (d * (255 - v) + 127) // 255 for v in range(256))
+    out = bytearray(base)
+    for c in range(3):
+        out[c::4] = out[c::4].translate(rgb)
+    out[3::4] = out[3::4].translate(alpha)
+    return bytes(out)
+
+
 def deco_spans(base, row, hole):
     """洞里每一行不透明像素（压进媒体区的装饰）所在的列范围 (起, 止)，没有就是 None。
     每个画面算一次，淡入淡出的每一帧都用它（row 是 base 每行的字节数）。"""
@@ -265,11 +280,13 @@ def deco_spans(base, row, hole):
     return spans
 
 
-def paint(buf, pitch, width, base, hole, spans, alpha, full):
+def paint(buf, pitch, width, base, hole, spans, alpha, full, dim=0):
     """把一帧上层画面画进 buf（每行 pitch 字节，宽 width 像素，BGRA 预乘）。
 
     full 时先整幅铺上 base；然后洞里垫一层 alpha 的黑幕——黑幕在叠加图之下：洞里透明的地方变暗（视频淡出），
     底图压进媒体区的装饰（spans，见 deco_spans）保持不动。alpha 为 0 时洞里还原 base。
+    dim 是分时段亮度的黑幕（整屏最上层）：base 已由 dim_frame 压暗过，洞里透明处的黑幕再叠上它，
+    视频也跟着变暗；装饰已经压暗过，仍只按淡出黑幕查表。
     只改透明度通道、按行查表，走的是 C 实现。"""
     row = width * 4
     src = memoryview(base)
@@ -279,15 +296,15 @@ def paint(buf, pitch, width, base, hole, spans, alpha, full):
         else:
             for r in range(len(base) // row):
                 buf[r * pitch:r * pitch + row] = src[r * row:(r + 1) * row]
-        if not alpha:
+        if not alpha and not dim:
             return
     x, y, w, h = hole
-    if not alpha:
+    if not alpha and not dim:
         for r in range(y, y + h):
             o, s = r * pitch + x * 4, r * row + x * 4
             buf[o:o + w * 4] = src[s:s + w * 4]
         return
-    fill, lut = bytes((0, 0, 0, alpha)) * w, veil(alpha)
+    fill, lut = bytes((0, 0, 0, alpha + (dim * (255 - alpha) + 127) // 255)) * w, veil(alpha)
     for r, span in zip(range(y, y + h), spans):
         o = r * pitch + x * 4
         buf[o:o + w * 4] = fill  # 洞里透明的地方：黑幕本身
@@ -401,14 +418,15 @@ class Display:
         return "%s, connector %d, crtc %d, %s@%dHz, overlay plane %d, video plane %d" % (
             self.path, self.conn, self.crtc, self.mode.name.decode(), self.mode.vrefresh, self.primary, self.video)
 
-    def show(self, base, hole, spans, alpha):
-        """把上层画到后台缓冲并切过去（阻塞到下一个 vblank 生效，之后前台那块才可以再画）。"""
+    def show(self, base, hole, spans, alpha, dim=0):
+        """把上层画到后台缓冲并切过去（阻塞到下一个 vblank 生效，之后前台那块才可以再画）。
+        base 是已按 dim 压暗过的叠加图（dim_frame），换亮度时它也换成新对象，于是整幅重画。"""
         b = self.bufs[1 - self.front]
         drawn = b["drawn"]
-        full = drawn is None or drawn[0] is not base or drawn[1] != hole
+        full = drawn is None or drawn[0] is not base or drawn[1] != hole or drawn[3] != dim
         if full or drawn[2] != alpha:
-            paint(b["map"], b["pitch"], self.width, base, hole, spans, alpha, full)
-            b["drawn"] = (base, hole, alpha)
+            paint(b["map"], b["pitch"], self.width, base, hole, spans, alpha, full, dim)
+            b["drawn"] = (base, hole, alpha, dim)
         ret = self.drm.drmModeSetPlane(self.fd, self.primary, self.crtc, b["fb"], 0, 0, 0, self.width, self.height,
                                        0, 0, self.width << 16, self.height << 16)
         if ret:
@@ -481,6 +499,8 @@ class Player:
         self.fade = FADE
         self.h264_decoder = "avdec_h264"  # 有 cedrus 时是 v4l2slh264dec（硬解），见 configure
         self.base = b""          # 上层叠加图（BGRA，预乘 alpha）；没有模板时全透明
+        self.dim = 0              # 分时段亮度的黑幕（0 = 原样，255 = 全黑）
+        self.dimmed = b""         # 按 dim 压暗过的 base（dim_frame），上层实际画的是它
         self.hole = (0, 0, 0, 0)  # 媒体区在显示坐标里的位置
         self.spans = []           # 洞里压着装饰的列范围（deco_spans）
         self.scene = None
@@ -505,6 +525,8 @@ class Player:
             return self.configure(req)
         if cmd == "load":
             return self.load(req)
+        if cmd == "brightness":
+            return self.set_brightness(req)
         if cmd == "stats":
             hw = ""
             if self.decoder:
@@ -525,10 +547,21 @@ class Player:
                 log("WARNING: hardware decoder v4l2slh264dec is not available "
                     "(cedrus missing or gstreamer1.0-plugins-bad not installed); videos will be decoded in software")
         self.width, self.height = width, height
-        self.base = bytes(width * height * 4)
+        self.base = self.dimmed = bytes(width * height * 4)
         self.hole = (0, 0, width, height)
         self.spans = [None] * height
         self._show()
+        return {}
+
+    def set_brightness(self, req):
+        """整屏画面亮度（百分比）：上层叠一层黑幕，属性区、底图、图片、视频一起变暗。立即生效。"""
+        percent = min(100, max(0, int(req["percent"])))
+        dim = round(255 * (100 - percent) / 100)
+        if dim != self.dim:
+            self.dim = dim
+            self.dimmed = dim_frame(self.base, dim)
+            self._show()
+            log("brightness %d%%" % percent)
         return {}
 
     def load(self, req):
@@ -551,6 +584,7 @@ class Player:
 
         def switch():
             self.scene, self.base, self.hole, self.spans, self.items = scene, base, hole, spans, items
+            self.dimmed = dim_frame(base, self.dim)
             self.shown = set()
             self._stop_item()
             self.alpha = 255
@@ -569,7 +603,7 @@ class Player:
 
     def _show(self):
         if self.display:
-            self.display.show(self.base, self.hole, self.spans, self.alpha)
+            self.display.show(self.dimmed, self.hole, self.spans, self.alpha, self.dim)
 
     def _fade_to(self, target, done=None):
         steps = max(1, int(self.fade * 1000 / FADE_STEP_MS))

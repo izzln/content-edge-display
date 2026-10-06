@@ -127,7 +127,7 @@ type RekeyRequest struct {
 	Hardware
 }
 
-// Package 是已上传的设备端程序包（make package 产出的 tar.gz，装机与 OTA 共用）。
+// Package 是已上传的设备端程序包（make package 产出的 tar.gz，装机与 OTA 共用）。服务端只保留一个。
 type Package struct {
 	Version    string    `json:"version"`
 	File       string    `json:"file"`
@@ -137,7 +137,8 @@ type Package struct {
 	UploadedAt time.Time `json:"uploaded_at"`
 }
 
-// UpdateTarget 是下发给某台设备的更新目标。
+// UpdateTarget 是下发给某台设备的更新目标：版本总是当前程序包的版本（换包时仍在等待的目标跟着改），
+// 记下来是为了判断设备是否已经更新到位。
 type UpdateTarget struct {
 	Version   string    `json:"version"`
 	NotBefore time.Time `json:"not_before,omitzero"` // 零值=立即
@@ -146,6 +147,8 @@ type UpdateTarget struct {
 // GlobalConfig 是全局显示设置（运营方在管理后台改，立即对所有设备生效）。
 type GlobalConfig struct {
 	TemplateID string `json:"template_id,omitempty"` // 全局默认模板
+	// Brightness 是分时段亮度（所有设备统一，按服务端时区）：不在任何时段内是 100%。见 manifest.BrightnessPeriod。
+	Brightness []manifest.BrightnessPeriod `json:"brightness,omitempty"`
 }
 
 // Access 是统一下发给所有设备的访问凭据（后台「设备访问」）。
@@ -167,7 +170,7 @@ type Admin struct {
 type State struct {
 	Devices      map[string]*Device  `json:"devices"`
 	Templates    map[string]Template `json:"templates"`
-	Packages     map[string]Package  `json:"packages"`
+	Package      *Package            `json:"package,omitempty"` // 当前的设备程序包：只保留一个，上传新包即替换
 	Global       GlobalConfig        `json:"global"`
 	CacheQuotaGB int                 `json:"cache_quota_gb"` // 服务端文件缓存区的配额（GB）
 	Access       Access              `json:"access"`
@@ -184,23 +187,9 @@ func (s *State) init() {
 	if s.Templates == nil {
 		s.Templates = map[string]Template{}
 	}
-	if s.Packages == nil {
-		s.Packages = map[string]Package{}
-	}
 	if s.CacheQuotaGB <= 0 {
 		s.CacheQuotaGB = DefaultCacheQuotaGB
 	}
-}
-
-// LatestPackage 返回最近上传的程序包（新设备装机时下载它）。
-func (s *State) LatestPackage() (Package, bool) {
-	var latest Package
-	for _, p := range s.Packages {
-		if p.UploadedAt.After(latest.UploadedAt) {
-			latest = p
-		}
-	}
-	return latest, latest.File != ""
 }
 
 // Store 是 State 的持久化容器，方法并发安全。

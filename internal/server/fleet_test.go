@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/izzln/content-edge-display/internal/agentpkg"
 	"github.com/izzln/content-edge-display/internal/manifest"
 	"github.com/izzln/content-edge-display/internal/sign"
 	"github.com/izzln/content-edge-display/internal/store"
@@ -146,9 +147,11 @@ func uploadPackage(t *testing.T, h http.Handler, content []byte) store.Package {
 	if w.Code != http.StatusOK {
 		t.Fatalf("上传程序包失败: %d %s", w.Code, w.Body.String())
 	}
-	var meta store.Package
-	json.Unmarshal(w.Body.Bytes(), &meta)
-	return meta
+	var out struct {
+		Package store.Package `json:"package"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &out)
+	return out.Package
 }
 
 // 上传接口必须挡住"传错文件"——这个包会分发到所有屏，错了要等三次启动失败才回滚。
@@ -182,9 +185,11 @@ func TestPackageUploadRejectsWrongFile(t *testing.T) {
 	if fw.Version != testAgentVersion || fw.Size != int64(len(pkg)) {
 		t.Fatalf("正确的整包应当上传成功，版本从包里读：%+v", fw)
 	}
-	// 被拒绝的上传都不得落库，列表里只应有刚才那一个版本
-	if w := do(t, h, adminReq("GET", "/api/v1/admin/packages", nil), http.StatusOK); strings.Count(w.Body.String(), `"version"`) != 1 {
-		t.Fatalf("程序包列表应只有一个版本：%s", w.Body.String())
+	// 被拒绝的上传都不得落库：当前程序包就是刚才那个
+	var cur store.Package
+	json.Unmarshal(do(t, h, adminReq("GET", "/api/v1/admin/package", nil), http.StatusOK).Body.Bytes(), &cur)
+	if cur.Version != testAgentVersion || cur.SHA256 != fw.SHA256 {
+		t.Fatalf("当前程序包应是刚上传的那个：%+v", cur)
 	}
 }
 
@@ -200,6 +205,7 @@ func TestRolloutAndUpdate(t *testing.T) {
 	s, h := newAdminTestServer(t)
 	pkg := agentPackage(t, testAgentVersion, agentBinaryFixture(t), true)
 	heartbeatAs(t, h, "1.0.0")
+	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{}), http.StatusBadRequest) // 还没有程序包
 
 	fw := uploadPackage(t, h, pkg)
 	if fw.Size != int64(len(pkg)) || len(fw.SHA256) != 64 {
@@ -212,7 +218,7 @@ func TestRolloutAndUpdate(t *testing.T) {
 	}
 
 	// 立即下发全部设备
-	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"version": testAgentVersion}), http.StatusNoContent)
+	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{}), http.StatusNoContent)
 	m := deviceManifest(t, h)
 	if m.Update == nil || m.Update.Version != testAgentVersion || m.Update.SHA256 != fw.SHA256 {
 		t.Fatalf("expected update: %+v", m.Update)
@@ -237,7 +243,7 @@ func TestRolloutAndUpdate(t *testing.T) {
 	// 定时下发：时间未到不下发，到了才下发
 	heartbeatAs(t, h, "1.0.0")
 	later := s.now().Add(time.Hour)
-	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"version": testAgentVersion, "not_before": later}), http.StatusNoContent)
+	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"not_before": later}), http.StatusNoContent)
 	if m3 := deviceManifest(t, h); m3.Update != nil {
 		t.Fatalf("scheduled rollout must not fire early: %+v", m3.Update)
 	}
@@ -246,14 +252,54 @@ func TestRolloutAndUpdate(t *testing.T) {
 		t.Fatal("scheduled rollout should fire after not_before")
 	}
 	s.now = time.Now
+	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{}), http.StatusNoContent)
 
-	// 删除仍是目标的程序包被拒；取消目标后可删
-	do(t, h, adminReq("DELETE", "/api/v1/admin/packages/"+testAgentVersion, nil), http.StatusConflict)
-	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"version": ""}), http.StatusNoContent)
-	do(t, h, adminReq("DELETE", "/api/v1/admin/packages/"+testAgentVersion, nil), http.StatusNoContent)
+	// 取消全部待更新
+	do(t, h, adminReq("DELETE", "/api/v1/admin/rollout", nil), http.StatusNoContent)
+	if m5 := deviceManifest(t, h); m5.Update != nil {
+		t.Fatalf("取消后不应再下发：%+v", m5.Update)
+	}
 
-	// 未知版本/未知设备
-	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"version": "9.9.9"}), http.StatusBadRequest)
+	// 未知设备
+	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{"devices": []string{"nope"}}), http.StatusBadRequest)
+}
+
+// 程序包只保留一个：上传新版本替换旧包（旧文件删掉）；仍在等待旧版本的设备改为等待新版本，已更新到位的目标清掉。
+func TestPackageReplace(t *testing.T) {
+	s, h := newAdminTestServer(t)
+	bin := agentBinaryFixture(t) // 版本号是编进程序里的 testAgentVersion；旧包直接摆进状态
+	oldFile := agentpkg.FileName("1.0.0")
+	os.WriteFile(filepath.Join(s.packagesDir(), oldFile), []byte("old"), 0o644)
+	s.store.Update(func(st *store.State) error {
+		st.Package = &store.Package{Version: "1.0.0", File: oldFile}
+		st.Devices[testDeviceID].AgentVersion = "0.9.0" // 还在等 1.0.0
+		st.Devices["dev-002"].AgentVersion = "1.0.0"    // 已更新到位
+		return nil
+	})
+	do(t, h, adminReq("PUT", "/api/v1/admin/rollout", map[string]any{}), http.StatusNoContent)
+
+	w := uploadPackageRaw(t, h, agentPackage(t, testAgentVersion, bin, true))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"retargeted":1`) {
+		t.Fatalf("应替换并改指向 1 个待更新：%d %s", w.Code, w.Body.String())
+	}
+	s.store.View(func(st *store.State) {
+		if st.Package == nil || st.Package.Version != testAgentVersion {
+			t.Fatalf("当前程序包应是新版本：%+v", st.Package)
+		}
+		if u := st.Devices[testDeviceID].Update; u == nil || u.Version != testAgentVersion {
+			t.Fatalf("仍在等待的设备应改为等待新版本：%+v", u)
+		}
+		if u := st.Devices["dev-002"].Update; u != nil {
+			t.Fatalf("已更新到位的目标应清掉，否则会被当成要更新到新版本：%+v", u)
+		}
+	})
+	if m := deviceManifest(t, h); m.Update == nil || m.Update.Version != testAgentVersion {
+		t.Fatalf("设备应收到新版本：%+v", m.Update)
+	}
+	entries, _ := os.ReadDir(s.packagesDir())
+	if len(entries) != 1 || entries[0].Name() != agentpkg.FileName(testAgentVersion) {
+		t.Fatalf("程序包目录应只剩新包：%v", entries)
+	}
 }
 
 func TestGlobalTemplate(t *testing.T) {

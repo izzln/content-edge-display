@@ -114,6 +114,14 @@ func newServer(cfg *Config, t tools) (*Server, error) {
 			return nil, err
 		}
 	}
+	// 程序包只保留一个：目录里别的文件（替换时没删掉的旧包、旧版本留下的多个包）清掉
+	keep := ""
+	st.View(func(st *store.State) {
+		if st.Package != nil {
+			keep = st.Package.File
+		}
+	})
+	s.prunePackages(keep)
 	if err := s.loadOrCreateCert(); err != nil {
 		return nil, err
 	}
