@@ -520,7 +520,7 @@ function upload(path, fd, bar, msg) {
     xhr.send(fd);
   });
 }
-// confirmSend 确认后发 DELETE（删设备、模板、依赖包、叠图）。
+// confirmSend 确认后发 DELETE（删设备、模板、程序包、依赖包、底图）。
 async function confirmSend(title, detail, path, { ok = "删除", msg = "已删除" } = {}) {
   return await confirmDialog(title, detail, { ok, danger: true }) && send("DELETE", path, undefined, msg);
 }
@@ -877,11 +877,11 @@ async function contentDialog(id) {
   renderContentBody();
 }
 
-// updateMirrorWarn 对调的设备用的模板有叠图却没有对调版时提示（会用常规版原图，媒体区与叠图的留空对不上）。
+// updateMirrorWarn 对调的设备用的模板有底图却没有对调版时提示（会用常规版原图，媒体区与底图的留空对不上）。
 function updateMirrorWarn() {
   const tpl = selectedTpl();
-  $("#mirrorWarn").innerHTML = $("#mirrorChk").checked && tpl?.top_layer && !tpl.top_layer_mirror
-    ? `<p class="warn">模板「${esc(tpl.name)}」有叠图但没有对调版：对调后叠图的留空与媒体区对不上。到"模板"页的【叠图】上传对调版。</p>` : "";
+  $("#mirrorWarn").innerHTML = $("#mirrorChk").checked && tpl?.background_image && !tpl.background_image_mirror
+    ? `<p class="warn">模板「${esc(tpl.name)}」有底图但没有对调版：对调后底图的留空与媒体区对不上。到"模板"页的【底图】上传对调版。</p>` : "";
 }
 function onModeChange() {
   $("#ovSel").disabled = !ownTemplate();
@@ -889,7 +889,7 @@ function onModeChange() {
 }
 
 // copyGlobalTemplate 以全局模板为蓝本建一个副本，供这台设备单独改。
-// 叠图不复制（服务端新建的模板没有叠图）。
+// 底图不复制（服务端新建的模板没有底图）。
 async function copyGlobalTemplate() {
   const copy = { ...tplById(global.template_id) };
   copy.name += " 副本";
@@ -1548,45 +1548,47 @@ const REGION_LABEL = { attribute: "属性", text: "文字", media: "播放内容
 function renderTemplates() {
   const only = templates.length === 1; // 最后一个模板不能删（系统始终需要一个全局默认模板）：不显示删除
   const rows = templates.map(t => `<tr>
-    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒${t.top_layer ? ` · 叠图${t.top_layer_mirror ? "（含对调版）" : ""}` : ""}</div>
-      ${mirroredMissing(t).length ? `<div class="warn">${mirroredMissing(t).length} 台对调的设备在用它，缺对调版叠图</div>` : ""}</td>
+    <td><b>${esc(t.name)}</b> ${global.template_id === t.id ? '<span class="badge global">全局默认</span>' : ""}<div class="muted">${t.w}×${t.h} · 图片停留 ${esc(t.image_duration_s)} 秒${t.background_image ? ` · 底图${t.background_image_mirror ? "（含对调版）" : ""}` : ""}</div>
+      ${mirroredMissing(t).length ? `<div class="warn">${mirroredMissing(t).length} 台对调的设备在用它，缺对调版底图</div>` : ""}</td>
     <td data-label="区域">${t.regions.map(r => `<span class="badge">${esc(REGION_LABEL[r.type] || r.type)}${r.type === "attribute" ? "(" + esc(r.key) + ")" : ""}</span>`).join("")}</td>
     <td class="acts">
       <button onclick="showPreview(tplPath('${esc(t.id)}') + '/preview')">预览</button>
       <button onclick="templateForm('${esc(t.id)}')">编辑</button>
-      <button onclick="topLayerDialog('${esc(t.id)}')">叠图</button>
+      <button onclick="backgroundDialog('${esc(t.id)}')">底图</button>
       <button onclick="editTemplateJSON('${esc(t.id)}')" class="sm">JSON</button>
       ${only ? "" : `<button class="danger" onclick="deleteTemplate('${esc(t.id)}')">删除</button>`}
     </td></tr>`).join("");
   $("#tplTable").innerHTML = `<tr class="head"><th>模板</th><th>区域</th><th>操作</th></tr>${rows || '<tr><td colspan="3" class="muted">暂无模板</td></tr>'}`;
 }
 
-// ---- 模板叠图：节日装饰、相框等模板画不出来的画面，整张盖在模板最上面（属性、文字、底色之上）----
+// ---- 模板底图：节日主题等模板画不出来的画面，压在播放内容上方 ----
 const tplPath = id => `/api/v1/admin/templates/${encodeURIComponent(id)}`;
 // mediaRect 返回模板的媒体区（mirror 时是对调后的位置）；没有媒体区时为 undefined
 const mediaRect = (t, mirror) => { const m = t.regions.find(r => r.type === "media"); return m && (mirror ? { ...m, x: t.w - m.x - m.w } : m); };
 const rectText = r => r ? `x=${r.x} y=${r.y}，${r.w}×${r.h}` : "（这个模板没有媒体区）";
-// mirroredMissing 返回开了左右对调、正在用模板 t、而 t 有叠图却没有对调版的设备
-const mirroredMissing = t => t.top_layer && !t.top_layer_mirror ? devices.filter(d => d.display.mirror && d.active_template === t.id) : [];
-const layerPath = (id, mirror) => `${tplPath(id)}/top-layer${mirror ? "?mirror=1" : ""}`;
-function topLayerDialog(id) {
+// mirroredMissing 返回开了左右对调、正在用模板 t、而 t 有底图却没有对调版的设备
+const mirroredMissing = t => t.background_image && !t.background_image_mirror ? devices.filter(d => d.display.mirror && d.active_template === t.id) : [];
+const bgPath = (id, mirror) => `${tplPath(id)}/background${mirror ? "?mirror=1" : ""}`;
+function backgroundDialog(id) {
   const t = tplById(id);
-  const files = [t.top_layer, t.top_layer_mirror];
-  modal(`叠图 — ${esc(t.name)}`, `
-    <p>叠图放节日装饰、相框等模板画不出来的画面，<b>整张盖在模板最上面</b>（属性、文字、区域底色之上）。
-      尺寸 <b>${t.w}×${t.h}</b> 像素，只收 PNG（要用透明通道；比例不同时铺满后居中裁切）。</p>
-    <p><b>媒体区与文字处要透明</b>：视频/图片、房间号等文字从透明处露出；不透明的装饰会盖住下面的内容。
+  const files = [t.background_image, t.background_image_mirror];
+  const covering = t.regions.filter(r => r.type !== "media" && r.bg); // 设了底色的区域会盖住底图
+  modal(`底图 — ${esc(t.name)}`, `
+    <p>底图放节日主题等模板画不出来的画面，<b>压在播放内容上方</b>。尺寸 <b>${t.w}×${t.h}</b> 像素，只收 PNG（比例不同时铺满后居中裁切）。</p>
+    <p><b>媒体区里底图要透明</b>，视频/图片从透明处露出；不透明的装饰（相框、灯笼等）会压在视频上。
       媒体区位置：常规版 ${rectText(mediaRect(t, false))}；对调版 ${rectText(mediaRect(t, true))}。
-      下载参考图（媒体区标红、各文字区域标框）当作参考图层来做叠图。</p>
+      属性/文字显示在底图之上；它们的区域不设底色时透明，透出底图。下载参考图（媒体区标红、各区域标框）当作参考图层来做底图。</p>
+    ${covering.length ? `<p class="warn">${covering.map(r => `${esc(REGION_LABEL[r.type] || r.type)}区域${r.type === "attribute" ? "（" + esc(r.key) + "）" : ""}设了底色 ${esc(r.bg)}`).join("、")}，
+      会盖住底图的这块：在模板【编辑】里把底色留空即透明。</p>` : ""}
     ${["常规版", "对调版（开了左右对调的设备用）"].map((label, i) => `<div class="card"><h3>${label}</h3>
       <div class="row"><button onclick="downloadGuide('${esc(id)}', ${!!i})">下载参考图</button>
-        ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png" onchange="uploadLayer('${esc(id)}', ${!!i}, this)">`}
-        ${files[i] ? `<button onclick="showPreview(tplPath('${esc(id)}') + '/preview${i ? "?mirror=1" : ""}', '#layerBox${i}')">预览效果</button>
-          <button class="danger" onclick="removeLayer('${esc(id)}', ${!!i})">移除</button>` : ""}</div>
-      <div class="pbar" id="layerBar${i}" hidden><i></i></div>
-      <div id="layerBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
+        ${i && !files[0] ? '<span class="muted">先上传常规版</span>' : `<input type="file" accept="image/png" onchange="uploadBg('${esc(id)}', ${!!i}, this)">`}
+        ${files[i] ? `<button onclick="showPreview(tplPath('${esc(id)}') + '/preview${i ? "?mirror=1" : ""}', '#bgBox${i}')">预览效果</button>
+          <button class="danger" onclick="removeBg('${esc(id)}', ${!!i})">移除</button>` : ""}</div>
+      <div class="pbar" id="bgBar${i}" hidden><i></i></div>
+      <div id="bgBox${i}">${files[i] ? "" : '<span class="muted">未上传</span>'}</div></div>`).join("")}
     <p class="muted">没有对调版时，对调的设备用常规版原图（不翻转）。</p>`);
-  files.forEach((f, i) => f && showImg("#layerBox" + i, "/api/v1/admin/top-layers/" + f));
+  files.forEach((f, i) => f && showImg("#bgBox" + i, "/api/v1/admin/backgrounds/" + f));
 }
 async function downloadGuide(id, mirror) {
   const src = await blobURL(`${tplPath(id)}/guide${mirror ? "?mirror=1" : ""}`);
@@ -1594,25 +1596,19 @@ async function downloadGuide(id, mirror) {
   const a = document.createElement("a");
   a.href = src;
   const t = tplById(id);
-  a.download = `top-layer-guide-${t.w}x${t.h}${mirror ? "-mirrored" : ""}.png`;
+  a.download = `background-guide-${t.w}x${t.h}${mirror ? "-mirrored" : ""}.png`;
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
-// uploadLayer 上传叠图；媒体区透明不足、文字区域被盖住时在提示里说明（服务端照收）
-async function uploadLayer(id, mirror, input) {
+async function uploadBg(id, mirror, input) {
   const fd = new FormData(); fd.append("file", input.files[0]);
-  const msg = r => {
-    const warn = [];
-    if (r.media_transparent < 0.5) warn.push(`媒体区只有 ${Math.round(r.media_transparent * 100)}% 透明，视频大部分会被盖住`);
-    if (r.text_covered?.length) warn.push(`${r.text_covered.join("、")} 大部分被叠图盖住，文字可能看不清`);
-    return "叠图已更新" + (warn.length ? "；但" + warn.join("；") : "");
-  };
-  if (await upload(layerPath(id, mirror), fd, $(mirror ? "#layerBar1" : "#layerBar0"), msg)) topLayerDialog(id);
+  if (await upload(bgPath(id, mirror), fd, $(mirror ? "#bgBar1" : "#bgBar0"), r => r.media_transparent < 0.5
+    ? `底图已更新；但媒体区只有 ${Math.round(r.media_transparent * 100)}% 透明，视频大部分会被盖住` : "底图已更新")) backgroundDialog(id);
   else input.value = "";
 }
-async function removeLayer(id, mirror) {
-  if (await confirmSend(mirror ? "移除对调版叠图？" : "移除叠图？", mirror ? "" : "对调版会一起移除。", layerPath(id, mirror), { ok: "移除", msg: "已移除" }))
-    topLayerDialog(id);
+async function removeBg(id, mirror) {
+  if (await confirmSend(mirror ? "移除对调版底图？" : "移除底图？", mirror ? "" : "对调版会一起移除。", bgPath(id, mirror), { ok: "移除", msg: "已移除" }))
+    backgroundDialog(id);
 }
 const saveGlobal = () => send("PUT", "/api/v1/admin/global", { template_id: $("#globalSel").value }, "已保存");
 // ---- 模板编辑：勾选属性区、媒体区，两个都选时拖动分界线调宽窄 ----
@@ -1652,7 +1648,7 @@ function templateForm(id) {
       <div class="row">属性 key ${field("f_key", a.key, 'type="text" style="width:8em"')} <span class="muted">显示设备属性里该 key 的值，如 room</span></div>
       <div class="row">字号 ${field("f_size", a.font_size, 'type="number" min="8" style="width:5em"')}
         文字色 ${field("f_color", a.color, 'type="text" style="width:7em"')}
-        底色 ${field("f_bg", a.bg, 'type="text" placeholder="透明" style="width:7em"')} <span class="muted">留空 = 透明（透出模板底色）</span></div>
+        底色 ${field("f_bg", a.bg, 'type="text" placeholder="透明" style="width:7em"')} <span class="muted">留空 = 透明（透出底图）</span></div>
       <div class="row">垂直偏移 ${field("f_off", a.offset_y || 0, 'type="number" step="1" style="width:6em"')} px
         <span class="muted">水平始终居中；在垂直居中的基础上，正数下移、负数上移</span></div>
     </div>
@@ -1741,7 +1737,7 @@ function editTemplateJSON(id) {
   const t = tplById(id);
   modal(`${t ? "编辑" : "新建"}模板 (JSON)`, `<textarea id="tplJSON">${esc(JSON.stringify(t || defaultTemplate("示例"), null, 2))}</textarea>
     <p class="muted">区域类型：attribute（设备属性）、text（固定文字）、media（设备播放的图片/视频，每个模板至多一个）。
-      offset_y：文字在垂直居中的基础上下移的像素（负数上移）。叠图在【叠图】里管理，这里改不了。</p>`,
+      offset_y：文字在垂直居中的基础上下移的像素（负数上移）。底图在【底图】里管理，这里改不了。</p>`,
     `${CANCEL}<button class="primary" onclick="saveTemplateJSON('${esc(id || "")}')">保存</button>`);
 }
 function saveTemplateJSON(id) {

@@ -12,8 +12,8 @@ import (
 	"github.com/izzln/content-edge-display/internal/store"
 )
 
-// writeLayer 写一张 w×h 的透明 PNG，再按 rects 填色（叠图在媒体区与文字处要透明，装饰可以压进来）。
-func writeLayer(t *testing.T, dir, name string, w, h int, rects map[image.Rectangle]color.RGBA) {
+// writeBackground 写一张 w×h 的透明 PNG，再按 rects 填色（底图在媒体区要透明，装饰可以压进来）。
+func writeBackground(t *testing.T, dir, name string, w, h int, rects map[image.Rectangle]color.RGBA) {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for r, c := range rects {
@@ -45,22 +45,22 @@ func near(c color.Color, want color.RGBA) bool {
 
 func alphaAt(img image.Image, x, y int) uint32 { _, _, _, a := img.At(x, y).RGBA(); return a }
 
-// 叠图盖在最上面：压在区域底色与文字之上；媒体区里叠图透明的地方露出视频，不透明的装饰盖在视频上；
-// 叠图铺满画布、居中裁切。对调的设备用对调版叠图，没有对调版时用原图、不翻转。
-func TestTopLayer(t *testing.T) {
+// 底图压在媒体区上方：媒体区里底图透明的地方露出视频，不透明的装饰盖在视频上；底图铺满画布、居中裁切；
+// 区域不设底色时透出底图。对调的设备用对调版底图，没有对调版时用原图、不翻转。
+func TestBackgroundImage(t *testing.T) {
 	dir := t.TempDir()
 	r, err := New("", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 画布 200×200，媒体区在右半边。叠图 400×200（2:1）放进 1:1 画布：左右各裁掉四分之一，
-	// 所以叠图里 x∈[100,300) 对应画布 [0,200)：左半红（不透明），右半透明，媒体区里 (150..170) 有一块蓝色装饰
-	writeLayer(t, dir, "top-0000000000000001.png", 400, 200, map[image.Rectangle]color.RGBA{
+	// 画布 200×200，媒体区在右半边。底图 400×200（2:1）放进 1:1 画布：左右各裁掉四分之一，
+	// 所以底图里 x∈[100,300) 对应画布 [0,200)：左半红（不透明），右半透明，媒体区里 (150..170) 有一块蓝色装饰
+	writeBackground(t, dir, "bg-0000000000000001.png", 400, 200, map[image.Rectangle]color.RGBA{
 		image.Rect(0, 0, 200, 200): red, image.Rect(250, 150, 270, 170): blue})
-	writeLayer(t, dir, "top-0000000000000002.png", 200, 200, map[image.Rectangle]color.RGBA{
+	writeBackground(t, dir, "bg-0000000000000002.png", 200, 200, map[image.Rectangle]color.RGBA{
 		image.Rect(100, 0, 200, 200): green}) // 对调版：媒体区在左，左半透明
-	tpl := store.Template{ID: "t", W: 200, H: 200, TopLayer: "top-0000000000000001.png", Regions: []store.Region{
-		{ID: "a", X: 0, Y: 0, W: 100, H: 40, Type: store.RegionAttribute, Key: "room", Bg: "#00FF00"}, // 绿底色：被叠图盖住
+	tpl := store.Template{ID: "t", W: 200, H: 200, BackgroundImage: "bg-0000000000000001.png", Regions: []store.Region{
+		{ID: "a", X: 0, Y: 0, W: 100, H: 40, Type: store.RegionAttribute, Key: "room"}, // 没有底色：透明
 		{ID: "m", X: 100, Y: 0, W: 100, H: 200, Type: store.RegionMedia},
 	}}
 	if err := store.ValidateTemplate(&tpl); err != nil {
@@ -72,23 +72,14 @@ func TestTopLayer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !near(ovl.At(20, 150), red) || !near(ovl.At(5, 5), red) || alphaAt(ovl, 120, 100) != 0 || !near(ovl.At(160, 160), blue) {
-		t.Fatalf("叠加图：媒体区透明处露出视频，装饰压在上面，其余是叠图：%v %v %v",
+		t.Fatalf("叠加图：媒体区透明处露出视频，装饰压在上面，其余是底图：%v %v %v",
 			ovl.At(20, 150), ovl.At(120, 100), ovl.At(160, 160))
-	}
-
-	// 叠图透明的地方露出区域底色与文字：把叠图在属性区挖空，属性区就是自己的绿底色
-	writeLayer(t, dir, "top-0000000000000003.png", 200, 200, map[image.Rectangle]color.RGBA{
-		image.Rect(0, 40, 100, 200): red})
-	holed := tpl
-	holed.TopLayer = "top-0000000000000003.png"
-	if out, _ := r.Render(holed, nil, false, true); !near(out.At(5, 5), green) || !near(out.At(20, 150), red) {
-		t.Fatalf("叠图透明处应露出区域底色：%v %v", out.At(5, 5), out.At(20, 150))
 	}
 	full, _ := r.Render(tpl, nil, false, false)
 	if !near(full.At(120, 100), black) || !near(full.At(160, 160), blue) {
 		t.Fatal("整屏图：媒体区透明处是底色，装饰照样在")
 	}
-	if share := TransparentShare(CoverImage(mustDecode(t, dir, "top-0000000000000001.png"), 200, 200), image.Rect(100, 0, 200, 200)); share < 0.97 || share > 0.99 {
+	if share := TransparentShare(CoverImage(mustDecode(t, dir, "bg-0000000000000001.png"), 200, 200), image.Rect(100, 0, 200, 200)); share < 0.97 || share > 0.99 {
 		t.Fatalf("媒体区透明比例应约为 98%%：%.3f", share)
 	}
 
@@ -97,30 +88,30 @@ func TestTopLayer(t *testing.T) {
 	draw.Draw(content, content.Bounds(), image.NewUniform(yellow), image.Point{}, draw.Src)
 	pv := Preview(ovl, image.Rect(100, 0, 200, 200), content)
 	if !near(pv.At(120, 100), yellow) || !near(pv.At(160, 160), blue) || !near(pv.At(20, 150), red) {
-		t.Fatal("预览应是内容在媒体区、装饰与叠图在上面")
+		t.Fatal("预览应是内容在媒体区、装饰与底图在上面")
 	}
 
 	// 对调但没有对调版：原图不翻转——左边的红色不透明部分正好盖住换到左边的媒体区（所以需要对调版）
 	mir, _ := r.Render(tpl, nil, true, true)
 	if !near(mir.At(20, 150), red) {
-		t.Fatalf("没有对调版叠图时不应翻转原图：%v", mir.At(20, 150))
+		t.Fatalf("没有对调版底图时不应翻转原图：%v", mir.At(20, 150))
 	}
-	tpl.TopLayerMirror = "top-0000000000000002.png"
+	tpl.BackgroundImageMirror = "bg-0000000000000002.png"
 	mir, _ = r.Render(tpl, nil, true, true)
 	if alphaAt(mir, 20, 150) != 0 || !near(mir.At(180, 150), green) {
-		t.Fatal("对调的设备应使用对调版叠图")
+		t.Fatal("对调的设备应使用对调版底图")
 	}
 
-	// 叠图文件丢了：不盖叠图，不让清单生成失败
-	tpl.TopLayer, tpl.TopLayerMirror = "top-00000000000000ff.png", ""
+	// 底图文件丢了：退回底色，不让清单生成失败
+	tpl.BackgroundImage, tpl.BackgroundImageMirror = "bg-00000000000000ff.png", ""
 	if out, err := r.Render(tpl, nil, false, false); err != nil || !near(out.At(20, 150), black) {
-		t.Fatalf("叠图缺失时应只是不盖叠图：%v", err)
+		t.Fatalf("底图缺失时应退回底色：%v", err)
 	}
 
-	// 没有叠图的模板：媒体区仍是整块透明
-	tpl.TopLayer = ""
+	// 没有底图的模板：媒体区仍是整块透明
+	tpl.BackgroundImage = ""
 	if plain, _ := r.Render(tpl, nil, false, true); alphaAt(plain, 160, 160) != 0 {
-		t.Fatal("没有叠图时媒体区整块透明")
+		t.Fatal("没有底图时媒体区整块透明")
 	}
 }
 
