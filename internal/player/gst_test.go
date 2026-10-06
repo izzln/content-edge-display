@@ -279,6 +279,32 @@ assert g.cover_crop(0, 0, 720, 900) == (0, 0, 0, 0)
 assert g.cover_crop(1000, 900, 994, 900) == (2, 4, 0, 0)  # 左偏移取偶数（NV12 色度 2×2 一组）
 assert g.cover_crop(1000, 901, 1000, 900) == (0, 0, 0, 1)  # 保留高度取偶数
 
+# 图层实际位置：从 debugfs 的 DRM 状态里取（格式照内核 drm_atomic_plane_print_state）
+import tempfile, os
+d = tempfile.mkdtemp()
+open(os.path.join(d, "state"), "w").write("""plane[31]: plane-0
+	crtc=(null)
+	fb=0
+	crtc-pos=0x0+0+0
+	src-pos=0.000000x0.000000+0.000000+0.000000
+plane[33]: plane-1
+	crtc=crtc-0
+	fb=57
+		allocated by = gstplayer.py
+		format=NV12 little-endian (0x3231564e)
+	crtc-pos=1000x900+0+0
+	src-pos=800.000000x720.000000+240.000000+0.000000
+	rotation=1
+plane[39]: plane-2
+	crtc-pos=1440x900+0+0
+	src-pos=1440.000000x900.000000+0.000000+0.000000
+crtc[51]: crtc-0
+""")
+pat = os.path.join(d, "state")
+assert g.plane_state(33, pat) == ("1000x900+0+0", "800x720+240+0"), g.plane_state(33, pat)
+assert g.plane_state(39, pat) == ("1440x900+0+0", "1440x900+0+0"), g.plane_state(39, pat)
+assert g.plane_state(99, pat) is None and g.plane_state(33, os.path.join(d, "none")) is None
+
 # 选图层：按 Allwinner DE2（H3）的真实布局——VI 图层排在最前，只有 XRGB/YUV；主图层是第一个 UI 图层。
 # 上层必须选主图层（吃 ARGB），下层选 VI 图层；第二个 CRTC（mixer1）上的图层不能选。
 NV12, ARGB, XRGB = g.FOURCC_NV12, g.FOURCC_ARGB8888, 0x34325258
