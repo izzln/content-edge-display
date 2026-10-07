@@ -35,7 +35,8 @@ func TestMain(m *testing.M) {
 // fakePlayer 按 gstplayer.py 的协议应答，并把收到的请求逐行记进 GST_FAKE_LOG。
 //   - GST_FAKE_EXIT_ONCE=<标记文件>：第一次收到 load 后退出（模拟崩溃），之后正常；
 //   - GST_FAKE_HANG_ONCE=<标记文件>：第一次运行时不回状态查询（模拟卡死）；
-//   - GST_FAKE_DIE=1：一启动就退出（模拟起不来，如 HDMI 没接）。
+//   - GST_FAKE_DIE=1：一启动就退出（模拟起不来，如 HDMI 没接）；
+//   - GST_FAKE_SLOW_START=<时长>：先等这么久才开始应答（模拟装机后第一次启动扫描 GStreamer 插件）。
 func fakePlayer() {
 	logPath := os.Getenv("GST_FAKE_LOG")
 	if os.Getenv("GST_FAKE_DIE") == "1" {
@@ -56,6 +57,9 @@ func fakePlayer() {
 		return true
 	}
 	hang := once("GST_FAKE_HANG_ONCE")
+	if d, err := time.ParseDuration(os.Getenv("GST_FAKE_SLOW_START")); err == nil {
+		time.Sleep(d)
+	}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -210,6 +214,17 @@ func jsonEq(got any, want []int) bool {
 	a, _ := json.Marshal(got)
 	b, _ := json.Marshal(want)
 	return bytes.Equal(a, b)
+}
+
+// 装机后第一次启动播放进程要扫描 GStreamer 插件、建缓存，第一个回复（config）来得很慢：要等它，
+// 不能按普通请求的超时杀掉重来——那样缓存永远建不完，播放进程永远起不来。
+func TestSlowFirstStartIsAwaited(t *testing.T) {
+	p, logPath := startFake(t, 1440, 900, "GST_FAKE_SLOW_START=2500ms") // 比普通请求的超时（测试里 1 秒）长得多
+	p.Load(Scene{Items: []Item{{Path: "/x.jpg", Type: "image", Duration: 10}}})
+	testutil.WaitFor(t, 8*time.Second, "慢启动的播放进程收到画面", func() bool { return len(cmds(logPath, "load")) == 1 })
+	if n := len(cmds(logPath, "config")); n != 1 {
+		t.Fatalf("不应因为启动慢被杀掉重来：config 收到 %d 次", n)
+	}
 }
 
 // 播放进程接连起不来时重启间隔翻倍，不要每 2 秒拉一次、刷满日志。

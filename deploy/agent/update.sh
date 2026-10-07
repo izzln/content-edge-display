@@ -60,6 +60,9 @@ if [ -n "$left" ]; then
 	echo "缺少依赖 ${left% }：请在后台上传本机 Debian 版本（$(. /etc/os-release && echo "${VERSION_CODENAME:-?}")）的离线依赖包" >&2
 	exit 1
 fi
+# 预热 GStreamer 插件缓存：装完依赖后首次 Gst.init 要扫描全部插件（H3 上可达一两分钟），在这里做掉，
+# 播放器启动就快。缓存在 root 的 ~/.cache 下，与 display-agent 服务同一用户
+timeout 300 python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None)' >/dev/null 2>&1 || true
 
 # 2. 设备不自行升级系统：内核、dtb、u-boot 升级可能弄坏显示与硬解，只随整包 OTA 有计划地变；
 #    apt 的定时任务还会在 OTA 安装依赖时占着 dpkg 锁
