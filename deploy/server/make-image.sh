@@ -7,6 +7,7 @@
 #   → 同目录下 <原名>-display.img，用 balenaEtcher 等烧到 TF 卡，插卡上电即可
 #
 # ROOT_PASSWORD 是装机期间的临时密码（现场控制台用）；设备注册后换成后台「设备访问」里统一设置的密码。
+# 公版 minimal 镜像没有 curl：首次开机用 bash 写的替身下载 install.sh 与程序包（装机入口是 http://）。
 # 可选：HDMI_MODE、HDMI_FORCE、CMA（同一键装机命令）。
 # 镜像里带着注册口令和 root 密码的哈希：当作机密保管，别外传。装机成功后设备上的这两样会被删掉
 # （注册口令仍在 agent.json 里，与手工装机相同）。
@@ -69,6 +70,75 @@ set -a
 set +a
 export NO_REBOOT=1
 say() { echo "== display-firstboot: $*" | tee -a /dev/tty1; }
+# 公版 Armbian 的 minimal 镜像没有 curl。装机只需从装机入口（http://）下载 install.sh 与程序包，
+# 这里写一个 bash（/dev/tcp）实现的替身放到 PATH 最前面，install.sh 里的 curl 也就用它。/run 是内存盘，重启即消失。
+if ! command -v curl >/dev/null 2>&1; then
+	mkdir -p /run/display-firstboot
+	cat > /run/display-firstboot/curl <<'SHIM'
+#!/bin/bash
+# curl 替身（display-firstboot 写入）：只支持 http://，只认装机用到的参数：
+# -f -s -S -L（可合写，如 -fsS）、--connect-timeout 秒、-o 文件、-w '%{http_code}'、-H 请求头（可多个）、URL
+if [ -z "${CURL_SHIM_INNER:-}" ]; then
+	CURL_SHIM_INNER=1 exec timeout 600 "$0" "$@" # 整次传输最长 10 分钟
+fi
+out= fmt= fail= ct=10 url= hdrs=()
+while [ $# -gt 0 ]; do
+	case $1 in
+	-o) out=$2; shift ;;
+	-w) fmt=$2; shift ;;
+	-H) hdrs+=("$2"); shift ;;
+	--connect-timeout) ct=$2; shift ;;
+	--*) ;;
+	-*) case $1 in *f*) fail=1 ;; esac ;;
+	*) url=$1 ;;
+	esac
+	shift
+done
+report() { [ -z "$fmt" ] || printf '%s' "${fmt//'%{http_code}'/$1}"; }
+case $url in
+http://*) ;;
+*) echo "curl (firstboot shim): only http:// is supported: $url" >&2; exit 1 ;;
+esac
+rest=${url#http://}
+hostport=${rest%%/*}
+path=${rest#"$hostport"}
+[ -n "$path" ] || path=/
+host=${hostport%:*}
+port=80
+[ "$host" = "$hostport" ] || port=${hostport##*:}
+# /dev/tcp 连不上时要等内核超时（约 2 分钟）：先按 --connect-timeout 试连一次
+# （exec 的重定向是永久的：2>/dev/null 只能套在括号外面，否则之后的报错全被吞掉）
+if ! timeout "$ct" bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host" "$port" 2>/dev/null || ! { exec 3<>"/dev/tcp/$host/$port"; } 2>/dev/null; then
+	report 000
+	echo "curl: (7) Failed to connect to $hostport" >&2
+	exit 7
+fi
+{
+	printf 'GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: display-firstboot\r\nConnection: close\r\n' "$path" "$hostport"
+	for h in "${hdrs[@]}"; do printf '%s\r\n' "$h"; done
+	printf '\r\n'
+} >&3
+IFS=' ' read -r _ code _ <&3
+case $code in
+[0-9][0-9][0-9]) ;;
+*) report 000; echo "curl: (52) Empty reply from server" >&2; exit 52 ;;
+esac
+while IFS= read -r line <&3; do # 跳过响应头；bash 从套接字逐字节读，剩下的正文原样留给 cat
+	line=${line%$'\r'}
+	[ -n "$line" ] || break
+done
+if [ -n "$fail" ] && [ "$code" -ge 400 ]; then
+	report "$code"
+	echo "curl: (22) The requested URL returned error: $code" >&2
+	exit 22
+fi
+if [ -n "$out" ]; then cat <&3 > "$out"; else cat <&3; fi
+report "$code"
+SHIM
+	chmod 0755 /run/display-firstboot/curl
+	PATH="/run/display-firstboot:$PATH"
+	export PATH
+fi
 while :; do
 	say "开始装机（$BOOTSTRAP）"
 	# 输出同时写到 HDMI 屏幕（tty1）与日志；管道会吞掉退出码，所以另存
