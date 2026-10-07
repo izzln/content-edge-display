@@ -10,7 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/izzln/content-edge-display/internal/fsutil"
 )
 
 // downloadFile 经 .part 临时文件断点续传下载 urlPath 到 dst，边写边算 sha256，校验通过才改名。
@@ -31,7 +34,28 @@ func (a *Agent) downloadFile(ctx context.Context, urlPath, wantSHA string, size 
 		os.Remove(part) // 等下次重下
 		return fmt.Errorf("sha256 mismatch: got %s want %s", sum, wantSHA)
 	}
-	return os.Rename(part, dst)
+	// 先落盘再改名：current.json 是 fsync 过的，它引用的文件也必须是。否则下完不久断电（设备没有 UPS），
+	// 重启后 current.json 还在、文件却是空的，断网时恢复不了播放。
+	if err := syncFile(part); err != nil {
+		return err
+	}
+	if err := os.Rename(part, dst); err != nil {
+		return err
+	}
+	fsutil.SyncDir(filepath.Dir(dst))
+	return nil
+}
+
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // hashExisting 把上次下载中断留下的 .part 喂进 h，返回续传起点；比目标还大的残留只能重来。

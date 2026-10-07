@@ -34,7 +34,11 @@ type GST struct {
 	script        string   // 运行时写出的脚本路径
 	width, height int      // 显示输出分辨率：显示模式、叠加图光栅化都按它
 
-	callTimeout   time.Duration // 一次请求等多久回复
+	callTimeout time.Duration // 一次请求等多久回复
+	// startTimeout 是播放进程启动后等第一个回复（config）的时间。它启动时要先初始化 GStreamer：
+	// 装机或 OTA 后第一次运行要扫描全部插件、建插件缓存，H3 上要几十秒到一两分钟。等不及就杀掉重来的话，
+	// 缓存永远建不完（扫完才写），播放进程就永远起不来。
+	startTimeout  time.Duration
 	watchInterval time.Duration // 看门狗（兼状态查询）间隔
 	restartDelay  time.Duration // 播放进程退出后隔多久重启；接连起不来（如 HDMI 没接）时翻倍，最长 maxRestartDelay
 
@@ -53,7 +57,7 @@ type GST struct {
 func NewGST(dir string, width, height int) *GST {
 	return &GST{
 		python: "python3", script: filepath.Join(dir, "gstplayer.py"), width: width, height: height,
-		callTimeout: 5 * time.Second, watchInterval: 10 * time.Second, restartDelay: 2 * time.Second,
+		callTimeout: 5 * time.Second, startTimeout: 3 * time.Minute, watchInterval: 10 * time.Second, restartDelay: 2 * time.Second,
 		wake: make(chan struct{}, 1), brightness: 100,
 	}
 }
@@ -246,11 +250,15 @@ func (p *GST) runOnce(ctx context.Context) {
 		p.mu.Unlock()
 	}()
 
-	if err := proc.call(map[string]any{"cmd": "config", "width": p.width, "height": p.height}, nil); err != nil {
+	started := time.Now()
+	if err := proc.callWithin(map[string]any{"cmd": "config", "width": p.width, "height": p.height}, nil, p.startTimeout); err != nil {
 		log.Printf("player(gst): configure failed: %v", err)
 		cmd.Process.Kill()
 		cmd.Wait()
 		return
+	}
+	if d := time.Since(started); d > 10*time.Second {
+		log.Printf("player(gst): player process took %s to start (first run after an install builds the GStreamer plugin cache)", d.Round(time.Second))
 	}
 	p.mu.Lock()
 	p.proc = proc
@@ -324,7 +332,10 @@ type gstProc struct {
 }
 
 // call 发出请求并等回复；out 非 nil 时把回复解码进去。
-func (g *gstProc) call(req map[string]any, out any) error {
+func (g *gstProc) call(req map[string]any, out any) error { return g.callWithin(req, out, g.timeout) }
+
+// callWithin 同 call，最多等 d。
+func (g *gstProc) callWithin(req map[string]any, out any, d time.Duration) error {
 	ch := make(chan json.RawMessage, 1)
 	g.mu.Lock()
 	g.lastID++
@@ -361,8 +372,8 @@ func (g *gstProc) call(req map[string]any, out any) error {
 		return nil
 	case <-g.dead:
 		return errors.New("player process exited")
-	case <-time.After(g.timeout):
-		return errors.New("timeout")
+	case <-time.After(d):
+		return fmt.Errorf("no reply within %s", d)
 	}
 }
 
