@@ -7,7 +7,7 @@
 #   → 同目录下 <原名>-display.img，用 balenaEtcher 等烧到 TF 卡，插卡上电即可
 #
 # ROOT_PASSWORD 是装机期间的临时密码（现场控制台用）；设备注册后换成后台「设备访问」里统一设置的密码。
-# 公版 minimal 镜像没有 curl：首次开机用 bash 写的替身下载 install.sh 与程序包（装机入口是 http://）。
+# 公版 minimal 镜像没有 curl：镜像里放一个 bash 写的替身，首次开机用它下载 install.sh 与程序包（装机入口是 http://）。
 # 可选：HDMI_MODE、HDMI_FORCE、CMA（同一键装机命令）。
 # 镜像里带着注册口令和 root 密码的哈希：当作机密保管，别外传。装机成功后设备上的这两样会被删掉
 # （注册口令仍在 agent.json 里，与手工装机相同）。
@@ -62,21 +62,13 @@ umask 077
 } > "$MNT/etc/display-firstboot.env"
 umask 022
 
-cat > "$MNT/usr/local/sbin/display-firstboot" <<'SCRIPT'
-#!/bin/sh
-# 由 make-image.sh 写入：首次开机执行一键装机（失败隔 30 秒重试，原因显示在屏幕上），成功后删掉自己并重启。
-set -a
-. /etc/display-firstboot.env
-set +a
-export NO_REBOOT=1
-say() { echo "== display-firstboot: $*" | tee -a /dev/tty1; }
-# 公版 Armbian 的 minimal 镜像没有 curl。装机只需从装机入口（http://）下载 install.sh 与程序包，
-# 这里写一个 bash（/dev/tcp）实现的替身放到 PATH 最前面，install.sh 里的 curl 也就用它。/run 是内存盘，重启即消失。
-if ! command -v curl >/dev/null 2>&1; then
-	mkdir -p /run/display-firstboot
-	cat > /run/display-firstboot/curl <<'SHIM'
+# 公版 Armbian 的 minimal 镜像没有 curl，而装机要从装机入口（http://）下载 install.sh 与程序包：
+# 放一个 bash（/dev/tcp）实现的替身，首次开机发现没有 curl 时把它所在目录放到 PATH 最前面。
+# 放在根分区而不是开机时写进 /run：/run 挂载为 noexec 时写进去的替身执行不了（Permission denied）。
+mkdir -p "$MNT/usr/local/lib/display-firstboot"
+cat > "$MNT/usr/local/lib/display-firstboot/curl" <<'SHIM'
 #!/bin/bash
-# curl 替身（display-firstboot 写入）：只支持 http://，只认装机用到的参数：
+# curl 替身（make-image.sh 写入，装机完成后删除）：只支持 http://，只认装机用到的参数：
 # -f -s -S -L（可合写，如 -fsS）、--connect-timeout 秒、-o 文件、-w '%{http_code}'、-H 请求头（可多个）、URL
 if [ -z "${CURL_SHIM_INNER:-}" ]; then
 	CURL_SHIM_INNER=1 exec timeout 600 "$0" "$@" # 整次传输最长 10 分钟
@@ -135,8 +127,19 @@ fi
 if [ -n "$out" ]; then cat <&3 > "$out"; else cat <&3; fi
 report "$code"
 SHIM
-	chmod 0755 /run/display-firstboot/curl
-	PATH="/run/display-firstboot:$PATH"
+chmod 0755 "$MNT/usr/local/lib/display-firstboot/curl"
+
+cat > "$MNT/usr/local/sbin/display-firstboot" <<'SCRIPT'
+#!/bin/sh
+# 由 make-image.sh 写入：首次开机执行一键装机（失败隔 30 秒重试，原因显示在屏幕上），成功后删掉自己并重启。
+set -a
+. /etc/display-firstboot.env
+set +a
+export NO_REBOOT=1
+say() { echo "== display-firstboot: $*" | tee -a /dev/tty1; }
+# 公版 Armbian 的 minimal 镜像没有 curl：用做镜像时放进去的 bash 替身（见 make-image.sh），install.sh 里的 curl 也就用它
+if ! command -v curl >/dev/null 2>&1; then
+	PATH="/usr/local/lib/display-firstboot:$PATH"
 	export PATH
 fi
 while :; do
@@ -149,6 +152,7 @@ while :; do
 done
 systemctl disable display-firstboot.service
 rm -f /etc/display-firstboot.env /etc/systemd/system/display-firstboot.service /usr/local/sbin/display-firstboot
+rm -rf /usr/local/lib/display-firstboot
 say "装机完成，重启"
 reboot
 SCRIPT
